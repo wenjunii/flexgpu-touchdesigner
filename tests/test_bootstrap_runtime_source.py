@@ -31,7 +31,7 @@ class BootstrapRuntimeSourceTests(unittest.TestCase):
         ast.parse(self.source)
         ast.parse(self.runtime)
         ast.parse(self.callbacks)
-        self.assertEqual(self.module.BUILD_VERSION, "1.1.0")
+        self.assertEqual(self.module.BUILD_VERSION, "1.2.0")
 
     def test_transport_config_and_environment_keys_are_embedded(self) -> None:
         for name in (

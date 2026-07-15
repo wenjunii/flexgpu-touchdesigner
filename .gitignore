@@ -67,6 +67,9 @@ vendor-private/
 runtime/
 logs/
 calibration/
+captures/
+commissioning/
+recordings/
 models/
 weights/
 checkpoints/

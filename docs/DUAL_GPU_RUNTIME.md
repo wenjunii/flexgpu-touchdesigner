@@ -1,9 +1,11 @@
 # Dual-GPU and two-machine runtime
 
-Runtime builder `1.1.0` creates a direct image bridge at
+Runtime builder source `1.2.0` defines a direct image bridge at
 `/project1/flexgpu/WORKING_PIPELINE/ROLE_BRIDGE`. The launcher starts the same
 project once per assigned role; startup policy activates only the stages owned
-by that role.
+by that role. The tracked `projects/FlexShow.toe` was not rebuilt for this v1.2
+update, so rebuild and inspect a local project before relying on the new
+calibration, temporal-lifecycle, or auto-load behavior.
 
 | Process role | Cooks | Does not cook |
 | --- | --- | --- |
@@ -11,10 +13,18 @@ by that role.
 | `world` in a split topology | atlas receiver/unpack, reconstruction, sensor, persistence, completion, selected outputs | demo and `STREAMDIFFUSION_ADAPTER`, sender, unselected output |
 | `world` in `single` | local source and complete selected show pipeline | transport endpoints and unselected output |
 
-This preserves the StreamDiffusion replacement boundary. Put the real `.tox`
-under `WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER` and keep its normalized
-RGB and depth connections on `OUT_RGB` and `OUT_DEPTH`; the role bridge is
-downstream and needs no model-specific change.
+This preserves the StreamDiffusion replacement boundary. Manual wiring under
+`WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER` remains supported. For a
+private config-driven integration, set `source.auto_load_tox: true`, point
+`streamdiffusion_tox` at an ignored local file, and provide `rgb_operator` plus
+any optional depth/mask/confidence operators inside it. In a split plan, role
+gates restrict source ownership to AI: the AI process loads/cooks the source
+component and the world process does not import it. Sensor `.tox` ownership is
+the inverse and is limited to world. The role bridge remains downstream and
+needs no model-specific change. A missing file, load error, or unresolved
+required output keeps the demo active and records fallback state. Auto-load
+does not install the model, Python/CUDA dependencies, prompts, weights, or
+licenses.
 
 With `tier: auto`, the launcher resolves each process against its assigned GPU
 and injects a separate `FLEXGPU_TIER` plus quality limits. A heterogeneous 5090
@@ -37,6 +47,25 @@ from `transport.atlas_fps`.
 
 Single topology bypasses both pack and unpack, so it keeps the direct local TOP
 path.
+
+## Choose local GPU placement
+
+Before writing UUIDs into a local preset, capture one read-only hardware
+snapshot:
+
+```powershell
+python tools/profile_flexshow.py `
+  --topology dual_local `
+  --output runtime/hardware-profile.json
+```
+
+The recommendation considers current VRAM capacity/headroom and display
+ownership and reports UUID/PCI identity, load, thermals, clocks, and optional
+power values. It is only an initial commissioning hint. It does not benchmark
+StreamDiffusionTD or rendering, run a thermal soak, reassign roles dynamically,
+or plan `dual_network`. Test both sensible placements with the complete workload,
+save the selected UUIDs in a gitignored config, and do not move roles while the
+show is running.
 
 ## Dual local
 
@@ -76,6 +105,31 @@ The implemented Python reference in
 contract for an adapter that needs those fields. Do not describe the built-in
 Touch/Shared-Mem bridge as WorldBus v1.
 
+## World-side calibration and completion
+
+Reconstruction, temporal persistence, interaction, fog, procedural backfill,
+and point rendering cook only in the `world` process. A local validated
+`flexgpu-calibration/v1` profile can supply depth convention/range, intrinsics,
+and camera-to-world/sensor-to-world transforms. Position, color, confidence,
+and normalized age then persist between received AI updates, and a material
+resolution/session/calibration/adapter contract change resets that history.
+
+The direct atlas carries only RGB and depth. Source mask, confidence, frame
+state, camera metadata, and calibration are **not** transmitted. A split show
+that needs those fields must provide matching local calibration/defaults on the
+world side or implement the full WorldBus adapter; never assume they crossed
+with the atlas. This is especially important for two-machine profiles, where
+private config-relative files must exist on the node that consumes them. A
+world receiver applies an explicit shared source calibration without importing
+the AI `.tox`; if that calibration is invalid, world and output stages are
+disabled instead of rendering a knowingly wrong reconstruction.
+
+Thick point size and view-specific disocclusion fog help cover temporal gaps;
+procedural backfill writes invented volume only into missing-position holes,
+and hybrid blends those approaches. These are continuity effects, not true
+hidden-surface recovery. Fog can conceal a seam but cannot restore missing
+geometry or make stale transport correct.
+
 ## Runtime inspection
 
 Inspect these operators while both processes are running:
@@ -89,12 +143,48 @@ Inspect these operators while both processes are running:
 The split `world` role never falls back to its local generator. That prevents a
 transport interruption from silently duplicating AI work on the render GPU.
 
+## Status and bounded AI recovery
+
+Inspect launcher-owned state without creating a runtime directory, acquiring a
+mutation lock, starting a process, or sending a shutdown signal:
+
+```powershell
+.\scripts\Status-FlexShow.ps1 `
+  -Config config\presets\local-show.json
+.\scripts\Status-FlexShow.ps1 `
+  -Config config\presets\local-show.json `
+  -Json
+```
+
+Status distinguishes stopped, running, transitional, degraded, and ownership
+error session state and reports each role/PID/launch state with identity
+verification. It is manifest/process status, not a proof that TouchDesigner is
+cooking useful frames.
+
+Recovery is also a preview unless explicitly authorized:
+
+```powershell
+.\scripts\Recover-FlexShow.ps1 `
+  -Config config\presets\local-show.json
+.\scripts\Recover-FlexShow.ps1 `
+  -Config config\presets\local-show.json `
+  -Attempts 2 `
+  -Recover
+```
+
+It supports one through three bounded attempts and only a separately planned
+AI role. It requires the world dependency to be healthy, reruns preflight, and
+never implicitly restarts world/render. A healthy AI is reused unless the
+operator explicitly adds `-RestartRunning -Recover`. This is not a background
+watchdog and does not add heartbeats to the direct atlas bridge.
+
 ## Live-validation status
 
-Source tests cover atlas packing, endpoint configuration, role policy, stage
-gates, and per-role tier injection. Build `1.1.0` was rebuilt and health-checked
-in TouchDesigner 2025.32820 on the RTX 3080 Ti Laptop 16 GB machine. Sequential
-AI-role and world-role checks verified the Shared Mem sender/receiver gates,
-atomic atlas dimensions, and clean operator state. A simultaneous two-process
-Shared Mem soak and a two-machine Touch TCP soak remain deployment tests; no
-dual-GPU throughput claim is made from the sequential check.
+Source tests cover atlas configuration, role policy/stage gates, per-role tier
+injection, configuration contracts, and launcher ownership/recovery behavior.
+The v1.2 source foundation has **not** been rebuilt into or visually validated
+through the tracked `projects/FlexShow.toe` for this update. It has not been run
+here with the private StreamDiffusionTD `.tox`, a simultaneous physical
+dual-GPU workload, a two-machine Touch TCP soak, a depth sensor, projection/LED
+outputs, or a headset. No throughput, failover-time, calibration, stereo
+comfort, or venue-readiness claim should be inferred from the automated tests.

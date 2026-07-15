@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from copy import deepcopy
 from pathlib import Path
@@ -111,6 +112,103 @@ TRANSPORT_FIELDS = {
     "hold_last_complete_frame",
 }
 LOOPBACK_PEERS = {"127.0.0.1", "localhost", "::1"}
+
+TOP_LEVEL_FIELDS = {
+    "$schema",
+    "topology",
+    "experience",
+    "experience_mode",
+    "completion",
+    "completion_mode",
+    "tier",
+    "profile",
+    "node_role",
+    "gpu",
+    "gpus",
+    "processes",
+    "process",
+    "transport",
+    "adaptive",
+    "telemetry",
+    "source",
+    "sensor",
+    "render",
+    "runtime_dir",
+}
+
+RUNTIME_SECTION_FIELDS = {
+    "adaptive": {
+        "enabled",
+        "levels",
+        "initial_level",
+        "frame_budget_ms",
+        "queue_budget_ms",
+        "down_window",
+        "up_window",
+        "cooldown_samples",
+        "thresholds",
+    },
+    "telemetry": {
+        "enabled",
+        "jsonl_path",
+        "summary_path",
+        "sample_interval_frames",
+        "flush_every",
+        "include_operator_metrics",
+    },
+    "source": {
+        "mode",
+        "streamdiffusion_tox",
+        "replay_path",
+        "rgb_operator",
+        "depth_operator",
+        "mask_operator",
+        "confidence_operator",
+        "frame_state_operator",
+        "camera_metadata_operator",
+        "calibration_path",
+        "auto_load_tox",
+        "stale_timeout_ms",
+    },
+    "sensor": {
+        "mode",
+        "adapter_tox",
+        "replay_path",
+        "mask_operator",
+        "position_operator",
+        "confidence_operator",
+        "frame_state_operator",
+        "calibration_path",
+        "auto_load_tox",
+        "interaction_radius_m",
+        "force_gain",
+        "stale_timeout_ms",
+    },
+    "render": {
+        "point_size_px",
+        "point_budget",
+        "installation_width",
+        "installation_height",
+        "installation_fps",
+        "stereo_width",
+        "stereo_height",
+        "vr_fps",
+        "fog_density",
+        "procedural_mix",
+    },
+}
+
+ADAPTIVE_THRESHOLD_FIELDS = {
+    "frame_low",
+    "frame_high",
+    "vram_low",
+    "vram_high",
+    "queue_low",
+    "queue_high",
+    "critical_frame",
+    "critical_vram",
+    "critical_queue",
+}
 
 
 def _choice(
@@ -485,6 +583,314 @@ def _process_definition(
     )
 
 
+def _strict_object_pairs(pairs: Sequence[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError("non-finite JSON number is not allowed")
+
+
+def _runtime_mapping(
+    raw: Mapping[str, Any], section: str, errors: list[str]
+) -> Mapping[str, Any] | None:
+    if section not in raw:
+        return None
+    value = raw.get(section)
+    if not isinstance(value, Mapping):
+        errors.append("%s must be an object" % section)
+        return None
+    for key in sorted(
+        set(value).difference(RUNTIME_SECTION_FIELDS[section]), key=lambda item: repr(item)
+    ):
+        errors.append("%s has unsupported field %r" % (section, key))
+    return value
+
+
+def _runtime_bool(
+    section: Mapping[str, Any], key: str, prefix: str, errors: list[str]
+) -> None:
+    if key in section and type(section[key]) is not bool:
+        errors.append("%s.%s must be true or false" % (prefix, key))
+
+
+def _runtime_string(
+    section: Mapping[str, Any], key: str, prefix: str, errors: list[str]
+) -> None:
+    if key not in section:
+        return
+    value = section[key]
+    if not isinstance(value, str) or not value.strip():
+        errors.append("%s.%s must be a non-empty string" % (prefix, key))
+    elif any(ord(character) < 32 for character in value):
+        errors.append("%s.%s must not contain control characters" % (prefix, key))
+
+
+def _runtime_integer(
+    section: Mapping[str, Any],
+    key: str,
+    prefix: str,
+    errors: list[str],
+    minimum: int,
+    maximum: int,
+) -> int | None:
+    if key not in section:
+        return None
+    value = section[key]
+    if type(value) is not int:
+        errors.append("%s.%s must be an integer" % (prefix, key))
+        return None
+    if not minimum <= value <= maximum:
+        errors.append(
+            "%s.%s must be between %d and %d"
+            % (prefix, key, minimum, maximum)
+        )
+        return None
+    return value
+
+
+def _runtime_number(
+    section: Mapping[str, Any],
+    key: str,
+    prefix: str,
+    errors: list[str],
+    minimum: float,
+    maximum: float,
+    *,
+    exclusive_minimum: bool = False,
+) -> float | None:
+    if key not in section:
+        return None
+    value = section[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        errors.append("%s.%s must be numeric" % (prefix, key))
+        return None
+    try:
+        normalized = float(value)
+    except (OverflowError, ValueError):
+        errors.append("%s.%s must be finite" % (prefix, key))
+        return None
+    if not math.isfinite(normalized):
+        errors.append("%s.%s must be finite" % (prefix, key))
+        return None
+    below = normalized <= minimum if exclusive_minimum else normalized < minimum
+    if below or normalized > maximum:
+        relation = "greater than" if exclusive_minimum else "at least"
+        errors.append(
+            "%s.%s must be %s %g and at most %g"
+            % (prefix, key, relation, minimum, maximum)
+        )
+        return None
+    return normalized
+
+
+def _runtime_output_path(value: object, source_path: str) -> str:
+    expanded = os.path.expandvars(os.path.expanduser(str(value)))
+    if not os.path.isabs(expanded):
+        base = os.path.dirname(os.path.abspath(source_path)) if source_path else os.getcwd()
+        expanded = os.path.join(base, expanded)
+    return os.path.normcase(os.path.abspath(os.path.normpath(expanded)))
+
+
+def _validate_runtime_sections(
+    raw: Mapping[str, Any], errors: list[str], source_path: str = ""
+) -> None:
+    adaptive = _runtime_mapping(raw, "adaptive", errors)
+    if adaptive is not None:
+        _runtime_bool(adaptive, "enabled", "adaptive", errors)
+        levels = _runtime_integer(adaptive, "levels", "adaptive", errors, 2, 16)
+        initial = _runtime_integer(adaptive, "initial_level", "adaptive", errors, 0, 15)
+        _runtime_number(
+            adaptive, "frame_budget_ms", "adaptive", errors, 0, 1000,
+            exclusive_minimum=True,
+        )
+        _runtime_number(
+            adaptive, "queue_budget_ms", "adaptive", errors, 0, 60000,
+            exclusive_minimum=True,
+        )
+        _runtime_integer(adaptive, "down_window", "adaptive", errors, 1, 100000)
+        _runtime_integer(adaptive, "up_window", "adaptive", errors, 1, 100000)
+        _runtime_integer(
+            adaptive, "cooldown_samples", "adaptive", errors, 0, 100000
+        )
+        selected_levels = 5 if levels is None else levels
+        if initial is not None and initial >= selected_levels:
+            errors.append("adaptive.initial_level must be lower than adaptive.levels")
+
+        thresholds = adaptive.get("thresholds")
+        if thresholds is not None:
+            if not isinstance(thresholds, Mapping):
+                errors.append("adaptive.thresholds must be an object")
+            else:
+                for key in sorted(set(thresholds).difference(ADAPTIVE_THRESHOLD_FIELDS)):
+                    errors.append("adaptive.thresholds has unsupported field %r" % key)
+                bounds = {
+                    "frame_low": (0.0, 10.0, False),
+                    "frame_high": (0.0, 10.0, True),
+                    "vram_low": (0.0, 1.0, False),
+                    "vram_high": (0.0, 1.0, True),
+                    "queue_low": (0.0, 10.0, False),
+                    "queue_high": (0.0, 10.0, True),
+                    "critical_frame": (0.0, 20.0, True),
+                    "critical_vram": (0.0, 1.0, True),
+                    "critical_queue": (0.0, 20.0, True),
+                }
+                values: dict[str, float] = {
+                    "frame_low": 0.82,
+                    "frame_high": 1.08,
+                    "vram_low": 0.76,
+                    "vram_high": 0.90,
+                    "queue_low": 0.55,
+                    "queue_high": 1.15,
+                    "critical_frame": 2.0,
+                    "critical_vram": 0.97,
+                    "critical_queue": 3.0,
+                }
+                for key, (minimum, maximum, exclusive) in bounds.items():
+                    parsed = _runtime_number(
+                        thresholds,
+                        key,
+                        "adaptive.thresholds",
+                        errors,
+                        minimum,
+                        maximum,
+                        exclusive_minimum=exclusive,
+                    )
+                    if parsed is not None:
+                        values[key] = parsed
+                for prefix in ("frame", "vram", "queue"):
+                    if not values[prefix + "_low"] < values[prefix + "_high"]:
+                        errors.append(
+                            "adaptive.thresholds.%s_low must be below %s_high"
+                            % (prefix, prefix)
+                        )
+                    if not values["critical_" + prefix] > values[prefix + "_high"]:
+                        errors.append(
+                            "adaptive.thresholds.critical_%s must exceed %s_high"
+                            % (prefix, prefix)
+                        )
+
+    telemetry = _runtime_mapping(raw, "telemetry", errors)
+    if telemetry is not None:
+        for key in ("enabled", "include_operator_metrics"):
+            _runtime_bool(telemetry, key, "telemetry", errors)
+        for key in ("jsonl_path", "summary_path"):
+            _runtime_string(telemetry, key, "telemetry", errors)
+        _runtime_integer(
+            telemetry, "sample_interval_frames", "telemetry", errors, 1, 100000
+        )
+        _runtime_integer(telemetry, "flush_every", "telemetry", errors, 1, 100000)
+        if (
+            telemetry.get("jsonl_path")
+            and telemetry.get("summary_path")
+            and _runtime_output_path(telemetry["jsonl_path"], source_path)
+            == _runtime_output_path(telemetry["summary_path"], source_path)
+        ):
+            errors.append("telemetry JSONL and summary paths must be different")
+
+    source = _runtime_mapping(raw, "source", errors)
+    if source is not None:
+        mode = source.get("mode")
+        if mode is not None and mode not in {"demo", "streamdiffusion", "worldbus", "replay"}:
+            errors.append("source.mode is unsupported")
+        for key in sorted(
+            RUNTIME_SECTION_FIELDS["source"].difference(
+                {"mode", "auto_load_tox", "stale_timeout_ms"}
+            )
+        ):
+            _runtime_string(source, key, "source", errors)
+        _runtime_bool(source, "auto_load_tox", "source", errors)
+        _runtime_integer(source, "stale_timeout_ms", "source", errors, 1, 600000)
+        if mode == "replay" and not source.get("replay_path"):
+            errors.append("source.replay_path is required when source.mode is replay")
+        if source.get("auto_load_tox") is True:
+            if not source.get("streamdiffusion_tox"):
+                errors.append(
+                    "source.streamdiffusion_tox is required when source.auto_load_tox is true"
+                )
+            if not source.get("rgb_operator"):
+                errors.append(
+                    "source.rgb_operator is required when source.auto_load_tox is true"
+                )
+
+    sensor = _runtime_mapping(raw, "sensor", errors)
+    if sensor is not None:
+        mode = sensor.get("mode")
+        if mode is not None and mode not in {"simulated", "depth_sensor", "replay", "disabled"}:
+            errors.append("sensor.mode is unsupported")
+        for key in (
+            "adapter_tox",
+            "replay_path",
+            "mask_operator",
+            "position_operator",
+            "confidence_operator",
+            "frame_state_operator",
+            "calibration_path",
+        ):
+            _runtime_string(sensor, key, "sensor", errors)
+        _runtime_bool(sensor, "auto_load_tox", "sensor", errors)
+        _runtime_number(
+            sensor, "interaction_radius_m", "sensor", errors, 0, 20,
+            exclusive_minimum=True,
+        )
+        _runtime_number(sensor, "force_gain", "sensor", errors, 0, 100)
+        _runtime_integer(sensor, "stale_timeout_ms", "sensor", errors, 1, 600000)
+        if mode == "replay" and not sensor.get("replay_path"):
+            errors.append("sensor.replay_path is required when sensor.mode is replay")
+        if sensor.get("auto_load_tox") is True:
+            if not sensor.get("adapter_tox"):
+                errors.append(
+                    "sensor.adapter_tox is required when sensor.auto_load_tox is true"
+                )
+            if not sensor.get("position_operator"):
+                errors.append(
+                    "sensor.position_operator is required when sensor.auto_load_tox is true"
+                )
+
+    render = _runtime_mapping(raw, "render", errors)
+    if render is not None:
+        _runtime_number(
+            render, "point_size_px", "render", errors, 0, 128,
+            exclusive_minimum=True,
+        )
+        _runtime_integer(render, "point_budget", "render", errors, 1000, 10000000)
+        for key in (
+            "installation_width",
+            "installation_height",
+            "stereo_width",
+            "stereo_height",
+        ):
+            _runtime_integer(render, key, "render", errors, 64, 16384)
+        for key in ("installation_fps", "vr_fps"):
+            _runtime_integer(render, key, "render", errors, 1, 240)
+        _runtime_number(render, "fog_density", "render", errors, 0, 10)
+        _runtime_number(render, "procedural_mix", "render", errors, 0, 1)
+
+
+def _validate_json_compatible(value: Any, path: str, errors: list[str]) -> None:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                errors.append("%s contains a non-string object key" % path)
+                continue
+            _validate_json_compatible(item, "%s.%s" % (path, key), errors)
+        return
+    if isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            _validate_json_compatible(item, "%s[%d]" % (path, index), errors)
+        return
+    if value is None or isinstance(value, (str, bool, int)):
+        return
+    if isinstance(value, float) and math.isfinite(value):
+        return
+    errors.append("%s must be a finite JSON-compatible value" % path)
+
+
 def load_config_data(path: str | os.PathLike[str]) -> Mapping[str, Any]:
     """Load JSON, or TOML when the embedded Python provides ``tomllib``."""
 
@@ -499,8 +905,12 @@ def load_config_data(path: str | os.PathLike[str]) -> Mapping[str, Any]:
 
             parsed = tomllib.loads(data.decode("utf-8"))
         else:
-            parsed = json.loads(data.decode("utf-8-sig"))
-    except (ValueError, UnicodeError) as exc:
+            parsed = json.loads(
+                data.decode("utf-8-sig"),
+                object_pairs_hook=_strict_object_pairs,
+                parse_constant=_reject_json_constant,
+            )
+    except (ImportError, ValueError, UnicodeError) as exc:
         raise ConfigError(["unable to parse config %s: %s" % (source, exc)]) from exc
     if not isinstance(parsed, Mapping):
         raise ConfigError(["config root must be an object"])
@@ -522,6 +932,21 @@ def validate_config(
             if value is not None:
                 raw[key] = value
     errors: list[str] = []
+    _validate_json_compatible(raw, "config", errors)
+    for key in sorted(set(raw).difference(TOP_LEVEL_FIELDS), key=lambda item: repr(item)):
+        errors.append("config has unsupported top-level field %r" % key)
+    for canonical, alias in (
+        ("experience", "experience_mode"),
+        ("completion", "completion_mode"),
+        ("tier", "profile"),
+        ("gpu", "gpus"),
+        ("processes", "process"),
+    ):
+        if canonical in raw and alias in raw:
+            errors.append("config cannot set both %s and %s" % (canonical, alias))
+    if "$schema" in raw and not isinstance(raw["$schema"], str):
+        errors.append("$schema must be a string")
+    _validate_runtime_sections(raw, errors, source_path)
     topology = _choice(raw.get("topology", "single"), TOPOLOGY_ALIASES, "topology", errors)
     experience = _choice(
         raw.get("experience", raw.get("experience_mode", "installation")),

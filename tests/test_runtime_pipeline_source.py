@@ -33,15 +33,20 @@ class RuntimePipelineSourceTests(unittest.TestCase):
 
     def test_shader_names_are_stable_and_complete(self) -> None:
         expected = {
+            "validity_combine",
             "depth_to_position",
             "sensor_position",
+            "sensor_to_world",
             "interaction_field",
+            "temporal_state",
             "temporal_persistence",
+            "temporal_color",
             "fog_completion",
             "procedural_backfill",
             "procedural_color",
             "hybrid_completion",
             "installation_grade",
+            "view_completion",
             "transport_pack_atlas",
             "transport_unpack_rgb",
             "transport_unpack_depth",
@@ -60,15 +65,30 @@ class RuntimePipelineSourceTests(unittest.TestCase):
     def test_position_and_persistence_contracts_keep_active_alpha(self) -> None:
         depth = self.module.SHADERS["depth_to_position"]
         temporal = self.module.SHADERS["temporal_persistence"]
-        self.assertIn("vec4(position, valid)", depth)
-        self.assertIn("XYZ metres + active alpha", depth)
-        self.assertIn("POSITION + HISTORY + INTERACTION", temporal)
-        self.assertIn("persistenceDecay", temporal)
+        self.assertIn("vec4(worldPosition, valid * confidence)", depth)
+        self.assertIn("world XYZ metres + active alpha", depth)
+        self.assertIn("POSITION + HISTORY + INTERACTION + TEMPORAL_STATE", temporal)
+        self.assertIn("state.r", temporal)
         self.assertIn("interaction.rgb", temporal)
         self.assertIn("vec4(position, activity)", temporal)
         self.assertNotIn("float active =", temporal)
         self.assertIn('"resolutionTOP", "COLOR_ALIGNED_RESIZE"', self.source)
         self.assertIn('"Geometryresolution", 384', self.source)
+
+    def test_calibrated_reconstruction_contract_has_safe_depth_modes(self) -> None:
+        depth = self.module.SHADERS["depth_to_position"]
+        for marker in (
+            "FLEXGPU_DEPTH_MODE", "FLEXGPU_DEPTH_SCALE", "FLEXGPU_DEPTH_BIAS",
+            "FLEXGPU_INTRINSICS_FX", "FLEXGPU_INTRINSICS_FY",
+            "FLEXGPU_CAMERA_TO_WORLD_0", "FLEXGPU_CAMERA_TO_WORLD_3",
+        ):
+            self.assertIn(marker, depth)
+        self.assertIn("depthMode == 1", depth)
+        self.assertIn("depthMode == 2", depth)
+        self.assertIn("CONFIDENCE_IN", self.source)
+        self.assertIn("CONFIDENCE_ALIGNED_RESIZE", self.source)
+        self.assertIn('"Depthmode", "normalized"', self.source)
+        self.assertIn('"Cameratoworld0", "1 0 0 0"', self.source)
 
     def test_color_alignment_migrates_legacy_null_without_destroying_it(self) -> None:
         # 1.0.0 used a nullTOP named COLOR_ALIGNED. Generic _ensure reuses by
@@ -108,11 +128,22 @@ class RuntimePipelineSourceTests(unittest.TestCase):
     def test_public_top_contracts_cover_render_sensor_installation_and_stereo(self) -> None:
         expected = {
             "RGB", "DEPTH", "POSITION", "COLOR", "SENSOR_POSITION",
-            "INTERACTION", "INSTALLATION", "STEREO",
+            "CONFIDENCE", "TEMPORAL_STATE", "INTERACTION", "INSTALLATION",
+            "STEREO",
         }
         self.assertEqual(set(self.module.TOP_CONTRACTS), expected)
         self.assertIn("XYZ metres", self.module.TOP_CONTRACTS["POSITION"])
         self.assertIn("side-by-side", self.module.TOP_CONTRACTS["STEREO"])
+
+    def test_sensor_interaction_uses_calibrated_world_positions(self) -> None:
+        interaction = self.module.SHADERS["interaction_field"]
+        self.assertIn("calibrated SENSOR_POSITION", interaction)
+        self.assertIn("distanceMetres", interaction)
+        self.assertIn("interactionRadiusMetres", interaction)
+        self.assertNotIn("vec2 radial", interaction)
+        self.assertIn("DEPTH_SENSOR_ADAPTER", self.source)
+        self.assertIn("REPLACE_WITH_CALIBRATED_SENSOR_POSITION", self.source)
+        self.assertIn("SENSOR_POSITION_SOURCE", self.source)
 
     def test_streamdiffusion_boundary_is_unmistakable(self) -> None:
         required_names = (
@@ -128,6 +159,13 @@ class RuntimePipelineSourceTests(unittest.TestCase):
         self.assertIn("use_stream.name", self.source)
         self.assertIn("use_depth.name", self.source)
         self.assertIn("canonical_name", self.source)
+        bootstrap = (ROOT / "touchdesigner" / "bootstrap_project.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("def _auto_load_tox", bootstrap)
+        self.assertIn("if not bool(config.get('auto_load_tox', False))", bootstrap)
+        self.assertIn("holder.loadTox(path)", bootstrap)
+        self.assertIn("configured adapter was rejected; demo remains active", bootstrap)
 
     def test_role_bridge_has_real_local_shared_memory_and_network_paths(self) -> None:
         for operator_type in (
@@ -139,6 +177,7 @@ class RuntimePipelineSourceTests(unittest.TestCase):
             "TX_SHARED_ATLAS", "RX_TCP_ATLAS", "TX_TCP_ATLAS",
             "ATLAS_ROUTE", "UNPACK_ATLAS_RGB", "UNPACK_ATLAS_DEPTH",
             "RGB_ROUTE", "DEPTH_ROUTE",
+            "CONFIDENCE_ROUTE", "REMOTE_CONFIDENCE_DEFAULT",
         ):
             self.assertIn(operator_name, self.source)
         self.assertIn('"videocodec", "uncompressed"', self.source)
@@ -177,6 +216,24 @@ class RuntimePipelineSourceTests(unittest.TestCase):
     def test_feedback_history_has_a_deterministic_seed_input(self) -> None:
         self.assertIn('_connect(position, feedback, 0, 0, report)', self.source)
         self.assertIn('_set(feedback, ("targettop", "target"), persistent.path)', self.source)
+        self.assertIn('"feedbackTOP", "COLOR_HISTORY"', self.source)
+        self.assertIn('"feedbackTOP", "STATE_HISTORY"', self.source)
+        self.assertIn('"temporal_color", "temporal_color"', self.source)
+        state = self.module.SHADERS["temporal_state"]
+        self.assertIn("confidenceDecay", state)
+        self.assertIn("ageStep", state)
+        self.assertIn("carriedConfidence", state)
+
+    def test_completion_is_applied_in_each_output_view(self) -> None:
+        installation = self.module.SHADERS["installation_grade"]
+        view = self.module.SHADERS["view_completion"]
+        for shader in (installation, view):
+            self.assertIn("edgeHole", shader)
+            self.assertIn("FLEXGPU_VIEW_FOG_DENSITY", shader)
+            self.assertIn("FLEXGPU_VIEW_FOG_RADIUS", shader)
+        self.assertIn('"GRADE_LEFT_EYE", "view_completion"', self.source)
+        self.assertIn('"GRADE_RIGHT_EYE", "view_completion"', self.source)
+        self.assertIn('_set(node, "bgcolora", 0.0)', self.source)
 
     def test_actual_point_render_and_visible_outputs_are_built(self) -> None:
         for operator_name in ("toptoPOP", "rendersimpleTOP", "pointspriteMAT"):
@@ -248,7 +305,7 @@ class RuntimePipelineSourceTests(unittest.TestCase):
 
     def test_telemetry_dat_and_chop_sources_exist(self) -> None:
         for name in ("TELEMETRY_CONTRACT", "PERFORMANCE_METRICS", "infoCHOP",
-                     "OUT_PERFORMANCE", "infoDAT"):
+                     "OUT_PERFORMANCE", "LIVE_HEALTH", "infoDAT"):
             self.assertIn(name, self.source)
 
 

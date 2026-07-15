@@ -31,7 +31,9 @@ BLOCKED_DIRECTORIES = frozenset(
         ".gnupg",
         ".secrets",
         "calibration",
+        "captures",
         "checkpoints",
+        "commissioning",
         "credentials",
         "licensed",
         "local-components",
@@ -39,6 +41,7 @@ BLOCKED_DIRECTORIES = frozenset(
         "models",
         "paid",
         "private",
+        "recordings",
         "runtime",
         "secrets",
         "vendor-private",
@@ -682,6 +685,7 @@ def run_self_test() -> list[str]:
         "models/geometry.safetensors",
         "vendor/plugin.zip",
         "projects/private-copy.toe",
+        "captures/audience/frame-0001.ppm",
     )
     safe_paths = (
         "README.md",

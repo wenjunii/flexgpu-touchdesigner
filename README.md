@@ -7,6 +7,8 @@ real-time generated point world.  It supports:
 - One GPU, two GPUs in one Windows computer, or two networked computers.
 - Configuration branches for installation, VR, and combined experiences.
 - Selectors for thick-points/fog, procedural backfill, and hybrid completion.
+- Calibrated depth, confidence/age-based temporal persistence, and deterministic
+  commissioning data for adapter development.
 - A role-gated atomic RGB/depth atlas bridge for dual-GPU and two-machine
   preview pipelines, keeping AI generation off the world/render GPU.
 
@@ -21,8 +23,10 @@ Gaussian inference are likewise user-supplied adapters.
 
 - Windows 10/11 with PowerShell 5.1 or newer.
 - An NVIDIA driver that provides `nvidia-smi`.
-- TouchDesigner 2025; the included project was generated with build 2025.32820.
-- Python 3.10 or newer, or TouchDesigner's bundled Python runtime.
+- TouchDesigner 2025. The v1.2 builder sources target the 2025 API; rebuild and
+  inspect a local project before using the new runtime foundation in a show.
+- Python 3.10 or newer, or TouchDesigner's bundled Python runtime. JSON works
+  on 3.10; TOML configuration requires a runtime with `tomllib` (Python 3.11+).
 
 ## What is included
 
@@ -30,11 +34,11 @@ Gaussian inference are likewise user-supplied adapters.
 .github/workflows/  Windows CI for tests, benchmark smoke, and script parsing
 config/             validated show profiles and quality presets
 docs/               architecture and WorldBus protocol
-scripts/            Windows initialize/start/stop plus guarded public sync
+scripts/            Windows lifecycle/status/recovery plus guarded public sync
 src/flexgpu/         planner, adaptive governor, telemetry, and WorldBus reference
 tests/               runtime, transport, configuration, and publication tests
-tools/               launcher, benchmark/replay, WorldBus, and public-sync checks
-projects/            generated and validated FlexShow.toe starter
+tools/               launcher, commissioning/profile, benchmark, WorldBus, sync checks
+projects/            tracked FlexShow.toe starter plus ignored local-build path
 touchdesigner/       TD 2025 bootstrap source and integration guide
 ```
 
@@ -44,28 +48,29 @@ touchdesigner/       TD 2025 bootstrap source and integration guide
 | --- | --- |
 | GPU discovery, tier selection, process planning and affinity | Implemented and tested |
 | Safe preview/start/identity-verified stop | Implemented and tested on Windows |
-| `FlexShow.toe` component layout and runtime parameters | Generated, launchable project with a built-in demo path |
-| Depth-to-position, temporal persistence, interaction, fog and procedural backfill | Stock TouchDesigner working pipeline |
+| `FlexShow.toe` component layout and runtime parameters | v1.2 builder source is present; the tracked canonical project was not rebuilt for this update |
+| Calibrated depth, temporal confidence/age lifecycle, interaction, fog and procedural backfill | Implemented in v1.2 builder/source tests; fresh TouchDesigner visual validation is required |
 | Dual-role direct image bridge | Atomic RGBA16F RGB/depth atlas over Shared Mem or Touch TCP; stages are cook-gated by role |
 | WorldBus validation, newest-frame queue, heartbeat and replay | Dependency-free full-contract Python reference; distinct from the built-in RGB/depth-only bridge |
 | Adaptive quality and telemetry | Offline governor/benchmark plus live TD frame-start bindings, JSONL capture, and final summary |
-| StreamDiffusionTD, sensor SDK and calibration | Labelled user-supplied adapters |
-| Installation and VR | Installation/stereo desktop previews; projection mapping and headset runtime are user-supplied |
+| Commissioning and calibration | Deterministic synchronized demo/inspection tools and strict calibration contract; no physical sensor or venue calibration claim |
+| Local GPU placement | Read-only `nvidia-smi` snapshot and starting recommendation; not a benchmark or scheduler |
+| Process status and AI recovery | Read-only status plus bounded operator-authorized recovery of a separate AI role; not an autonomous watchdog |
+| StreamDiffusionTD and sensor SDK | Labelled manual boundaries plus opt-in private `.tox` loading with safe demo/simulated fallback |
+| Installation and VR | Installation/stereo development textures; projection mapping, headset runtime, pose/input, and physical validation are user-supplied |
 | SHARP and Gaussian reconstruction | Disabled external-worker adapter contracts; inference is not bundled |
 
 Experience and completion flags select the corresponding branches. The
 working pipeline is a practical prototype and integration baseline, not a
 calibrated projection system or headset application.
 
-The current runtime builders are version `1.1.0`. The canonical project was
-rebuilt, opened, rendered, and saved in TouchDesigner 2025.32820 on an RTX 3080
-Ti Laptop GPU with 16 GB VRAM. The final idempotent health pass reused 220
-managed operators in the bootstrap report, including 154 runtime-pipeline
-operators, with zero builder warnings and no operator errors. Installation and
-combined stereo desktop previews were
-both inspected. No demo FPS is presented as a performance guarantee; this pass
-excluded StreamDiffusionTD, sensor hardware, projection mapping, and a headset
-runtime.
+The current builder sources are version `1.2.0`. This production-foundation
+update has source/configuration tests, but `projects/FlexShow.toe` has **not**
+been rebuilt or visually validated for v1.2. It also has not been tested here
+with the private StreamDiffusionTD component, a physical depth sensor,
+projection/LED mapping, an OpenXR/OpenVR compositor, or a headset. Treat all
+GPU budgets as commissioning starting points until the complete local system
+passes thermal, latency, visual, and failover soaks.
 
 ## Quick start
 
@@ -120,8 +125,9 @@ manifest:
 .\scripts\Stop-FlexShow.ps1 -Config .\config\presets\local-show.json -Stop
 ```
 
-The included `projects/FlexShow.toe` is launchable with synthetic RGB, depth,
-and audience interaction. When your `StreamDiffusionTD.tox` is ready, replace
+The tracked `projects/FlexShow.toe` retains an earlier synthetic RGB/depth and
+audience-interaction starter; rebuild an ignored local v1.2 copy before testing
+the new runtime foundation. When your `StreamDiffusionTD.tox` is ready, replace
 the inputs to `OUT_RGB` and, when available, `OUT_DEPTH` inside
 `/project1/flexgpu/WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER`. Then turn
 on **Use StreamDiffusion Adapter** in the parent `SOURCES` COMP; turn on **Use
@@ -137,12 +143,88 @@ and Diagnose also accept `-NvidiaSmi C:\path\to\nvidia-smi.exe`. Config selectio
 precedence is explicit `-Config`, `FLEXSHOW_CONFIG`, `FLEXGPU_CONFIG`, then
 `config/flexshow.json`. Explicit or environment-provided relative paths resolve
 from the caller's current PowerShell directory; the default resolves from the
-repository root. The CLI accepts JSON and TOML configurations.
+repository root. The CLI accepts JSON, plus TOML when the selected Python
+runtime provides `tomllib` (Python 3.11+).
 
 For a dedicated automation process, combine `-Json -ExitWithCode` so
 `powershell.exe -File` exits with the controller's `2` (configuration) or `3`
 (diagnostic/runtime) status. `-ExitWithCode` deliberately exits that PowerShell
 host on error, so omit it during an interactive session you want to keep open.
+
+## Commission, profile, and supervise
+
+Create a small deterministic synchronized RGB/depth/mask/confidence bundle,
+verify its hashes and frame/calibration relationships, and validate the public
+synthetic calibration example:
+
+```powershell
+python tools/commission_flexshow.py demo `
+  --output commissioning/demo `
+  --frames 8 `
+  --width 64 `
+  --height 36
+python tools/commission_flexshow.py inspect commissioning/demo/manifest.json
+python tools/commission_flexshow.py calibration config/calibration.example.json
+```
+
+`demo` and `inspect` exercise the `flexgpu-commissioning/v1`,
+`flexgpu-frame-state/v1`, and `flexgpu-calibration/v1` contracts. Hash checking
+is on by default. `inspect --skip-hashes` skips payload integrity only; safe
+paths, presence, media-role/format/layout, dimensions, and frame relationships
+are still checked. The generated data and public example are synthetic. They
+do not prove camera intrinsics, depth scale, sensor-to-world alignment,
+projector mapping, or venue accuracy. The stock project does not automatically
+play the generated bundle; a production replay/capture-import adapter is still
+site-specific.
+
+Use a read-only local snapshot to choose an initial single- or dual-GPU role
+placement:
+
+```powershell
+python tools/profile_flexshow.py --topology single
+python tools/profile_flexshow.py `
+  --topology dual_local `
+  --output runtime/hardware-profile.json
+```
+
+The profiler records current VRAM headroom, utilization, thermals, clocks,
+power information when available, PCI/UUID identity, and display ownership. It
+is not a throughput benchmark, soak test, dynamic scheduler, or network-pair
+planner. Confirm its recommendation with the actual `.tox`, sensor, render
+outputs, and thermal conditions; keep the resulting JSON machine-local.
+
+Status is read-only. Recovery previews by default and, when authorized, is
+limited to a separately planned `ai` role:
+
+```powershell
+.\scripts\Status-FlexShow.ps1 -Config .\config\presets\local-show.json
+.\scripts\Status-FlexShow.ps1 -Config .\config\presets\local-show.json -Json
+
+.\scripts\Recover-FlexShow.ps1 -Config .\config\presets\local-show.json
+.\scripts\Recover-FlexShow.ps1 `
+  -Config .\config\presets\local-show.json `
+  -Attempts 2 `
+  -Recover
+```
+
+Recovery refuses a unified/single plan and an unhealthy world dependency. It
+never implicitly restarts world/render; `-RestartRunning -Recover` is the
+explicit operator choice to replace an otherwise healthy AI process. These
+commands provide ownership-checked supervisor primitives, not an autonomous
+watchdog or a TouchDesigner/WorldBus heartbeat monitor.
+
+Private source and sensor components remain manual by default. To let the v1.2
+runtime load your future component from a local config, set
+`source.auto_load_tox` to `true`, provide `streamdiffusion_tox`, and name at
+least `rgb_operator`. Paths resolve relative to the selected configuration.
+Invalid paths, load errors, or missing required outputs keep the demo active
+and record fallback state. In a split plan, only the AI process loads the
+source `.tox`; only the world process loads a sensor `.tox`. This loader does
+not install CUDA/Python packages, models, SDKs, or licenses. Because a loaded
+component can be embedded when the TouchDesigner session is saved, use this
+only in an ignored local `.toe` and never overwrite the canonical project. See
+[config/README.md](config/README.md) for the complete source/sensor example and
+calibration fields.
 
 ## Choose a deployment
 
@@ -213,6 +295,23 @@ does not change the network structure.
   installation/fog mode.
 - `4090`: higher update/geometry budget with room for measured conditioning.
 - `5090`: larger reserve for resolution, point count, or model experiments.
+
+The v1.2 reconstruction path can apply normalized, metric, millimetre,
+disparity, or inverse-depth calibration, including intrinsics and
+camera-to-world/sensor-to-world transforms. Mask and confidence participate in
+validity; temporal position, color, confidence, and normalized age persist
+between source updates. History resets on a material contract change such as
+resolution, source session/calibration epoch, calibration values, or adapter
+identity—not merely because the same config is reapplied.
+
+Completion remains deliberately artistic. Thick point size helps cover sparse
+samples. The fog branch uses nearby persistent geometry to identify
+disocclusions and adds view-specific noise/fog around those gaps. Procedural
+backfill writes only into holes left by the original position alpha; hybrid
+mixes the two strategies there. Fog conceals temporal seams and procedural
+backfill invents plausible volume—neither recovers ground-truth hidden
+geometry. Installation and left/right views can tune their fog independently,
+but the stereo textures still are not headset validation.
 
 The target architecture decouples AI updates from world/render cadence. On the
 3080 Ti, for example, the configured 5-10 Hz diffusion-update range is a scheduling
@@ -300,10 +399,11 @@ assets. Do **not** sync any of the following:
 - credentials, API keys, access tokens, passwords, private keys, certificates,
   credential-bearing URLs, or non-placeholder `.env` files;
 - the private `StreamDiffusionTD.tox`, machine-local components/configuration,
-  calibration, captures, telemetry, logs, or runtime state. All `.tox` files
-  and every `.toe` except `projects/FlexShow.toe` are deliberately local by
-  default; relax the `.tox` rule only after you explicitly confirm a component
-  is project-owned or redistributable;
+  site calibration, audience captures, depth/mask/confidence recordings,
+  commissioning bundles, hardware profiles, telemetry, logs, or runtime state.
+  All `.tox` files and every `.toe` except `projects/FlexShow.toe` are
+  deliberately local by default; relax the `.tox` rule only after you explicitly
+  confirm a component is project-owned or redistributable;
 - model weights, paid SDKs/plugins/assets, or anything whose license does not
   explicitly permit redistribution. Free-to-use does not necessarily mean
   GitHub-redistributable; include the required license or notice for any
@@ -313,9 +413,16 @@ assets. Do **not** sync any of the following:
   contents in inspectable form or use a separately reviewed release process.
 
 Keep excluded material in an ignored `private/`, `paid/`, `licensed/`,
-`local-components/`, `models/`, `weights/`, or `calibration/` directory. Never
-use `git add -f` to bypass this boundary. `.env.example` may contain placeholders
-only.
+`local-components/`, `models/`, `weights/`, `calibration/`, `captures/`,
+`commissioning/`, `recordings/`, or `runtime/` directory. The public
+`config/calibration.example.json` is synthetic documentation data, not a venue
+profile. Never use `git add -f` to bypass this boundary. `.env.example` may
+contain placeholders only.
+
+For audience-facing capture, define consent, purpose, retention, access, and
+deletion rules before recording any RGB, depth, mask, confidence, or inferred
+body data. The repository guard reduces accidental publication; it is not a
+legal/privacy review and cannot make a capture safe to collect or retain.
 
 Run the read-only guard at any time:
 
@@ -388,11 +495,16 @@ edits in those launched processes before stopping them.
 
 ## Production order
 
-1. Make installation-only work with sensor geometry and generated color.
-2. Tune thick points/fog and procedural backfill separately, then hybrid.
-3. Add VR-only and keep the headset renderer independent from AI updates.
-4. Test combined mode at the 3080 preset before increasing any budget.
-5. Move AI to a second GPU/computer using a profile change, without changing
+1. Generate/inspect a synthetic commissioning bundle, then measure and validate
+   the real camera/sensor calibration locally under an explicit privacy plan.
+2. Profile the target GPU layout and make installation-only work with sensor
+   geometry and generated color.
+3. Tune thick points/fog and procedural backfill separately, then hybrid.
+4. Add VR-only and keep the headset renderer independent from AI updates.
+5. Test combined mode at the 3080 preset before increasing any budget.
+6. Exercise read-only status, controlled AI recovery, and thermal/transport
+   soaks before an audience run.
+7. Move AI to a second GPU/computer using a profile change, without changing
    the artistic world network.
 
 For the process split and failure behavior, read

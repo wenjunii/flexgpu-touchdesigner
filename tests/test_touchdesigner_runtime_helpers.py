@@ -29,6 +29,13 @@ class FakeParameter:
     def __init__(self, name: str, value=None) -> None:
         self.name = name
         self.val = value
+        self.pulse_count = 0
+
+    def eval(self):
+        return self.val
+
+    def pulse(self) -> None:
+        self.pulse_count += 1
 
 
 class FakeParameters:
@@ -95,13 +102,21 @@ def complete_runtime_root() -> FakeRoot:
     nodes: dict[str, FakeNode] = {
         "WORKING_PIPELINE": FakeNode("WORKING_PIPELINE"),
         "WORKING_PIPELINE/SOURCES": FakeNode(
-            "SOURCES", UseStreamDiffusion=False, UseExternalDepth=False
+            "SOURCES", UseStreamDiffusion=False, UseExternalDepth=False,
+            Frameid=-1, Sessionepoch=0, Sourceagems=-1.0,
         ),
         "WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER": FakeNode(
             "STREAMDIFFUSION_ADAPTER", Enabled=False
         ),
         "WORKING_PIPELINE/RECONSTRUCTION": FakeNode(
-            "RECONSTRUCTION", Geometryresolution=384
+            "RECONSTRUCTION", Geometryresolution=384,
+            Depthmode="normalized", Depthscale=1.0, Depthbias=0.0,
+            Nearmetres=0.35, Farmetres=4.5,
+            Fxnormalized=0.0, Fynormalized=0.0,
+            Cxnormalized=0.5, Cynormalized=0.5,
+            Cameratoworld0="1 0 0 0", Cameratoworld1="0 1 0 0",
+            Cameratoworld2="0 0 1 0", Cameratoworld3="0 0 0 1",
+            Calibrationepoch=0,
         ),
         "WORKING_PIPELINE/POINT_RENDER": FakeNode(
             "POINT_RENDER", Maxpoints=120000, Pointsize=3.0
@@ -110,10 +125,29 @@ def complete_runtime_root() -> FakeRoot:
             "COMPLETION", Mode="hybrid", Fogdensity=0.35, Proceduralmix=0.72
         ),
         "WORKING_PIPELINE/SENSOR_INTERACTION": FakeNode(
-            "SENSOR_INTERACTION", Mode="simulated"
+            "SENSOR_INTERACTION", Mode="simulated", Interactionradius=0.55,
+            Forcegain=1.0, Sensoragems=-1.0, Sensorframeid=-1,
+            Sensortoworld0="1 0 0 0", Sensortoworld1="0 1 0 0",
+            Sensortoworld2="0 0 1 0", Sensortoworld3="0 0 0 1",
         ),
         "WORKING_PIPELINE/SENSOR_INTERACTION/SIMULATED_SENSOR_MASK": FakeNode(
             "SIMULATED_SENSOR_MASK", radius=0.16
+        ),
+        "WORKING_PIPELINE/SENSOR_INTERACTION/DEPTH_SENSOR_ADAPTER": FakeNode(
+            "DEPTH_SENSOR_ADAPTER", Enabled=False
+        ),
+        "WORKING_PIPELINE/TEMPORAL_WORLD": FakeNode(
+            "TEMPORAL_WORLD", Confidencedecay=0.985, Ageseconds=2.0,
+            Sourceepoch=0, Resetcount=0,
+        ),
+        "WORKING_PIPELINE/TEMPORAL_WORLD/POSITION_HISTORY": FakeNode(
+            "POSITION_HISTORY", reset=False
+        ),
+        "WORKING_PIPELINE/TEMPORAL_WORLD/COLOR_HISTORY": FakeNode(
+            "COLOR_HISTORY", reset=False
+        ),
+        "WORKING_PIPELINE/TEMPORAL_WORLD/STATE_HISTORY": FakeNode(
+            "STATE_HISTORY", reset=False
         ),
         "WORKING_PIPELINE/TELEMETRY": FakeNode("TELEMETRY"),
         "WORKING_PIPELINE/INSTALLATION_OUTPUT": FakeNode("INSTALLATION_OUTPUT"),
@@ -151,6 +185,51 @@ def complete_runtime_root() -> FakeRoot:
         "hybrid_completion_PIXEL",
         "const float proceduralMix = 0.72; // FLEXGPU_PROCEDURAL_MIX\n",
     )
+    nodes["WORKING_PIPELINE/RECONSTRUCTION/depth_to_position_PIXEL"] = FakeTextNode(
+        "depth_to_position_PIXEL",
+        "\n".join((
+            "const int depthMode = 0; // FLEXGPU_DEPTH_MODE: defaults",
+            "const float depthScale = 1.0; // FLEXGPU_DEPTH_SCALE",
+            "const float depthBias = 0.0; // FLEXGPU_DEPTH_BIAS",
+            "const float nearMetres = 0.35; // FLEXGPU_NEAR_METRES",
+            "const float farMetres = 4.5; // FLEXGPU_FAR_METRES",
+            "const float fxNormalized = 0.0; // FLEXGPU_INTRINSICS_FX",
+            "const float fyNormalized = 0.0; // FLEXGPU_INTRINSICS_FY",
+            "const float cxNormalized = 0.5; // FLEXGPU_INTRINSICS_CX",
+            "const float cyNormalized = 0.5; // FLEXGPU_INTRINSICS_CY",
+            "const vec4 cameraToWorld0 = vec4(1,0,0,0); // FLEXGPU_CAMERA_TO_WORLD_0",
+            "const vec4 cameraToWorld1 = vec4(0,1,0,0); // FLEXGPU_CAMERA_TO_WORLD_1",
+            "const vec4 cameraToWorld2 = vec4(0,0,1,0); // FLEXGPU_CAMERA_TO_WORLD_2",
+            "const vec4 cameraToWorld3 = vec4(0,0,0,1); // FLEXGPU_CAMERA_TO_WORLD_3",
+        )) + "\n",
+    )
+    nodes["WORKING_PIPELINE/SENSOR_INTERACTION/interaction_field_PIXEL"] = FakeTextNode(
+        "interaction_field_PIXEL",
+        "const float interactionRadiusMetres = 0.55; // FLEXGPU_INTERACTION_RADIUS\n"
+        "const float forceGain = 1.0; // FLEXGPU_FORCE_GAIN\n",
+    )
+    nodes["WORKING_PIPELINE/SENSOR_INTERACTION/CALIBRATE_SENSOR_POSITION_PIXEL"] = FakeTextNode(
+        "CALIBRATE_SENSOR_POSITION_PIXEL",
+        "\n".join(
+            "const vec4 sensorToWorld%d = vec4(0,0,0,0); // FLEXGPU_SENSOR_TO_WORLD_%d" % (i, i)
+            for i in range(4)
+        ) + "\n",
+    )
+    nodes["WORKING_PIPELINE/TEMPORAL_WORLD/temporal_state_PIXEL"] = FakeTextNode(
+        "temporal_state_PIXEL",
+        "const float confidenceDecay = 0.985; // FLEXGPU_CONFIDENCE_DECAY\n"
+        "const float ageStep = 0.0083333333; // FLEXGPU_AGE_STEP\n",
+    )
+    for path in (
+        "WORKING_PIPELINE/INSTALLATION_OUTPUT/installation_grade_PIXEL",
+        "WORKING_PIPELINE/STEREO_PREVIEW/GRADE_LEFT_EYE_PIXEL",
+        "WORKING_PIPELINE/STEREO_PREVIEW/GRADE_RIGHT_EYE_PIXEL",
+    ):
+        nodes[path] = FakeTextNode(
+            path,
+            "const float viewFogDensity = 0.35; // FLEXGPU_VIEW_FOG_DENSITY\n"
+            "const float viewFogRadius = 2.0; // FLEXGPU_VIEW_FOG_RADIUS\n",
+        )
     return FakeRoot(nodes)
 
 
@@ -158,6 +237,7 @@ class TouchDesignerRuntimeHelperTests(unittest.TestCase):
     def test_apply_binds_adaptive_quality_to_real_pipeline_nodes(self) -> None:
         helpers = load_helpers()
         root = complete_runtime_root()
+        root.op("WORKING_PIPELINE/SOURCES").par.UseExternalDepth.val = True
         state = quiet_apply(
             helpers,
             root,
@@ -166,7 +246,7 @@ class TouchDesignerRuntimeHelperTests(unittest.TestCase):
                 "topology": "single",
                 "experience": "combined",
                 "tier": "4090",
-                "source": {"mode": "streamdiffusion", "depth_operator": "out_depth"},
+                "source": {"mode": "streamdiffusion"},
                 "sensor": {"mode": "disabled"},
                 "render": {
                     "point_budget": 200000,
@@ -279,6 +359,293 @@ class TouchDesignerRuntimeHelperTests(unittest.TestCase):
         self.assertFalse(root.op("WORKING_PIPELINE/SOURCES").allowCooking)
         self.assertFalse(root.op("WORKING_PIPELINE/RECONSTRUCTION").allowCooking)
 
+    def test_valid_calibration_profile_binds_depth_and_world_transforms(self) -> None:
+        helpers = load_helpers()
+        root = complete_runtime_root()
+        with tempfile.TemporaryDirectory() as directory:
+            calibration = Path(directory) / "calibration.json"
+            calibration.write_text(
+                json.dumps(
+                    {
+                        "version": "flexgpu-calibration/v1",
+                        "calibration_id": "test-camera-v1",
+                        "image": {"width": 640, "height": 480},
+                        "intrinsics": {"fx": 320, "fy": 360, "cx": 300, "cy": 220},
+                        "depth": {
+                            "encoding": "metres", "scale": 1.25, "bias": -0.1,
+                            "near_m": 0.2, "far_m": 8.0,
+                        },
+                        "camera_to_world": [
+                            1, 0, 0, 0.25, 0, 1, 0, 0, 0, 0, 1, -0.5, 0, 0, 0, 1,
+                        ],
+                        "sensor_to_world": [
+                            1, 0, 0, -0.25, 0, 1, 0, 0, 0, 0, 1, 0.5, 0, 0, 0, 1,
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state = quiet_apply(
+                helpers,
+                root,
+                {
+                    "source": {
+                        "mode": "streamdiffusion",
+                        "calibration_path": str(calibration),
+                    }
+                },
+            )
+
+        reconstruction = root.op("WORKING_PIPELINE/RECONSTRUCTION")
+        self.assertEqual(state["calibration_status"], "ready")
+        self.assertEqual(reconstruction.par.Depthmode.val, "metric")
+        self.assertEqual(reconstruction.par.Depthscale.val, 1.25)
+        self.assertAlmostEqual(reconstruction.par.Fxnormalized.val, 0.5)
+        self.assertAlmostEqual(reconstruction.par.Fynormalized.val, 0.75)
+        self.assertIn("0.25", reconstruction.par.Cameratoworld0.val)
+        sensor = root.op("WORKING_PIPELINE/SENSOR_INTERACTION")
+        self.assertIn("-0.25", sensor.par.Sensortoworld0.val)
+        shader = root.op(
+            "WORKING_PIPELINE/RECONSTRUCTION/depth_to_position_PIXEL"
+        ).text
+        self.assertIn("const int depthMode = 1; // FLEXGPU_DEPTH_MODE", shader)
+        self.assertIn("const float depthScale = 1.25", shader)
+
+    def test_calibration_depth_encodings_map_to_shader_modes(self) -> None:
+        helpers = load_helpers()
+        identity = [1, 0, 0, 0, 0, 1, 0, 0,
+                    0, 0, 1, 0, 0, 0, 0, 1]
+        with tempfile.TemporaryDirectory() as directory:
+            for encoding, scale, expected in (
+                ("millimetres", 0.001, "metric"),
+                ("disparity", 2.0, "inverse"),
+                ("inverse_depth", 1.0, "inverse"),
+            ):
+                with self.subTest(encoding=encoding):
+                    root = complete_runtime_root()
+                    path = Path(directory) / (encoding + ".json")
+                    path.write_text(
+                        json.dumps(
+                            {
+                                "version": "flexgpu-calibration/v1",
+                                "calibration_id": "cal-" + encoding.replace("_", "-"),
+                                "image": {"width": 320, "height": 240},
+                                "intrinsics": {"fx": 200, "fy": 200, "cx": 160, "cy": 120},
+                                "depth": {
+                                    "encoding": encoding, "scale": scale, "bias": 0,
+                                    "near_m": 0.1, "far_m": 10,
+                                },
+                                "camera_to_world": identity,
+                                "sensor_to_world": identity,
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    state = quiet_apply(
+                        helpers,
+                        root,
+                        {"source": {"mode": "streamdiffusion",
+                                    "calibration_path": str(path)}},
+                    )
+                    self.assertEqual(state["calibration_status"], "ready")
+                    reconstruction = root.op("WORKING_PIPELINE/RECONSTRUCTION")
+                    self.assertEqual(reconstruction.par.Depthmode.val, expected)
+                    self.assertEqual(reconstruction.par.Depthscale.val, scale)
+
+    def test_calibration_loader_rejects_nested_contract_drift(self) -> None:
+        helpers = load_helpers()
+        identity = [1, 0, 0, 0, 0, 1, 0, 0,
+                    0, 0, 1, 0, 0, 0, 0, 1]
+        base = {
+            "version": "flexgpu-calibration/v1",
+            "calibration_id": "strict-camera-v1",
+            "image": {"width": 320, "height": 240},
+            "intrinsics": {"fx": 200, "fy": 200, "cx": 160, "cy": 120},
+            "depth": {
+                "encoding": "metres", "scale": 1, "bias": 0,
+                "near_m": 0.1, "far_m": 10,
+            },
+            "camera_to_world": identity,
+            "sensor_to_world": identity,
+        }
+        cases = []
+        invalid_identifier = json.loads(json.dumps(base))
+        invalid_identifier["calibration_id"] = "../unsafe"
+        cases.append(invalid_identifier)
+        boolean_width = json.loads(json.dumps(base))
+        boolean_width["image"]["width"] = True
+        cases.append(boolean_width)
+        unknown_intrinsic = json.loads(json.dumps(base))
+        unknown_intrinsic["intrinsics"]["skew"] = 0
+        cases.append(unknown_intrinsic)
+        extreme_range = json.loads(json.dumps(base))
+        extreme_range["depth"]["far_m"] = 1001
+        cases.append(extreme_range)
+        singular_transform = json.loads(json.dumps(base))
+        singular_transform["sensor_to_world"][:12] = [0] * 12
+        cases.append(singular_transform)
+
+        with tempfile.TemporaryDirectory() as directory:
+            for index, profile in enumerate(cases):
+                with self.subTest(index=index):
+                    path = Path(directory) / ("invalid-%d.json" % index)
+                    path.write_text(json.dumps(profile), encoding="utf-8")
+                    state = quiet_apply(
+                        helpers,
+                        complete_runtime_root(),
+                        {"source": {"mode": "streamdiffusion",
+                                    "calibration_path": str(path)}},
+                    )
+                    self.assertNotEqual(state.get("calibration_status"), "ready")
+                    self.assertIn("calibration", state["source_fallback"])
+
+    def test_unresolved_configured_source_and_sensor_outputs_fail_to_safe_modes(self) -> None:
+        helpers = load_helpers()
+        root = complete_runtime_root()
+        source_state = quiet_apply(
+            helpers,
+            root,
+            {
+                "source": {
+                    "mode": "streamdiffusion",
+                    "rgb_operator": "missing/out_rgb",
+                }
+            },
+        )
+        self.assertEqual(source_state["source_mode_active"], "demo")
+        self.assertIn("could not be resolved", source_state["source_fallback"])
+        self.assertFalse(
+            root.op("WORKING_PIPELINE/SOURCES").par.UseStreamDiffusion.val
+        )
+
+        sensor_state = quiet_apply(
+            helpers,
+            root,
+            {
+                "sensor": {
+                    "mode": "depth_sensor",
+                    "position_operator": "missing/out_position",
+                }
+            },
+        )
+        self.assertEqual(sensor_state["sensor_mode_active"], "simulated")
+        self.assertIn("could not be resolved", sensor_state["sensor_fallback"])
+        self.assertEqual(
+            root.op("WORKING_PIPELINE/SENSOR_INTERACTION").par.Mode.val,
+            "simulated",
+        )
+
+    def test_auto_load_is_opt_in_and_missing_local_tox_never_activates_adapter(self) -> None:
+        helpers = load_helpers()
+        root = complete_runtime_root()
+        state = quiet_apply(
+            helpers,
+            root,
+            {
+                "source": {
+                    "mode": "streamdiffusion",
+                    "auto_load_tox": True,
+                    "streamdiffusion_tox": "missing-private-component.tox",
+                    "rgb_operator": "out_rgb",
+                }
+            },
+        )
+        self.assertEqual(state["source_mode_active"], "demo")
+        self.assertEqual(
+            state["source_adapter_error"],
+            "configured local .tox is missing or invalid",
+        )
+        self.assertFalse(
+            root.op("WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER").par.Enabled.val
+        )
+        health = helpers["_health_snapshot"](
+            root, root.fetch("_flexgpu_runtime"), 16.0
+        )
+        self.assertIn("source_fallback", health["warnings"])
+
+    def test_split_roles_load_only_their_owned_private_adapters(self) -> None:
+        helpers = load_helpers()
+        transport = {
+            "type": "shared_memory",
+            "segment_name": "FlexShowRoleTest",
+            "atlas_width": 1024,
+            "atlas_height": 512,
+            "atlas_fps": 5,
+        }
+
+        world_state = quiet_apply(
+            helpers,
+            complete_runtime_root(),
+            {
+                "role": "world",
+                "topology": "dual_local",
+                "transport": transport,
+                "source": {
+                    "mode": "streamdiffusion",
+                    "auto_load_tox": True,
+                    "streamdiffusion_tox": "missing-private-source.tox",
+                    "rgb_operator": "out_rgb",
+                },
+            },
+        )
+        self.assertFalse(world_state["ai_active"])
+        self.assertEqual(world_state["source_mode_active"], "remote")
+        self.assertNotIn("source_adapter_error", world_state)
+
+        ai_state = quiet_apply(
+            helpers,
+            complete_runtime_root(),
+            {
+                "role": "ai",
+                "topology": "dual_local",
+                "transport": transport,
+                "sensor": {
+                    "mode": "depth_sensor",
+                    "auto_load_tox": True,
+                    "adapter_tox": "missing-private-sensor.tox",
+                    "position_operator": "out_position",
+                },
+            },
+        )
+        self.assertFalse(ai_state["world_active"])
+        self.assertEqual(ai_state["sensor_mode_active"], "inactive")
+        self.assertNotIn("sensor_adapter_error", ai_state)
+
+    def test_metadata_contract_resolution_accepts_non_top_operators(self) -> None:
+        helpers = load_helpers()
+        root = complete_runtime_root()
+        metadata = FakeNode("metadata")
+        metadata.isTOP = False
+        root.nodes["metadata"] = metadata
+        self.assertIs(
+            helpers["_child_op"](
+                root, root, "metadata", require_top=False
+            ),
+            metadata,
+        )
+        self.assertIsNone(helpers["_child_op"](root, root, "metadata"))
+
+    def test_temporal_feedback_resets_only_when_contract_signature_changes(self) -> None:
+        helpers = load_helpers()
+        root = complete_runtime_root()
+        quiet_apply(helpers, root, {"tier": "3080ti_16gb"})
+        histories = [
+            root.op("WORKING_PIPELINE/TEMPORAL_WORLD/" + name)
+            for name in ("POSITION_HISTORY", "COLOR_HISTORY", "STATE_HISTORY")
+        ]
+        self.assertEqual([node.par.reset.pulse_count for node in histories], [1, 1, 1])
+
+        quiet_apply(helpers, root, {"tier": "3080ti_16gb"})
+        self.assertEqual([node.par.reset.pulse_count for node in histories], [1, 1, 1])
+
+        root.op("WORKING_PIPELINE/SOURCES").par.Sessionepoch.val = 1
+        with mock.patch.object(helpers["time"], "perf_counter", return_value=10.0):
+            self.assertIsNone(helpers["tick"](root))
+        self.assertEqual([node.par.reset.pulse_count for node in histories], [2, 2, 2])
+        runtime = root.fetch("_flexgpu_runtime")
+        self.assertEqual(runtime["temporal_reset_count"], 2)
+        self.assertEqual(runtime["state"]["temporal_reset_count"], 2)
+
     def test_execute_callbacks_drive_adaptation_and_final_telemetry_flush(self) -> None:
         spec = importlib.util.spec_from_file_location("bootstrap_project", BOOTSTRAP_PATH)
         self.assertIsNotNone(spec)
@@ -333,11 +700,56 @@ class TouchDesignerRuntimeHelperTests(unittest.TestCase):
             record = json.loads(jsonl.read_text(encoding="utf-8").strip())
             self.assertEqual(record["adaptive_level"], 1)
             self.assertEqual(record["settings"]["point_budget"], 175000)
+            self.assertIn("health", record)
+            self.assertIn("temporal_resets", record["health"])
 
             helpers["flush_telemetry"](root, True)
             payload = json.loads(summary.read_text(encoding="utf-8"))
             self.assertEqual(payload["samples"], 1)
             self.assertEqual(payload["final_level"], 1)
+
+    def test_runtime_never_replaces_jsonl_with_summary_at_the_same_path(self) -> None:
+        helpers = load_helpers()
+        root = complete_runtime_root()
+        with tempfile.TemporaryDirectory() as directory:
+            shared = Path(directory) / "telemetry.jsonl"
+            quiet_apply(
+                helpers,
+                root,
+                {
+                    "telemetry": {
+                        "enabled": True,
+                        "jsonl_path": str(shared),
+                        "summary_path": str(shared),
+                        "sample_interval_frames": 1,
+                        "flush_every": 1,
+                    }
+                },
+            )
+            with mock.patch.object(
+                helpers["time"], "perf_counter", side_effect=[10.0, 10.1]
+            ):
+                helpers["tick"](root)
+                helpers["tick"](root)
+            before = shared.read_text(encoding="utf-8")
+            stream = io.StringIO()
+            with contextlib.redirect_stdout(stream):
+                helpers["flush_telemetry"](root, True)
+            self.assertEqual(shared.read_text(encoding="utf-8"), before)
+            self.assertIn("paths are identical", stream.getvalue())
+
+    def test_health_uses_configured_source_stale_timeout(self) -> None:
+        helpers = load_helpers()
+        root = complete_runtime_root()
+        quiet_apply(
+            helpers,
+            root,
+            {"source": {"mode": "demo", "stale_timeout_ms": 500}},
+        )
+        root.op("WORKING_PIPELINE/SOURCES").par.Sourceagems.val = 600
+        runtime = root.fetch("_flexgpu_runtime")
+        health = helpers["_health_snapshot"](root, runtime, 16.0)
+        self.assertIn("source_stale", health["warnings"])
 
     def test_runtime_builder_exposes_marked_completion_controls(self) -> None:
         source = (ROOT / "touchdesigner" / "runtime_pipeline.py").read_text(

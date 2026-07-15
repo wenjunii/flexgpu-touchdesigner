@@ -1,6 +1,9 @@
 # FlexShow configuration
 
-`flexgpu.py` reads one JSON or TOML configuration and turns it into a deterministic GPU/process plan. Config selection precedence is explicit `-Config`, `FLEXSHOW_CONFIG`, `FLEXGPU_CONFIG`, then `config/flexshow.json`.
+`flexgpu.py` reads one JSON configuration—or TOML when the selected runtime
+provides `tomllib` (Python 3.11+)—and turns it into a deterministic GPU/process
+plan. Config selection precedence is explicit `-Config`, `FLEXSHOW_CONFIG`,
+`FLEXGPU_CONFIG`, then `config/flexshow.json`.
 
 The configuration has five independent choices:
 
@@ -125,10 +128,12 @@ python tools/validate_configs.py
 python tools/validate_configs.py config/local-flexshow.json
 ```
 
-The validator also rejects duplicate object keys, non-standard `NaN`/infinity
-values, and a relative `$schema` declaration that resolves to the wrong file.
-The launcher remains dependency-free; `jsonschema` is needed only for this
-authoring/CI check.
+The tool also applies the launcher's dependency-free semantic validator, so
+sibling relationships that JSON Schema cannot express are checked in the same
+run. It rejects duplicate object keys, non-standard `NaN`/infinity values, and
+a relative `$schema` declaration that resolves to the wrong file. The launcher
+itself remains dependency-free; `jsonschema` is needed only for the schema half
+of this authoring/CI check.
 
 ## Optional runtime contracts
 
@@ -136,12 +141,12 @@ The schema accepts five optional objects for show-specific adapter settings.
 They keep machine-local choices next to the process plan without invalidating
 the supplied minimal presets:
 
-| Object | Intended consumer | Important fields | Stock `.toe` binding |
+| Object | Intended consumer | Important fields | v1.2 builder binding |
 | --- | --- | --- | --- |
 | `adaptive` | Live TD frame-time controller and offline policy tools | `enabled`, `levels`, frame/queue budgets, hysteresis windows, thresholds | Live frame-interval governor; offline governor also consumes VRAM and queue age |
 | `telemetry` | Live TD and offline metrics capture | `enabled`, JSONL/summary paths, sampling and flush intervals | Live JSONL/summary capture |
-| `source` | RGB/depth source adapter | `mode`, `.tox`/replay path, RGB/depth/mask/confidence operator paths | `mode` selects demo/adapter; `depth_operator` presence can enable adapter depth; paths are declarative and never auto-import a `.tox` |
-| `sensor` | Audience sensor adapter | `mode`, adapter/replay/calibration paths, operator paths, radius/gain/stale timeout | `mode` selects simulated/replay/disabled or safe fallback; paths and numeric tuning are declarative until a production adapter consumes them |
+| `source` | RGB/depth source adapter | `mode`, `.tox`/replay/calibration paths, RGB/depth/mask/confidence/frame-state/metadata operators, `auto_load_tox`, stale timeout | Manual wiring is the default; explicit auto-load can import one private `.tox` and falls back to demo on a failed contract |
+| `sensor` | Audience sensor adapter | `mode`, adapter/replay/calibration paths, position/mask/confidence/frame-state operators, `auto_load_tox`, radius/gain/stale timeout | Simulated is the safe default; explicit auto-load can import a private sensor `.tox` and falls back to simulated input on failure |
 | `render` | Point/output extension | point size/budget, output dimensions/rates, fog density, procedural mix | Point size/budget, output dimensions, fog, and procedural mix are live; FPS values are target metadata and do not change `project.cookRate` |
 
 For example, add these members to a complete preset:
@@ -166,12 +171,25 @@ For example, add these members to a complete preset:
   },
   "source": {
     "mode": "streamdiffusion",
+    "auto_load_tox": true,
     "streamdiffusion_tox": "../local-components/StreamDiffusionTD.tox",
     "rgb_operator": "out_rgb",
-    "depth_operator": "out_depth"
+    "depth_operator": "out_depth",
+    "mask_operator": "out_mask",
+    "confidence_operator": "out_confidence",
+    "frame_state_operator": "frame_state",
+    "camera_metadata_operator": "camera_metadata",
+    "calibration_path": "../calibration/source.json"
   },
   "sensor": {
-    "mode": "simulated",
+    "mode": "depth_sensor",
+    "auto_load_tox": true,
+    "adapter_tox": "../local-components/depth-sensor-adapter.tox",
+    "position_operator": "out_position",
+    "mask_operator": "out_mask",
+    "confidence_operator": "out_confidence",
+    "frame_state_operator": "frame_state",
+    "calibration_path": "../calibration/sensor.json",
     "interaction_radius_m": 0.45,
     "force_gain": 1.0,
     "stale_timeout_ms": 1000
@@ -187,23 +205,141 @@ For example, add these members to a complete preset:
 }
 ```
 
-Keep the referenced private `.tox`, SDKs, calibration, credentials, and local
-replay files under the repository's ignored `local-components/`, `private/`, or
-`calibration/` boundaries. They are machine-local inputs and must not be forced
-into the public Git index.
+Keep the referenced private `.tox`, SDKs, real calibration, credentials, and
+local replay/capture files under the repository's ignored `local-components/`,
+`private/`, `calibration/`, `captures/`, `commissioning/`, or `recordings/`
+boundaries. They are machine-local inputs and must not be forced into the public
+Git index.
 
-These settings do not install external dependencies. At startup, the stock
-project binds resolved tier/adaptive values and the live render subset described
-above to source placeholders, reconstruction, point render, and output
-resolution. Its frame-start governor can reduce or restore geometry and point
-workload with hysteresis, and the telemetry callback can append frame/operator
-metrics to JSONL and write a summary on exit. When `source` or `sensor` is
-omitted, saved manual adapter selections are preserved; an explicit unsupported
-adapter mode falls back safely. Machine-local `.tox`, replay, calibration, and
-operator-path fields remain contracts for user-supplied adapters rather than
-automatic loaders. `tools/benchmark_flexshow.py` exercises the same policy
-independently from command-line samples. StreamDiffusionTD, a camera SDK, and a
-headset runtime remain user-supplied.
+These settings do not install external dependencies. In a locally rebuilt v1.2
+project, the runtime helper binds resolved tier/adaptive values and the live
+render subset described above to source placeholders, reconstruction, point
+render, and output resolution. Its frame-start governor can reduce or restore
+geometry and point workload with hysteresis, and the telemetry callback can
+append frame/operator metrics to JSONL and write a summary on exit. When
+`source` or `sensor` is omitted, saved manual adapter selections are preserved;
+an explicit unsupported adapter mode falls back safely.
+`tools/benchmark_flexshow.py` exercises the same policy independently from
+command-line samples. StreamDiffusionTD, a camera SDK, model/runtime
+dependencies, and a headset runtime remain user-supplied. The tracked canonical
+`.toe` was not rebuilt for this v1.2 update.
+
+### Private `.tox` loading is opt-in
+
+`auto_load_tox` defaults to `false`. With it disabled, the normal manual
+wiring inside the labelled source/sensor adapters is unchanged. With it set to
+`true`, the runtime resolves the `.tox` path relative to the selected config
+(absolute paths and user/environment expansion are also accepted), loads it
+into an `AUTO_LOADED_TOX` holder, and resolves the configured TOP names inside
+that holder. Source auto-load requires `streamdiffusion_tox` and
+`rgb_operator`; sensor auto-load requires `adapter_tox` and
+`position_operator`. Optional depth, mask, and confidence TOPs are wired only
+when configured and valid. In a split topology, the AI process alone loads the
+source component and the world process alone loads the sensor component. The
+world receiver does not import the private source `.tox`; it applies the shared
+source calibration locally to reconstruct received depth.
+
+A missing file, wrong extension, load error, unresolved required output, or bad
+calibration leaves the source on demo or the sensor on simulated input and
+records the reason in runtime state. Changing an already loaded `.tox` path
+requires a process restart. Auto-load does not install Python/CUDA packages,
+download weights, configure prompts/scheduling, license a sensor SDK, or verify
+the behavior or redistribution rights of the private component. A loaded
+component can be embedded if that TouchDesigner session is saved: enable this
+only in an ignored local `.toe`, never in a session that will overwrite
+`projects/FlexShow.toe`.
+
+### Calibration and commissioning
+
+`source.calibration_path` and `sensor.calibration_path` accept a strict
+`flexgpu-calibration/v1` JSON profile. It carries image dimensions, intrinsics,
+depth encoding/scale/bias/range, camera-to-world and sensor-to-world transforms,
+and a calibration ID in a right-handed, Y-up, metre coordinate system. The
+runtime supports normalized, metres, millimetres, disparity, and inverse-depth
+encodings. Source and sensor profiles used together must describe the same
+calibration ID. Replay modes require `replay_path` in configuration. An invalid
+explicit source calibration on a split world receiver disables its world and
+output stages instead of rendering a knowingly incorrect remote reconstruction.
+
+Depth conversion is explicit: `calibrated = raw * scale + bias`. For
+`normalized`, calibrated `0..1` maps from `near_m` to `far_m`; for `metres` or
+`millimetres`, calibrated is treated as metres (so millimetre input normally
+uses `scale: 0.001`); for `disparity` or `inverse_depth`, metric Z is
+`1 / calibrated`. Intrinsics use pixel coordinates from the declared image.
+Unprojection produces camera-local X right, Y up, and forward along negative Z;
+the row-major `camera_to_world` matrix maps that basis into the shared world.
+The sensor adapter emits sensor-local XYZ metres, and `sensor_to_world` maps it
+into the same world. Both transforms must have a non-singular right-handed
+spatial basis and a homogeneous final row `[0, 0, 0, 1]`.
+
+Validate the public synthetic example and exercise synchronized replay
+contracts before connecting private capture data:
+
+```powershell
+python tools/commission_flexshow.py calibration config/calibration.example.json
+python tools/commission_flexshow.py demo `
+  --output commissioning/demo `
+  --frames 8 `
+  --width 64 `
+  --height 36
+python tools/commission_flexshow.py inspect commissioning/demo/manifest.json
+```
+
+Inspection validates hashes by default plus media roles, dimensions/formats,
+monotonic frame state, session/calibration relationships, and safe bundle
+paths. `--skip-hashes` skips payload integrity but retains those structural,
+presence, format, layout, and relationship checks. The demo and
+`config/calibration.example.json` are
+synthetic contract fixtures, not a measured site calibration. They cannot
+validate a physical camera, sensor alignment, audience tracking, projector/LED
+mapping, or visual quality. The generated bundle is not automatically imported
+or played by the stock TouchDesigner network; source/sensor replay remains an
+adapter boundary despite the strict configuration and inspection contracts.
+
+Bundle media formats are role-constrained: RGB accepts `ppm-rgb8` or
+`raw-rgba8`; depth accepts `pgm-u8`, `pgm-u16`, or `raw-r32f-le`; mask and
+confidence accept the same scalar formats. `raw-r32f-le` means one
+little-endian IEEE-754 float per pixel. Paths must be unique, relative POSIX
+paths that remain inside the bundle.
+
+Real calibration, RGB/depth/mask/confidence captures, commissioning bundles,
+and recordings are ignored private data. Collect audience data only under an
+appropriate consent, access, retention, and deletion policy. The public-sync
+guard helps prevent accidental publication but is not a legal/privacy review.
+
+### Machine-local profiling and process supervision
+
+Capture a read-only starting recommendation, then copy stable UUID selections
+into a gitignored local preset after measuring the actual show workload:
+
+```powershell
+python tools/profile_flexshow.py --topology single
+python tools/profile_flexshow.py `
+  --topology dual_local `
+  --output runtime/hardware-profile.json
+```
+
+The snapshot includes present VRAM headroom/load, temperature, clocks, optional
+power values, display ownership, driver, UUID, and PCI identity. It supports
+only `single` and `dual_local`; it is not a benchmark, soak, dynamic scheduler,
+or two-machine planner. The output is runtime/telemetry data and stays local.
+
+```powershell
+.\scripts\Status-FlexShow.ps1 -Config config\presets\local-show.json
+.\scripts\Recover-FlexShow.ps1 -Config config\presets\local-show.json
+.\scripts\Recover-FlexShow.ps1 `
+  -Config config\presets\local-show.json `
+  -Attempts 2 `
+  -Recover
+```
+
+Status is strictly read-only. Recovery is a dry-run without `-Recover`, permits
+one to three bounded attempts, and can recover only a separate AI role after
+its world dependency and preflight pass. It refuses single/unified plans and
+never implicitly restarts world/render. Add `-RestartRunning -Recover` only for
+an intentional replacement of a healthy AI process. These commands inspect
+and mutate launcher ownership state; they are not an automatic watchdog and do
+not provide a TouchDesigner or transport heartbeat.
 
 The embedded TD governor currently makes decisions from frame interval. It
 rebinds source/depth resolution, reconstruction resolution, and point count;
@@ -213,8 +349,9 @@ Python governor additionally evaluates VRAM and queue-age pressure.
 
 The schema bounds every numeric field. It cannot express all relationships:
 adaptive low thresholds must still be below their matching high thresholds,
-and `initial_level` must be lower than `levels`. The adaptive Python API checks
-those relationships when constructing a governor.
+and `initial_level` must be lower than `levels`. The launcher and
+`tools/validate_configs.py` check those relationships in addition to the
+adaptive Python API.
 
 ## Benchmark and replay commands
 

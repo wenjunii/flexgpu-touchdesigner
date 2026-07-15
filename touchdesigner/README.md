@@ -1,6 +1,6 @@
 # FlexGPU TouchDesigner project
 
-`bootstrap_project.py` and `runtime_pipeline.py` version `1.1.0` build a
+`bootstrap_project.py` and `runtime_pipeline.py` version `1.2.0` build a
 labelled TouchDesigner 2025 project at `/project1/flexgpu`. It includes a
 stock-operator `WORKING_PIPELINE` that runs
 without third-party packages: animated RGB/depth, depth-to-position GLSL,
@@ -94,6 +94,8 @@ Inside it, keep the output operators and replace their placeholder inputs:
 ```text
 your StreamDiffusionTD RGB TOP ---> OUT_RGB
 your depth-estimate TOP ----------> OUT_DEPTH
+your validity/confidence TOP -----> OUT_CONFIDENCE (optional; defaults to 1)
+your binary/soft valid mask TOP --> OUT_MASK (optional; multiplied with confidence)
 ```
 
 The current placeholder TOPs are named
@@ -111,9 +113,11 @@ replacement workflow is:
    StreamDiffusion Adapter**. Enable **Use Adapter Depth** only after
    `OUT_DEPTH` contains a valid depth texture. RGB and depth switch
    independently.
-6. After changing source resolution or calibration, pulse Reset on
-   `WORKING_PIPELINE/TEMPORAL_WORLD/POSITION_HISTORY` so feedback does not mix
-   incompatible position layouts.
+6. Increment **Source Session / Generation Epoch** when a producer restarts or
+   a prompt/model generation changes. Resolution, calibration, adapter identity,
+   and session-epoch changes automatically reset position, color, and lifecycle
+   feedback. For an untracked manual contract change, pulse Reset on all three
+   history TOPs below `WORKING_PIPELINE/TEMPORAL_WORLD`.
 
 `projects/FlexShow-local.toe`, `local-components/`, and every `.tox` are ignored
 by the public-sync policy and are the safe places for private integration. Before
@@ -125,20 +129,39 @@ Required contracts:
 - `OUT_RGB`: RGBA color with alpha 1; RGBA8 or floating-point color is valid.
 - `OUT_DEPTH`: normalized R depth in `0..1`, with near at 0 and far at 1. The
   current unprojection treats values very near 0 or 1 as invalid.
+- `OUT_CONFIDENCE`: normalized R confidence/validity aligned with depth. Leaving
+  the stock placeholder connected preserves the earlier confidence=1 behavior.
 
-If the estimator emits metric depth, disparity, or inverse depth, insert a
-conversion TOP before `OUT_DEPTH`; otherwise the shape will be spatially
-incorrect even though the network cooks successfully.
+Without a calibration profile, convert metric depth, millimetres, disparity,
+or inverse depth to normalized `0..1` before `OUT_DEPTH`. With a validated
+`source.calibration_path`, keep the native values and declare the matching
+encoding, scale, bias, and range in the profile; the reconstruction shader
+applies that conversion directly.
 
 Do not replace the whole `SOURCES` or `WORKING_PIPELINE` COMPs. Keeping the two
 adapter outputs lets reconstruction, persistence, completion, and all render
 outputs remain unchanged. Rerunning the builder preserves an existing input on
 `OUT_RGB` or `OUT_DEPTH` inside this adapter.
 
-The optional `source.streamdiffusion_tox` configuration field is declarative;
-the stock project does not import a `.tox` from that path automatically. This
-prevents a machine-local component from being silently loaded into the public
-project.
+Local `.tox` loading remains off unless `source.auto_load_tox` is explicitly
+`true`. In that mode, `streamdiffusion_tox` must resolve to an existing local
+`.tox`, `rgb_operator` is required, and configured depth/confidence/metadata
+operators must resolve inside the loaded holder. Any load or output-contract
+failure leaves the demo active and records a visible warning in runtime state;
+the helper does not print component contents. Loading materializes the private
+component in the project process, so saving that session can embed it in a
+`.toe`. Use auto-load only in an ignored local project and never save that
+session over `projects/FlexShow.toe`. With auto-load off, the manual wiring
+workflow above is preserved. In split-role operation,
+the AI process alone may load the source `.tox`, while the world process alone
+may load the sensor `.tox`; the world process still applies the shared camera
+calibration needed to reconstruct received depth.
+
+`source.calibration_path` or `sensor.calibration_path` may reference a local
+`flexgpu-calibration/v1` JSON profile. The helper validates dimensions,
+intrinsics, depth convention/scale/range, homogeneous camera/sensor transforms,
+and matching calibration IDs before applying it. Invalid calibration fails back
+to the demo or simulated sensor instead of cooking spatially incorrect data.
 
 ## Generated component contracts
 
@@ -158,11 +181,11 @@ project.
 | `WORKING_PIPELINE/ROLE_BRIDGE` | Atomic RGBA16F direct preview over local, Shared Mem, or Touch TCP routes |
 | `WORKING_PIPELINE/RECONSTRUCTION` | Aligned color and depth-to-position GLSL |
 | `WORKING_PIPELINE/SENSOR_INTERACTION` | Simulated/replay mask and interaction field |
-| `WORKING_PIPELINE/TEMPORAL_WORLD` | Position feedback/persistence and sensor forces |
+| `WORKING_PIPELINE/TEMPORAL_WORLD` | Confidence/age lifecycle plus position and color feedback, sensor forces, and automatic contract resets |
 | `WORKING_PIPELINE/COMPLETION` | Working fog, procedural and hybrid GLSL branches |
 | `WORKING_PIPELINE/POINT_RENDER` | TOP-to-POP point renderer with inspectable fallback |
-| `WORKING_PIPELINE/INSTALLATION_OUTPUT` | Center render and fog development preview |
-| `WORKING_PIPELINE/STEREO_PREVIEW` | Left/right and side-by-side desktop previews |
+| `WORKING_PIPELINE/INSTALLATION_OUTPUT` | Center render and view-space edge-fog development preview |
+| `WORKING_PIPELINE/STEREO_PREVIEW` | Per-eye view-space completion plus side-by-side desktop preview |
 | `WORKING_PIPELINE/TELEMETRY` | Info CHOP metrics used by live telemetry and adaptive monitoring |
 | `WORKING_PIPELINE/EXPERIMENTAL_EXTERNAL_ADAPTERS` | Disabled SHARP/Gaussian worker contracts only |
 
@@ -290,34 +313,39 @@ target system has ample measured headroom.
 
 ## Live-validation status
 
-The runtime source is build `1.1.0`. The canonical project was rebuilt, opened,
-rendered, and saved in TouchDesigner 2025.32820 on the RTX 3080 Ti Laptop 16 GB
-machine. The final idempotent health pass reused 220 managed operators in the
-bootstrap report, including 154 runtime-pipeline operators, with zero builder
-warnings and no operator errors. The installation preview and combined stereo
-desktop preview rendered; single-role local, AI sender, and world receiver stage
-gates were also checked.
-This was a functional validation, not a throughput guarantee, and it did not
-include the private StreamDiffusionTD `.tox`, a physical sensor, or a headset.
+The last canonical-project live validation was build `1.1.0`: it was rebuilt,
+opened, rendered, and saved in TouchDesigner 2025.32820 on the RTX 3080 Ti
+Laptop 16 GB machine with zero builder warnings or operator errors. Build
+`1.2.0` adds the calibrated/confidence lifecycle foundation described above and
+is covered by dependency-free source/helper tests, but still requires a fresh
+TouchDesigner rebuild and visual shader/operator validation before replacing
+that earlier live-validation statement. Neither validation includes the private
+StreamDiffusionTD `.tox`, a physical sensor, or a headset, and neither is a
+throughput guarantee.
 
 ## Hardware and integration limitations
 
 - StreamDiffusionTD was not bundled or run during validation. Its image format,
   model latency, VRAM use, and depth availability must be tested after the
   private `.tox` is connected.
-- The sensor branch currently uses a simulated or placeholder replay mask. It
-  does not include a depth-camera SDK, body tracking, camera intrinsics, or
-  installation calibration. A production sensor adapter must provide
-  calibrated positions/forces while retaining the public output contracts.
+- The sensor branch currently uses simulated or placeholder replay positions.
+  Its local adapter accepts sensor-local XYZ in metres and applies a validated
+  sensor-to-world transform, but it does not bundle a depth-camera SDK or body
+  tracking. Physical calibration still has to be measured and verified onsite.
 - `OUT_LEFT_EYE`, `OUT_RIGHT_EYE`, and `OUT_STEREO_PREVIEW` are desktop
   textures. There is no OpenXR/OpenVR TOP, headset pose, controller input, lens
   distortion, compositor submission, or headset timing validation.
 - `OUT_INSTALLATION` is a development image. Projector/LED mapping, Window
   COMPs, color calibration, genlock, failover, and venue output tests are not
   included.
-- The temporal branch is a compact GPU feedback effect, not a general-purpose
-  particle solver. SHARP/Gaussian nodes are disabled contracts and contain no
-  model inference.
+- The temporal branch now retains position, color, confidence, and normalized
+  age with automatic contract resets. It remains a compact per-pixel GPU
+  lifecycle rather than optical-flow reprojection or a general-purpose particle
+  solver. SHARP/Gaussian nodes are disabled contracts and contain no inference.
+- Configured frame-state and camera-metadata operators are currently resolved
+  as adapter contract boundaries but are not sampled into `LIVE_HEALTH`.
+  Source/sensor age and frame-ID health fields therefore remain adapter-written
+  parameters until a production metadata bridge is added.
 - The atomic Shared Mem/Touch `.toe` preview bridge is installed automatically,
   but it carries RGB/depth only. It has no mask/confidence plane, frame/session
   IDs, camera metadata, heartbeat/control, replay, or explicit stale/drop/hold

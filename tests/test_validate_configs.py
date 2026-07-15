@@ -135,6 +135,35 @@ class ConfigValidationToolTests(unittest.TestCase):
         for invalid in (remote_loopback_profile, wrong_network_type):
             self.assertTrue(list(validator.iter_errors(invalid)))
 
+    @unittest.skipUnless(importlib.util.find_spec("jsonschema"), "jsonschema is optional")
+    def test_tool_also_enforces_launcher_only_adaptive_relationships(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "invalid-relations.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "topology": "single",
+                        "experience": "installation",
+                        "completion": "hybrid",
+                        "tier": "auto",
+                        "gpu": {"ai": "auto", "render": "auto"},
+                        "processes": {
+                            "world": {"command": ["python", "show.py"]}
+                        },
+                        "transport": {"type": "local"},
+                        "adaptive": {
+                            "levels": 2,
+                            "initial_level": 2,
+                            "thresholds": {"frame_low": 2.0, "frame_high": 1.0},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            _paths, failures = self.tool.validate(self.tool.DEFAULT_SCHEMA, [path])
+            self.assertTrue(any("launcher:" in failure for failure in failures))
+            self.assertTrue(any("initial_level" in failure for failure in failures))
+
 
 if __name__ == "__main__":
     unittest.main()

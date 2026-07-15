@@ -52,6 +52,9 @@ class PublicSyncPolicyTests(unittest.TestCase):
             "weights/model.gguf",
             "keys/operator.pem",
             "config/local-flexshow.json",
+            "captures/audience/frame-0001.ppm",
+            "commissioning/site-a/manifest.json",
+            "recordings/rehearsal/depth.pgm",
         )
         for path in blocked:
             with self.subTest(path=path):
@@ -339,6 +342,9 @@ class PublicSyncPolicyTests(unittest.TestCase):
             "vendor/plugin.zip",
             "vendor/plugin.7z",
             "vendor/plugin.tar.gz",
+            "captures/audience/frame-0001.ppm",
+            "commissioning/site-a/manifest.json",
+            "recordings/rehearsal/depth.pgm",
         )
         allowed = (
             "README.md",

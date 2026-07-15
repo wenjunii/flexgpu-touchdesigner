@@ -11,9 +11,10 @@ from __future__ import print_function
 
 import json
 import os
+import re
 
 
-BUILD_VERSION = "1.1.0"
+BUILD_VERSION = "1.2.0"
 ROOT_PATH = "/project1/flexgpu"
 LAST_REPORT = None
 
@@ -40,7 +41,9 @@ DEFAULTS = {
 
 RUNTIME_HELPERS = r'''# FlexGPU runtime helpers (embedded by bootstrap_project.py)
 import json
+import math
 import os
+import re
 import time
 
 ENV_KEYS = {
@@ -124,6 +127,33 @@ def _set(comp, name, value):
             pass
     return False
 
+def _value(comp, name, fallback=None):
+    parameter = _par(comp, name)
+    if parameter is None:
+        return fallback
+    try:
+        return parameter.eval()
+    except Exception:
+        try:
+            return parameter.val
+        except Exception:
+            return fallback
+
+def _pulse(comp, name):
+    parameter = _par(comp, name)
+    if parameter is None:
+        return False
+    try:
+        parameter.pulse()
+        return True
+    except Exception:
+        try:
+            parameter.val = True
+            parameter.val = False
+            return True
+        except Exception:
+            return False
+
 def _set_resolution(comp, width, height):
     if comp is None:
         return
@@ -134,12 +164,30 @@ def _set_resolution(comp, width, height):
     if not _set(comp, 'resolutionh', int(height)):
         _set(comp, 'resh', int(height))
 
+def _config_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('duplicate runtime config key')
+        result[key] = value
+    return result
+
+def _config_constant(value):
+    raise ValueError('non-finite runtime config number')
+
 def _json(path):
     if not path:
         return {}
     try:
-        with open(os.path.expandvars(os.path.expanduser(path)), 'r') as handle:
-            value = json.load(handle)
+        expanded = os.path.expandvars(os.path.expanduser(path))
+        if str(expanded).lower().endswith('.toml'):
+            import tomllib
+            with open(expanded, 'rb') as handle:
+                value = tomllib.load(handle)
+        else:
+            with open(expanded, 'r', encoding='utf-8-sig') as handle:
+                value = json.load(handle, object_pairs_hook=_config_pairs,
+                                  parse_constant=_config_constant)
         return value if isinstance(value, dict) else {}
     except Exception as exc:
         print('[FlexGPU] runtime config warning: %s' % exc)
@@ -394,6 +442,599 @@ def _set_shader_constant(root_comp, path, variable, marker, value):
         print('[FlexGPU] shader control warning: %s' % exc)
         return False
 
+def _set_shader_int_constant(root_comp, path, variable, marker, value):
+    dat = root_comp.op(path)
+    if dat is None:
+        return False
+    try:
+        original = str(dat.text)
+        lines = original.splitlines()
+        replacement = 'const int %s = %d; // %s' % (
+            variable, int(value), marker)
+        for index, line in enumerate(lines):
+            if marker in line:
+                indent = line[:len(line) - len(line.lstrip())]
+                updated = indent + replacement
+                if updated != line:
+                    lines[index] = updated
+                    dat.text = '\n'.join(lines) + ('\n' if original.endswith('\n') else '')
+                return True
+        return False
+    except Exception as exc:
+        print('[FlexGPU] shader integer control warning: %s' % exc)
+        return False
+
+def _vec4(value, fallback):
+    try:
+        if isinstance(value, str):
+            values = value.replace(',', ' ').split()
+        else:
+            values = list(value)
+        parsed = [float(item) for item in values]
+        if len(parsed) != 4 or not all(math.isfinite(item) for item in parsed):
+            raise ValueError('expected four finite numbers')
+        return parsed
+    except Exception:
+        return list(fallback)
+
+def _set_shader_vec4_constant(root_comp, path, variable, marker, value, fallback):
+    dat = root_comp.op(path)
+    if dat is None:
+        return False
+    try:
+        row = _vec4(value, fallback)
+        original = str(dat.text)
+        lines = original.splitlines()
+        replacement = ('const vec4 %s = vec4(%.9g, %.9g, %.9g, %.9g); // %s' %
+                       (variable, row[0], row[1], row[2], row[3], marker))
+        for index, line in enumerate(lines):
+            if marker in line:
+                indent = line[:len(line) - len(line.lstrip())]
+                updated = indent + replacement
+                if updated != line:
+                    lines[index] = updated
+                    dat.text = '\n'.join(lines) + ('\n' if original.endswith('\n') else '')
+                return True
+        return False
+    except Exception as exc:
+        print('[FlexGPU] shader matrix control warning: %s' % exc)
+        return False
+
+def _apply_calibrated_contracts(root_comp, state):
+    reconstruction = root_comp.op('WORKING_PIPELINE/RECONSTRUCTION')
+    depth_shader = 'WORKING_PIPELINE/RECONSTRUCTION/depth_to_position_PIXEL'
+    mode_value = _value(reconstruction, 'Depthmode', 'normalized')
+    mode_name = str(mode_value).strip().lower()
+    mode = {'normalized':0, 'metric':1, 'inverse':2}.get(mode_name)
+    if mode is None:
+        try:
+            mode = max(0, min(2, int(mode_value)))
+        except Exception:
+            mode = 0
+    _set_shader_int_constant(root_comp, depth_shader, 'depthMode',
+                             'FLEXGPU_DEPTH_MODE', mode)
+    for parameter, variable, marker, fallback in (
+        ('Depthscale', 'depthScale', 'FLEXGPU_DEPTH_SCALE', 1.0),
+        ('Depthbias', 'depthBias', 'FLEXGPU_DEPTH_BIAS', 0.0),
+        ('Nearmetres', 'nearMetres', 'FLEXGPU_NEAR_METRES', 0.35),
+        ('Farmetres', 'farMetres', 'FLEXGPU_FAR_METRES', 4.5),
+        ('Fxnormalized', 'fxNormalized', 'FLEXGPU_INTRINSICS_FX', 0.0),
+        ('Fynormalized', 'fyNormalized', 'FLEXGPU_INTRINSICS_FY', 0.0),
+        ('Cxnormalized', 'cxNormalized', 'FLEXGPU_INTRINSICS_CX', 0.5),
+        ('Cynormalized', 'cyNormalized', 'FLEXGPU_INTRINSICS_CY', 0.5),
+    ):
+        _set_shader_constant(root_comp, depth_shader, variable, marker,
+                             _number(_value(reconstruction, parameter, fallback), fallback))
+    identity = ((1, 0, 0, 0), (0, 1, 0, 0),
+                (0, 0, 1, 0), (0, 0, 0, 1))
+    for index in range(4):
+        _set_shader_vec4_constant(
+            root_comp, depth_shader, 'cameraToWorld%d' % index,
+            'FLEXGPU_CAMERA_TO_WORLD_%d' % index,
+            _value(reconstruction, 'Cameratoworld%d' % index,
+                   ' '.join(str(x) for x in identity[index])), identity[index])
+
+    sensor = root_comp.op('WORKING_PIPELINE/SENSOR_INTERACTION')
+    interaction_shader = 'WORKING_PIPELINE/SENSOR_INTERACTION/interaction_field_PIXEL'
+    _set_shader_constant(
+        root_comp, interaction_shader, 'interactionRadiusMetres',
+        'FLEXGPU_INTERACTION_RADIUS',
+        max(0.001, _number(_value(sensor, 'Interactionradius', 0.55), 0.55)))
+    _set_shader_constant(
+        root_comp, interaction_shader, 'forceGain', 'FLEXGPU_FORCE_GAIN',
+        max(0.0, _number(_value(sensor, 'Forcegain', 1.0), 1.0)))
+    sensor_shader = 'WORKING_PIPELINE/SENSOR_INTERACTION/CALIBRATE_SENSOR_POSITION_PIXEL'
+    for index in range(4):
+        _set_shader_vec4_constant(
+            root_comp, sensor_shader, 'sensorToWorld%d' % index,
+            'FLEXGPU_SENSOR_TO_WORLD_%d' % index,
+            _value(sensor, 'Sensortoworld%d' % index,
+                   ' '.join(str(x) for x in identity[index])), identity[index])
+
+    temporal = root_comp.op('WORKING_PIPELINE/TEMPORAL_WORLD')
+    temporal_shader = 'WORKING_PIPELINE/TEMPORAL_WORLD/temporal_state_PIXEL'
+    confidence_decay = min(1.0, max(
+        0.0, _number(_value(temporal, 'Confidencedecay', 0.985), 0.985)))
+    age_seconds = max(0.05, _number(_value(temporal, 'Ageseconds', 2.0), 2.0))
+    try:
+        cook_rate = max(1.0, float(project.cookRate))
+    except Exception:
+        cook_rate = 60.0
+    _set_shader_constant(root_comp, temporal_shader, 'confidenceDecay',
+                         'FLEXGPU_CONFIDENCE_DECAY', confidence_decay)
+    _set_shader_constant(root_comp, temporal_shader, 'ageStep',
+                         'FLEXGPU_AGE_STEP', 1.0 / (cook_rate * age_seconds))
+
+    completion = root_comp.op('WORKING_PIPELINE/COMPLETION')
+    radius = max(1.0, _number(_value(completion, 'Disocclusionradius', 2.0), 2.0))
+    noise = max(0.0, _number(_value(completion, 'Fognoise', 0.5), 0.5))
+    _set_shader_constant(root_comp,
+        'WORKING_PIPELINE/COMPLETION/fog_completion_PIXEL',
+        'disocclusionRadius', 'FLEXGPU_DISOCCLUSION_RADIUS', radius)
+    _set_shader_constant(root_comp,
+        'WORKING_PIPELINE/COMPLETION/fog_completion_PIXEL',
+        'fogNoiseAmount', 'FLEXGPU_FOG_NOISE', noise)
+
+    fog_density = max(0.0, _number(
+        _value(completion, 'Fogdensity', state.get('fog_density', 0.35)), 0.35))
+    installation = root_comp.op('WORKING_PIPELINE/INSTALLATION_OUTPUT')
+    stereo = root_comp.op('WORKING_PIPELINE/STEREO_PREVIEW')
+    for path, view_comp in (
+        ('WORKING_PIPELINE/INSTALLATION_OUTPUT/installation_grade_PIXEL', installation),
+        ('WORKING_PIPELINE/STEREO_PREVIEW/GRADE_LEFT_EYE_PIXEL', stereo),
+        ('WORKING_PIPELINE/STEREO_PREVIEW/GRADE_RIGHT_EYE_PIXEL', stereo),
+    ):
+        view_density = max(0.0, _number(
+            _value(view_comp, 'Fogdensity', fog_density), fog_density))
+        view_radius = max(1.0, _number(
+            _value(view_comp, 'Fogradius', radius), radius))
+        _set_shader_constant(root_comp, path, 'viewFogDensity',
+                             'FLEXGPU_VIEW_FOG_DENSITY', view_density)
+        _set_shader_constant(root_comp, path, 'viewFogRadius',
+                             'FLEXGPU_VIEW_FOG_RADIUS', view_radius)
+
+def _temporal_signature(root_comp, state):
+    sources = root_comp.op('WORKING_PIPELINE/SOURCES')
+    reconstruction = root_comp.op('WORKING_PIPELINE/RECONSTRUCTION')
+    source_config = _mapping(state.get('source'))
+    sensor_config = _mapping(state.get('sensor'))
+    values = [
+        _integer(_value(reconstruction, 'Geometryresolution',
+                        state.get('geometry_resolution', 384)), 384),
+        str(_value(sources, 'UseStreamDiffusion', False)),
+        str(_value(sources, 'UseExternalDepth', False)),
+        _integer(_value(sources, 'Sessionepoch', 0), 0),
+        str(_value(reconstruction, 'Depthmode', 'normalized')),
+        _number(_value(reconstruction, 'Depthscale', 1.0), 1.0),
+        _number(_value(reconstruction, 'Depthbias', 0.0), 0.0),
+        _number(_value(reconstruction, 'Nearmetres', 0.35), 0.35),
+        _number(_value(reconstruction, 'Farmetres', 4.5), 4.5),
+        _number(_value(reconstruction, 'Fxnormalized', 0.0), 0.0),
+        _number(_value(reconstruction, 'Fynormalized', 0.0), 0.0),
+        _number(_value(reconstruction, 'Cxnormalized', 0.5), 0.5),
+        _number(_value(reconstruction, 'Cynormalized', 0.5), 0.5),
+        _integer(_value(reconstruction, 'Calibrationepoch', 0), 0),
+    ]
+    for index in range(4):
+        values.append(tuple(_vec4(
+            _value(reconstruction, 'Cameratoworld%d' % index, ''),
+            ((1, 0, 0, 0), (0, 1, 0, 0),
+             (0, 0, 1, 0), (0, 0, 0, 1))[index])))
+    # Configured local adapter/calibration identities are safe fingerprints;
+    # no file is read and no private component is imported here.
+    for key in ('mode', 'streamdiffusion_tox', 'replay_path', 'rgb_operator',
+                'depth_operator', 'mask_operator', 'confidence_operator',
+                'frame_state_operator', 'camera_metadata_operator',
+                'calibration_path'):
+        values.append(str(source_config.get(key, '')))
+    for key in ('mode', 'adapter_tox', 'replay_path', 'calibration_path',
+                'position_operator', 'mask_operator', 'confidence_operator',
+                'frame_state_operator'):
+        values.append(str(sensor_config.get(key, '')))
+    return tuple(values)
+
+def _reset_temporal_history(root_comp, runtime, reason):
+    reset = False
+    for name in ('POSITION_HISTORY', 'COLOR_HISTORY', 'STATE_HISTORY'):
+        reset = (_pulse(root_comp.op(
+            'WORKING_PIPELINE/TEMPORAL_WORLD/' + name), 'reset') or reset)
+    count = int(runtime.get('temporal_reset_count', 0)) + 1
+    runtime['temporal_reset_count'] = count
+    runtime['temporal_last_reset_reason'] = str(reason)
+    state = runtime.get('state', {})
+    state['temporal_reset_count'] = count
+    state['temporal_last_reset_reason'] = str(reason)
+    temporal = root_comp.op('WORKING_PIPELINE/TEMPORAL_WORLD')
+    _set(temporal, 'Resetcount', count)
+    _set(temporal, 'Sourceepoch', _integer(_value(
+        root_comp.op('WORKING_PIPELINE/SOURCES'), 'Sessionepoch', 0), 0))
+    return reset
+
+def _check_temporal_signature(root_comp, state, reason='contract change'):
+    try:
+        runtime = root_comp.fetch('_flexgpu_runtime', None)
+    except Exception:
+        runtime = None
+    if not isinstance(runtime, dict):
+        return False
+    signature = _temporal_signature(root_comp, state)
+    previous = runtime.get('temporal_signature')
+    if previous == signature:
+        return False
+    runtime['temporal_signature'] = signature
+    _reset_temporal_history(root_comp, runtime,
+                            'initial contract' if previous is None else reason)
+    return True
+
+def _health_snapshot(root_comp, runtime, frame_ms):
+    state = runtime['state']
+    sources = root_comp.op('WORKING_PIPELINE/SOURCES')
+    sensor = root_comp.op('WORKING_PIPELINE/SENSOR_INTERACTION')
+    source_age = _number(_value(sources, 'Sourceagems', -1.0), -1.0)
+    sensor_age = _number(_value(sensor, 'Sensoragems', -1.0), -1.0)
+    source_config = _mapping(state.get('source'))
+    sensor_config = _mapping(state.get('sensor'))
+    source_timeout = _number(source_config.get('stale_timeout_ms', 1000), 1000)
+    sensor_timeout = _number(sensor_config.get('stale_timeout_ms', 1000), 1000)
+    warnings = []
+    if source_age >= 0 and source_age > source_timeout:
+        warnings.append('source_stale')
+    if sensor_age >= 0 and sensor_age > sensor_timeout:
+        warnings.append('sensor_stale')
+    if state.get('transport_error'):
+        warnings.append('transport_error')
+    for field, warning in (
+        ('source_contract_error', 'source_contract_error'),
+        ('calibration_error', 'calibration_error'),
+        ('source_fallback', 'source_fallback'),
+        ('sensor_fallback', 'sensor_fallback'),
+    ):
+        if state.get(field):
+            warnings.append(warning)
+    return {
+        'status':'warning' if warnings else 'healthy',
+        'warnings':warnings,
+        'frame_time_ms':float(frame_ms),
+        'operator_cook_time_ms':_operator_cook_ms(root_comp),
+        'source_age_ms':source_age,
+        'sensor_age_ms':sensor_age,
+        'source_frame_id':_integer(_value(sources, 'Frameid', -1), -1),
+        'sensor_frame_id':_integer(_value(sensor, 'Sensorframeid', -1), -1),
+        'source_session_epoch':_integer(_value(sources, 'Sessionepoch', 0), 0),
+        'temporal_resets':int(runtime.get('temporal_reset_count', 0)),
+        'temporal_last_reset_reason':runtime.get('temporal_last_reset_reason', ''),
+        'bridge_mode':state.get('bridge_mode', 'local'),
+        'adaptive_level':runtime.get('level', 0),
+    }
+
+def _write_health(root_comp, health):
+    table = root_comp.op('WORKING_PIPELINE/TELEMETRY/LIVE_HEALTH')
+    if table is None:
+        return
+    try:
+        table.clear()
+        table.appendRow(['metric', 'value'])
+        for key in sorted(health):
+            table.appendRow([key, _display(health[key])])
+    except Exception:
+        pass
+
+def _local_path(state, value, suffix=None):
+    if value in (None, ''):
+        return ''
+    try:
+        path = os.path.expandvars(os.path.expanduser(str(value)))
+        if not os.path.isabs(path):
+            config_path = str(state.get('config_path', ''))
+            base = os.path.dirname(config_path) if config_path else os.getcwd()
+            path = os.path.join(base, path)
+        path = os.path.abspath(os.path.normpath(path))
+        if suffix and not path.lower().endswith(str(suffix).lower()):
+            return ''
+        if not os.path.isfile(path):
+            return ''
+        return path
+    except Exception:
+        return ''
+
+def _child_op(root_comp, container, path, require_top=True):
+    if not path:
+        return None
+    text = str(path).strip()
+    candidates = []
+    try:
+        candidates.append(container.op(text))
+    except Exception:
+        pass
+    try:
+        candidates.append(root_comp.op(text))
+    except Exception:
+        pass
+    if text.startswith('/'):
+        try:
+            candidates.append(op(text))
+        except Exception:
+            pass
+    for candidate in candidates:
+        if candidate is not None:
+            try:
+                if require_top and hasattr(candidate, 'isTOP') and not candidate.isTOP:
+                    continue
+            except Exception:
+                pass
+            return candidate
+    return None
+
+def _wire_adapter_output(root_comp, adapter, output_name, source):
+    if source is None:
+        return False
+    output = None
+    try:
+        output = adapter.op(output_name)
+    except Exception:
+        pass
+    if output is None:
+        output = root_comp.op(adapter.path.replace(root_comp.path + '/', '') +
+                              '/' + output_name)
+    if output is None:
+        return False
+    try:
+        connector = output.inputConnectors[0]
+        for connection in list(connector.connections):
+            try:
+                connection.disconnect()
+            except Exception:
+                pass
+        connector.connect(source)
+        return True
+    except Exception:
+        return False
+
+def _auto_load_tox(root_comp, adapter, state, config, label):
+    if not bool(config.get('auto_load_tox', False)):
+        return adapter
+    path = _local_path(state, config.get(
+        'streamdiffusion_tox' if label == 'source' else 'adapter_tox'), '.tox')
+    if not path:
+        state[label + '_adapter_error'] = 'configured local .tox is missing or invalid'
+        return None
+    try:
+        holder = adapter.op('AUTO_LOADED_TOX')
+    except Exception:
+        holder = None
+    if holder is None:
+        try:
+            type_symbol = globals().get('baseCOMP')
+            if type_symbol is None:
+                raise RuntimeError('baseCOMP is unavailable')
+            holder = adapter.create(type_symbol, 'AUTO_LOADED_TOX')
+        except Exception:
+            state[label + '_adapter_error'] = 'could not create local .tox holder'
+            return None
+    try:
+        previous = holder.fetch('_flexgpu_loaded_tox', '')
+    except Exception:
+        previous = ''
+    if previous and os.path.normcase(str(previous)) != os.path.normcase(path):
+        state[label + '_adapter_error'] = 'local .tox changed; restart before loading another component'
+        return None
+    if not previous:
+        try:
+            holder.loadTox(path)
+            holder.store('_flexgpu_loaded_tox', path)
+        except Exception:
+            state[label + '_adapter_error'] = 'local .tox load failed'
+            return None
+    state[label + '_adapter_loaded'] = True
+    return holder
+
+def _finite(value, label):
+    if isinstance(value, bool):
+        raise ValueError(label + ' must be numeric')
+    try:
+        result = float(value)
+    except Exception:
+        raise ValueError(label + ' must be numeric')
+    if not math.isfinite(result):
+        raise ValueError(label + ' must be finite')
+    return result
+
+def _matrix16(value, label):
+    if not isinstance(value, (list, tuple)) or len(value) != 16:
+        raise ValueError(label + ' must contain 16 numbers')
+    return [_finite(item, label) for item in value]
+
+def _strict_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('duplicate calibration key')
+        result[key] = value
+    return result
+
+def _reject_json_constant(value):
+    raise ValueError('non-finite calibration number')
+
+def _load_calibration(root_comp, state, configured_path):
+    path = _local_path(state, configured_path, '.json')
+    if not path:
+        state['calibration_error'] = 'configured calibration is missing or invalid'
+        return False
+    try:
+        if os.path.getsize(path) > 1024 * 1024:
+            raise ValueError('calibration is too large')
+        with open(path, 'r', encoding='utf-8-sig') as handle:
+            data = json.load(handle, object_pairs_hook=_strict_pairs,
+                             parse_constant=_reject_json_constant)
+        if not isinstance(data, dict) or data.get('version') != 'flexgpu-calibration/v1':
+            raise ValueError('unsupported calibration version')
+        allowed = {'version', 'calibration_id', 'image', 'intrinsics', 'depth',
+                   'camera_to_world', 'sensor_to_world', 'coordinate_system'}
+        if set(data).difference(allowed):
+            raise ValueError('unsupported calibration field')
+        if data.get('coordinate_system', 'right_handed_y_up_metres') != \
+                'right_handed_y_up_metres':
+            raise ValueError('unsupported coordinate system')
+        calibration_id = data.get('calibration_id')
+        if (not isinstance(calibration_id, str) or
+                re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}',
+                             calibration_id) is None):
+            raise ValueError('invalid calibration id')
+        existing_id = state.get('calibration_id')
+        if existing_id and existing_id != calibration_id:
+            raise ValueError('source and sensor calibration ids differ')
+        image = data.get('image')
+        if not isinstance(image, dict) or set(image).difference({'width', 'height'}):
+            raise ValueError('invalid calibration image')
+        if type(image.get('width')) is not int or type(image.get('height')) is not int:
+            raise ValueError('calibration dimensions must be integers')
+        width = image['width']
+        height = image['height']
+        if width < 1 or height < 1 or width > 16384 or height > 16384:
+            raise ValueError('invalid calibration dimensions')
+        intrinsics = data.get('intrinsics')
+        if (not isinstance(intrinsics, dict) or
+                set(intrinsics).difference({'fx', 'fy', 'cx', 'cy'})):
+            raise ValueError('invalid calibration intrinsics')
+        fx = _finite(intrinsics.get('fx'), 'fx')
+        fy = _finite(intrinsics.get('fy'), 'fy')
+        cx = _finite(intrinsics.get('cx'), 'cx')
+        cy = _finite(intrinsics.get('cy'), 'cy')
+        if fx <= 0 or fy <= 0:
+            raise ValueError('invalid focal length')
+        if fx > width * 100 or fy > height * 100:
+            raise ValueError('implausible focal length')
+        if not (-width <= cx <= width * 2 and -height <= cy <= height * 2):
+            raise ValueError('invalid principal point')
+        depth = data.get('depth')
+        if (not isinstance(depth, dict) or
+                set(depth).difference({'encoding', 'scale', 'bias',
+                                       'near_m', 'far_m'})):
+            raise ValueError('invalid calibration depth')
+        encoding = str(depth.get('encoding', ''))
+        mode = {'normalized':'normalized', 'metres':'metric',
+                'millimetres':'metric', 'disparity':'inverse',
+                'inverse_depth':'inverse'}.get(encoding)
+        if mode is None:
+            raise ValueError('unsupported depth encoding')
+        scale = _finite(depth.get('scale', 1.0), 'depth scale')
+        bias = _finite(depth.get('bias', 0.0), 'depth bias')
+        near_m = _finite(depth.get('near_m'), 'near')
+        far_m = _finite(depth.get('far_m'), 'far')
+        if scale <= 0 or near_m <= 0 or far_m <= near_m or far_m > 1000:
+            raise ValueError('invalid depth range')
+        camera = _matrix16(data.get('camera_to_world'), 'camera_to_world')
+        sensor = _matrix16(data.get('sensor_to_world'), 'sensor_to_world')
+        for matrix in (camera, sensor):
+            if (abs(matrix[12]) > 1e-6 or abs(matrix[13]) > 1e-6 or
+                    abs(matrix[14]) > 1e-6 or abs(matrix[15] - 1.0) > 1e-6):
+                raise ValueError('transform must be homogeneous row-major')
+            determinant = (
+                matrix[0] * (matrix[5] * matrix[10] - matrix[6] * matrix[9]) -
+                matrix[1] * (matrix[4] * matrix[10] - matrix[6] * matrix[8]) +
+                matrix[2] * (matrix[4] * matrix[9] - matrix[5] * matrix[8]))
+            if determinant <= 1e-8:
+                raise ValueError(
+                    'transform must have a non-singular right-handed spatial basis')
+        reconstruction = root_comp.op('WORKING_PIPELINE/RECONSTRUCTION')
+        _set(reconstruction, 'Depthmode', mode)
+        _set(reconstruction, 'Depthscale', scale)
+        _set(reconstruction, 'Depthbias', bias)
+        _set(reconstruction, 'Nearmetres', near_m)
+        _set(reconstruction, 'Farmetres', far_m)
+        _set(reconstruction, 'Fxnormalized', fx / float(width))
+        _set(reconstruction, 'Fynormalized', fy / float(height))
+        _set(reconstruction, 'Cxnormalized', cx / float(width))
+        _set(reconstruction, 'Cynormalized', cy / float(height))
+        epoch = sum((index + 1) * ord(char)
+                    for index, char in enumerate(calibration_id)) % 2147483647
+        _set(reconstruction, 'Calibrationepoch', epoch)
+        sensor_comp = root_comp.op('WORKING_PIPELINE/SENSOR_INTERACTION')
+        for index in range(4):
+            _set(reconstruction, 'Cameratoworld%d' % index,
+                 ' '.join('%.12g' % item for item in camera[index * 4:index * 4 + 4]))
+            _set(sensor_comp, 'Sensortoworld%d' % index,
+                 ' '.join('%.12g' % item for item in sensor[index * 4:index * 4 + 4]))
+        state['calibration_id'] = calibration_id
+        state['calibration_status'] = 'ready'
+        return True
+    except Exception:
+        state['calibration_error'] = 'calibration validation failed'
+        return False
+
+def _configure_source_adapter(root_comp, state, source):
+    adapter = root_comp.op('WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER')
+    if adapter is None:
+        state['source_adapter_error'] = 'source adapter component is missing'
+        return False
+    search_root = _auto_load_tox(root_comp, adapter, state, source, 'source')
+    if search_root is None:
+        return False
+    if source.get('auto_load_tox') and not source.get('rgb_operator'):
+        state['source_adapter_error'] = 'auto-loaded source requires rgb_operator'
+        return False
+    outputs = (
+        ('rgb_operator', 'OUT_RGB'),
+        ('depth_operator', 'OUT_DEPTH'),
+        ('mask_operator', 'OUT_MASK'),
+        ('confidence_operator', 'OUT_CONFIDENCE'),
+    )
+    for field, output in outputs:
+        configured = source.get(field)
+        if not configured:
+            continue
+        node = _child_op(root_comp, search_root, configured)
+        if node is None or not _wire_adapter_output(root_comp, adapter, output, node):
+            state['source_adapter_error'] = field + ' could not be resolved/wired'
+            return False
+    for field in ('frame_state_operator', 'camera_metadata_operator'):
+        configured = source.get(field)
+        if (configured and
+                _child_op(root_comp, search_root, configured,
+                          require_top=False) is None):
+            state['source_adapter_error'] = field + ' could not be resolved'
+            return False
+    calibration_path = source.get('calibration_path')
+    if calibration_path and not _load_calibration(root_comp, state, calibration_path):
+        return False
+    state['source_adapter_status'] = 'ready'
+    return True
+
+def _configure_sensor_adapter(root_comp, state, sensor):
+    adapter = root_comp.op(
+        'WORKING_PIPELINE/SENSOR_INTERACTION/DEPTH_SENSOR_ADAPTER')
+    if adapter is None:
+        state['sensor_adapter_error'] = 'sensor adapter component is missing'
+        return False
+    search_root = _auto_load_tox(root_comp, adapter, state, sensor, 'sensor')
+    if search_root is None:
+        return False
+    if sensor.get('auto_load_tox') and not sensor.get('position_operator'):
+        state['sensor_adapter_error'] = 'auto-loaded sensor requires position_operator'
+        return False
+    for field, output in (('position_operator', 'OUT_POSITION'),
+                          ('mask_operator', 'OUT_MASK'),
+                          ('confidence_operator', 'OUT_CONFIDENCE')):
+        configured = sensor.get(field)
+        if not configured:
+            continue
+        node = _child_op(root_comp, search_root, configured)
+        if node is None or not _wire_adapter_output(root_comp, adapter, output, node):
+            state['sensor_adapter_error'] = field + ' could not be resolved/wired'
+            return False
+    for field in ('frame_state_operator',):
+        configured = sensor.get(field)
+        if (configured and
+                _child_op(root_comp, search_root, configured,
+                          require_top=False) is None):
+            state['sensor_adapter_error'] = field + ' could not be resolved'
+            return False
+    calibration_path = sensor.get('calibration_path')
+    if calibration_path and not _load_calibration(root_comp, state, calibration_path):
+        return False
+    state['sensor_adapter_status'] = 'ready'
+    return True
+
 def _apply_working_pipeline(root_comp, state):
     pipeline = root_comp.op('WORKING_PIPELINE')
     if pipeline is None:
@@ -406,9 +1047,28 @@ def _apply_working_pipeline(root_comp, state):
     if 'source' in state:
         source = _mapping(state.get('source'))
         requested_source = str(source.get('mode', 'demo')).lower()
-        active_source = (requested_source if requested_source in
-                         ('demo', 'streamdiffusion') else 'demo')
-        use_stream = active_source == 'streamdiffusion'
+        owns_source = bool(state.get('ai_active', True))
+        if owns_source:
+            active_source = (requested_source if requested_source in
+                             ('demo', 'streamdiffusion') else 'demo')
+            if (active_source == 'streamdiffusion' and
+                    not _configure_source_adapter(root_comp, state, source)):
+                active_source = 'demo'
+        else:
+            # A split world process consumes the bridge. Never load or resolve
+            # the private AI adapter in that process, but do apply the shared
+            # camera calibration needed to reconstruct received depth.
+            active_source = ('remote' if state.get('transport_receiver_active')
+                             else 'inactive')
+            calibration_path = source.get('calibration_path')
+            if (calibration_path and
+                    not _load_calibration(root_comp, state, calibration_path)):
+                state['source_contract_error'] = (
+                    'remote reconstruction disabled: calibration is invalid')
+                state['world_active'] = False
+                state['installation_active'] = False
+                state['vr_active'] = False
+        use_stream = owns_source and active_source == 'streamdiffusion'
         _set(sources, 'UseStreamDiffusion', use_stream)
         if 'depth_operator' in source:
             _set(sources, 'UseExternalDepth',
@@ -417,15 +1077,23 @@ def _apply_working_pipeline(root_comp, state):
              'Enabled', use_stream)
         state['source_mode_requested'] = requested_source
         state['source_mode_active'] = active_source
-        if active_source != requested_source:
-            state['source_fallback'] = 'demo (adapter for %s is not installed)' % requested_source
+        if owns_source and active_source != requested_source:
+            reason = state.get('source_adapter_error') or state.get(
+                'calibration_error') or 'adapter for %s is not installed' % requested_source
+            state['source_fallback'] = 'demo (%s)' % reason
 
     for path in ('WORKING_PIPELINE/SOURCES/DEMO_RGB_GENERATOR',
                  'WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER/REPLACE_WITH_STREAMDIFFUSION_RGB'):
         _set_resolution(root_comp.op(path), state['diffusion_resolution'],
                         state['diffusion_resolution'])
     for path in ('WORKING_PIPELINE/SOURCES/DEMO_DEPTH_GENERATOR',
-                 'WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER/REPLACE_WITH_DEPTH_ESTIMATE'):
+                 'WORKING_PIPELINE/SOURCES/DEMO_CONFIDENCE',
+                 'WORKING_PIPELINE/SOURCES/DEMO_VALID_MASK',
+                 'WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER/REPLACE_WITH_DEPTH_ESTIMATE',
+                 'WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER/REPLACE_WITH_CONFIDENCE',
+                 'WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER/REPLACE_WITH_VALID_MASK',
+                 'WORKING_PIPELINE/RECONSTRUCTION/CONFIDENCE_ALIGNED_RESIZE',
+                 'WORKING_PIPELINE/TEMPORAL_WORLD/STATE_SEED'):
         _set_resolution(root_comp.op(path), state['geometry_resolution'],
                         state['geometry_resolution'])
 
@@ -443,6 +1111,10 @@ def _apply_working_pipeline(root_comp, state):
             root_comp,
             'WORKING_PIPELINE/COMPLETION/fog_completion_PIXEL',
             'fogDensity', 'FLEXGPU_FOG_DENSITY', state['fog_density'])
+        _set(root_comp.op('WORKING_PIPELINE/INSTALLATION_OUTPUT'),
+             'Fogdensity', state['fog_density'])
+        _set(root_comp.op('WORKING_PIPELINE/STEREO_PREVIEW'),
+             'Fogdensity', state['fog_density'])
     if 'procedural_mix' in render_config:
         _set(completion, 'Proceduralmix', state['procedural_mix'])
         _set_shader_constant(
@@ -469,15 +1141,38 @@ def _apply_working_pipeline(root_comp, state):
     if 'sensor' in state:
         sensor = _mapping(state.get('sensor'))
         sensor_mode = str(sensor.get('mode', 'simulated')).lower()
-        active_sensor = (sensor_mode if sensor_mode in ('simulated', 'replay')
-                         else 'simulated')
-        _set(root_comp.op('WORKING_PIPELINE/SENSOR_INTERACTION'), 'Mode', active_sensor)
+        owns_sensor = bool(state.get('world_active', True))
+        if owns_sensor:
+            active_sensor = (sensor_mode if sensor_mode in
+                             ('simulated', 'replay', 'depth_sensor')
+                             else 'simulated')
+            if (active_sensor == 'depth_sensor' and
+                    not _configure_sensor_adapter(root_comp, state, sensor)):
+                active_sensor = 'simulated'
+        else:
+            # AI-only and contract-failed processes must not import a local
+            # sensor SDK/.tox or resolve its operators.
+            active_sensor = 'inactive'
+        _set(root_comp.op('WORKING_PIPELINE/SENSOR_INTERACTION'), 'Mode',
+             active_sensor if active_sensor != 'inactive' else 'simulated')
         mask = root_comp.op('WORKING_PIPELINE/SENSOR_INTERACTION/SIMULATED_SENSOR_MASK')
-        _set(mask, 'radius', 0.0 if sensor_mode == 'disabled' else 0.16)
-        state['sensor_mode_active'] = ('disabled' if sensor_mode == 'disabled'
-                                       else active_sensor)
-        if sensor_mode not in ('simulated', 'replay', 'disabled'):
-            state['sensor_fallback'] = 'simulated (depth-sensor adapter is not installed)'
+        _set(mask, 'radius', 0.0 if sensor_mode == 'disabled' or not owns_sensor else 0.16)
+        state['sensor_mode_active'] = (
+            'inactive' if not owns_sensor else
+            'disabled' if sensor_mode == 'disabled' else active_sensor)
+        _set(root_comp.op(
+            'WORKING_PIPELINE/SENSOR_INTERACTION/DEPTH_SENSOR_ADAPTER'),
+            'Enabled', active_sensor == 'depth_sensor')
+        if 'interaction_radius_m' in sensor:
+            _set(root_comp.op('WORKING_PIPELINE/SENSOR_INTERACTION'),
+                 'Interactionradius', sensor.get('interaction_radius_m'))
+        if 'force_gain' in sensor:
+            _set(root_comp.op('WORKING_PIPELINE/SENSOR_INTERACTION'),
+                 'Forcegain', sensor.get('force_gain'))
+        if owns_sensor and active_sensor != sensor_mode and sensor_mode != 'disabled':
+            reason = state.get('sensor_adapter_error') or state.get(
+                'calibration_error') or 'depth-sensor adapter is not installed'
+            state['sensor_fallback'] = 'simulated (%s)' % reason
 
     bridge = root_comp.op('WORKING_PIPELINE/ROLE_BRIDGE')
     _set(bridge, 'Mode', state['bridge_mode'])
@@ -503,6 +1198,8 @@ def _apply_working_pipeline(root_comp, state):
     _set(root_comp.op('WORKING_PIPELINE/ROLE_BRIDGE/RGB_ROUTE'),
          'index', state['bridge_route_index'])
     _set(root_comp.op('WORKING_PIPELINE/ROLE_BRIDGE/DEPTH_ROUTE'),
+         'index', state['bridge_route_index'])
+    _set(root_comp.op('WORKING_PIPELINE/ROLE_BRIDGE/CONFIDENCE_ROUTE'),
          'index', state['bridge_route_index'])
     _set(root_comp.op('WORKING_PIPELINE/ROLE_BRIDGE/ATLAS_ROUTE'),
          'index', state['atlas_route_index'])
@@ -539,6 +1236,8 @@ def _apply_working_pipeline(root_comp, state):
     _allow(root_comp.op('WORKING_PIPELINE/INSTALLATION_OUTPUT'),
            state.get('installation_active', True))
     _allow(root_comp.op('WORKING_PIPELINE/STEREO_PREVIEW'), state.get('vr_active', False))
+    _apply_calibrated_contracts(root_comp, state)
+    _check_temporal_signature(root_comp, state, 'runtime contract changed')
 
 def _interpolate_quality(low, high, level, levels, key):
     if levels <= 1:
@@ -570,6 +1269,8 @@ def _configure_adaptive(state):
         'transport_frame': 0,
         'telemetry_count': 0, 'telemetry_frame_sum': 0.0,
         'telemetry_frame_max': 0.0,
+        'temporal_signature': None, 'temporal_reset_count': 0,
+        'temporal_last_reset_reason': '',
     }
     if enabled:
         _apply_level(runtime)
@@ -603,7 +1304,16 @@ def apply(root_comp=None, overrides=None):
     install_on = state['installation_active']
     vr_on = state['vr_active']
 
+    try:
+        previous_runtime = root_comp.fetch('_flexgpu_runtime', None)
+    except Exception:
+        previous_runtime = None
     runtime = _configure_adaptive(state)
+    if isinstance(previous_runtime, dict):
+        for key in ('temporal_signature', 'temporal_reset_count',
+                    'temporal_last_reset_reason'):
+            if key in previous_runtime:
+                runtime[key] = previous_runtime[key]
     try:
         root_comp.store('_flexgpu_runtime', runtime)
     except Exception:
@@ -643,6 +1353,11 @@ def apply(root_comp=None, overrides=None):
     if dashboard is not None:
         if state.get('transport_error'):
             status = 'ERROR / transport / %s' % state['transport_error']
+        elif state.get('source_fallback') or state.get('sensor_fallback'):
+            status = 'WARNING / %s%s' % (
+                state.get('source_fallback', ''),
+                (' / ' + state.get('sensor_fallback'))
+                if state.get('sensor_fallback') else '')
         else:
             status = '%s / %s / %s / %s / %s / Q%s' % (
                 state['role'], state['topology'], state['experience'],
@@ -655,6 +1370,10 @@ def apply(root_comp=None, overrides=None):
     if state.get('transport_error'):
         print('[FlexGPU] runtime transport ERROR (all heavy stages disabled): %s' %
               state['transport_error'])
+    if state.get('source_fallback'):
+        print('[FlexGPU] source WARNING: configured adapter was rejected; demo remains active')
+    if state.get('sensor_fallback'):
+        print('[FlexGPU] sensor WARNING: configured adapter was rejected; simulation remains active')
     print('[FlexGPU] runtime: %s' % state)
     return state
 
@@ -696,6 +1415,11 @@ def flush_telemetry(root_comp=None, final=False):
             print('[FlexGPU] telemetry warning: %s' % exc)
     if final:
         summary_path = _telemetry_path(runtime, 'summary_path')
+        if (path and summary_path and
+                os.path.normcase(os.path.abspath(path)) ==
+                os.path.normcase(os.path.abspath(summary_path))):
+            print('[FlexGPU] telemetry summary warning: JSONL and summary paths are identical')
+            summary_path = ''
         count = runtime.get('telemetry_count', 0)
         if summary_path and count:
             summary = {'samples':count,
@@ -772,10 +1496,13 @@ def tick(root_comp=None):
     if runtime is None:
         return None
     _transport_tick(root_comp, runtime)
+    signature_changed = _check_temporal_signature(
+        root_comp, runtime['state'], 'manual source/calibration contract changed')
     now = time.perf_counter()
     previous = runtime.get('last_tick')
     runtime['last_tick'] = now
     if previous is None:
+        _write_health(root_comp, _health_snapshot(root_comp, runtime, 0.0))
         return None
     frame_ms = max(0.0, (now - previous) * 1000.0)
     runtime['frame'] += 1
@@ -826,6 +1553,9 @@ def tick(root_comp=None):
             runtime['cooldown'] -= 1
 
     telemetry = _mapping(runtime['state'].get('telemetry'))
+    health = _health_snapshot(root_comp, runtime, frame_ms)
+    if runtime['frame'] % 15 == 0:
+        _write_health(root_comp, health)
     if bool(telemetry.get('enabled', False)):
         interval = max(1, _integer(telemetry.get('sample_interval_frames', 1), 1))
         if runtime['frame'] % interval == 0:
@@ -835,6 +1565,7 @@ def tick(root_comp=None):
                       'settings':dict((key, runtime['state'][key]) for key in QUALITY_KEYS)}
             if bool(telemetry.get('include_operator_metrics', True)):
                 record['operator_cook_time_ms'] = _operator_cook_ms(root_comp)
+            record['health'] = health
             runtime['telemetry_buffer'].append(record)
             runtime['telemetry_count'] += 1
             runtime['telemetry_frame_sum'] += frame_ms
@@ -843,13 +1574,19 @@ def tick(root_comp=None):
             if len(runtime['telemetry_buffer']) >= flush_every:
                 flush_telemetry(root_comp)
     return {'frame_time_ms':frame_ms, 'changed':changed,
-            'level':runtime['level']}
+            'temporal_reset':signature_changed,
+            'level':runtime['level'], 'health':health}
 
 def safe_reset(root_comp=None):
     root_comp = root_comp or op('/project1/flexgpu')
-    return apply(root_comp, {'role':'world', 'experience':'installation',
-                             'completion':'fog',
-                             'adaptive':{'enabled':False}})
+    state = apply(root_comp, {'role':'world', 'experience':'installation',
+                              'completion':'fog',
+                              'adaptive':{'enabled':False}})
+    runtime = _runtime(root_comp) if root_comp is not None else None
+    if runtime is not None:
+        _reset_temporal_history(root_comp, runtime, 'operator safe reset')
+        _write_state(root_comp, runtime['state'])
+    return state
 
 class FlexGpuRuntimeExt(object):
     def __init__(self, ownerComp):
@@ -1141,13 +1878,35 @@ def _lookup(data, key, default):
     return default
 
 
+def _load_config_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate config key")
+        result[key] = value
+    return result
+
+
+def _load_config_constant(value):
+    raise ValueError("non-finite config number")
+
+
 def _load_config(config_path, report):
     if not config_path:
         return {}
     path = os.path.abspath(os.path.expandvars(os.path.expanduser(str(config_path))))
     try:
-        with open(path, "r") as handle:
-            data = json.load(handle)
+        if path.lower().endswith(".toml"):
+            import tomllib
+            with open(path, "rb") as handle:
+                data = tomllib.load(handle)
+        else:
+            with open(path, "r", encoding="utf-8-sig") as handle:
+                data = json.load(
+                    handle,
+                    object_pairs_hook=_load_config_pairs,
+                    parse_constant=_load_config_constant,
+                )
         if not isinstance(data, dict):
             raise ValueError("top level must be a JSON object")
         return data

@@ -131,7 +131,7 @@ function Get-FlexShowPython {
 function Invoke-FlexShowCli {
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateSet('discover', 'validate', 'plan', 'diagnose', 'start', 'stop')]
+        [ValidateSet('discover', 'validate', 'plan', 'diagnose', 'start', 'stop', 'status', 'recover')]
         [string]$Command,
 
         [AllowEmptyString()]
@@ -148,6 +148,11 @@ function Invoke-FlexShowCli {
 
         [AllowEmptyString()]
         [string]$NvidiaSmi = '',
+
+        [ValidateRange(1, 3)]
+        [int]$RecoveryAttempts = 1,
+
+        [switch]$RestartRunning,
 
         [ValidateSet('None', 'DryRun', 'Execute')]
         [string]$ActionMode = 'None',
@@ -190,6 +195,13 @@ function Invoke-FlexShowCli {
     if (-not [string]::IsNullOrWhiteSpace($NvidiaSmi)) {
         $arguments.Add('--nvidia-smi')
         $arguments.Add($NvidiaSmi)
+    }
+    if ($Command -eq 'recover') {
+        $arguments.Add('--attempts')
+        $arguments.Add([string]$RecoveryAttempts)
+        if ($RestartRunning) {
+            $arguments.Add('--restart-running')
+        }
     }
 
     switch ($ActionMode) {

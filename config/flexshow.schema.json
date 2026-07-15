@@ -312,8 +312,23 @@
         "rgb_operator": { "type": "string", "minLength": 1 },
         "depth_operator": { "type": "string", "minLength": 1 },
         "mask_operator": { "type": "string", "minLength": 1 },
-        "confidence_operator": { "type": "string", "minLength": 1 }
-      }
+        "confidence_operator": { "type": "string", "minLength": 1 },
+        "frame_state_operator": { "type": "string", "minLength": 1 },
+        "camera_metadata_operator": { "type": "string", "minLength": 1 },
+        "calibration_path": { "type": "string", "minLength": 1 },
+        "auto_load_tox": { "type": "boolean" },
+        "stale_timeout_ms": { "type": "integer", "minimum": 1, "maximum": 600000 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "mode": { "const": "replay" } }, "required": ["mode"] },
+          "then": { "required": ["replay_path"] }
+        },
+        {
+          "if": { "properties": { "auto_load_tox": { "const": true } }, "required": ["auto_load_tox"] },
+          "then": { "required": ["streamdiffusion_tox", "rgb_operator"] }
+        }
+      ]
     },
     "sensor": {
       "type": "object",
@@ -324,11 +339,24 @@
         "replay_path": { "type": "string", "minLength": 1 },
         "mask_operator": { "type": "string", "minLength": 1 },
         "position_operator": { "type": "string", "minLength": 1 },
+        "confidence_operator": { "type": "string", "minLength": 1 },
+        "frame_state_operator": { "type": "string", "minLength": 1 },
         "calibration_path": { "type": "string", "minLength": 1 },
+        "auto_load_tox": { "type": "boolean" },
         "interaction_radius_m": { "type": "number", "exclusiveMinimum": 0, "maximum": 20 },
         "force_gain": { "type": "number", "minimum": 0, "maximum": 100 },
         "stale_timeout_ms": { "type": "integer", "minimum": 1, "maximum": 600000 }
-      }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "mode": { "const": "replay" } }, "required": ["mode"] },
+          "then": { "required": ["replay_path"] }
+        },
+        {
+          "if": { "properties": { "auto_load_tox": { "const": true } }, "required": ["auto_load_tox"] },
+          "then": { "required": ["adapter_tox", "position_operator"] }
+        }
+      ]
     },
     "render": {
       "type": "object",
