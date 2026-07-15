@@ -164,12 +164,28 @@ def build_process_plan(
 
     assignments = _role_gpu_assignments(config, gpus)
     preferred = assignments.get("ai") or assignments.get("world")
-    resolved_tier = auto_tier(gpus, preferred) if config.tier == "auto" else config.tier
-    quality = preset_for(resolved_tier).settings
+    # ``tier`` is a per-process hardware fact when it is automatic.  A local
+    # heterogeneous pair must never inherit the AI card's larger workload on
+    # its weaker world/render card (for example, 5090 AI + 3080 Ti world).
+    # Keep ProcessPlan.tier as the preferred/AI tier for API compatibility,
+    # while each ProcessSpec receives its assigned GPU's tier and limits.
+    role_tiers = {
+        role: auto_tier(gpus, gpu) if config.tier == "auto" else config.tier
+        for role, gpu in assignments.items()
+    }
+    resolved_tier = (
+        role_tiers.get("ai")
+        or role_tiers.get("world")
+        or (auto_tier(gpus, preferred) if config.tier == "auto" else config.tier)
+    )
     roles = required_process_roles(config.topology, config.node_role)
     warnings: list[str] = []
-    if resolved_tier == "custom":
-        warnings.append("GPU does not match a tuned 3080ti_16gb, 4090, or 5090 preset")
+    for role, role_tier in role_tiers.items():
+        if role_tier == "custom":
+            warnings.append(
+                "%s GPU does not match a tuned 3080ti_16gb, 4090, or 5090 preset"
+                % role
+            )
     transport_type = str(config.transport.get("type", "")).lower()
     if config.topology == "dual_network" and transport_type in {
         "shared_memory",
@@ -187,7 +203,9 @@ def build_process_plan(
         if definition is None:
             raise PlanError("missing process definition for role %s" % role)
         gpu = assignments[role]
-        command, cwd, project_path = _command_for(definition, gpu, config, resolved_tier)
+        role_tier = role_tiers[role]
+        quality = preset_for(role_tier).settings
+        command, cwd, project_path = _command_for(definition, gpu, config, role_tier)
         env = {
             "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
             "CUDA_VISIBLE_DEVICES": gpu.uuid or str(gpu.index),
@@ -196,7 +214,7 @@ def build_process_plan(
             "FLEXGPU_TOPOLOGY": config.topology,
             "FLEXGPU_EXPERIENCE": config.experience,
             "FLEXGPU_COMPLETION": config.completion,
-            "FLEXGPU_TIER": resolved_tier,
+            "FLEXGPU_TIER": role_tier,
             "FLEXGPU_GPU_INDEX": str(gpu.index),
             "FLEXGPU_GPU_UUID": gpu.uuid,
             "FLEXGPU_GPU_BUS_ID": gpu.bus_id,

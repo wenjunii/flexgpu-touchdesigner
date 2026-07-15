@@ -47,6 +47,30 @@ def python_process(role: str) -> dict[str, object]:
     }
 
 
+def shared_transport() -> dict[str, object]:
+    return {
+        "type": "shared_memory",
+        "segment_name": "FlexShowWorldBus",
+        "atlas_width": 1024,
+        "atlas_height": 512,
+        "atlas_fps": 10,
+    }
+
+
+def network_transport() -> dict[str, object]:
+    return {
+        "type": "touch_tcp",
+        "peer_host": "192.0.2.20",
+        "atlas_width": 1024,
+        "atlas_height": 512,
+        "atlas_fps": 5,
+        "atlas_port": 12000,
+        "control_port": 12001,
+        "heartbeat_port": 12002,
+        "heartbeat_timeout_ms": 2000,
+    }
+
+
 class ConfigPlannerTests(unittest.TestCase):
     def test_single_is_one_unified_world_process(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -92,6 +116,7 @@ class ConfigPlannerTests(unittest.TestCase):
             {
                 "topology": "dual_same_pc",
                 "experience": "vr",
+                "transport": shared_transport(),
                 "processes": {
                     "ai": python_process("ai"),
                     "world": python_process("world"),
@@ -106,13 +131,46 @@ class ConfigPlannerTests(unittest.TestCase):
         self.assertEqual(by_role["ai"].dependencies, ("world",))
         self.assertEqual(plan.tier, "5090")
         self.assertEqual(by_role["ai"].env["FLEXGPU_DIFFUSION_HZ"], "20")
-        self.assertEqual(by_role["world"].env["FLEXGPU_MAX_POINTS"], "400000")
+        self.assertEqual(by_role["world"].env["FLEXGPU_TIER"], "4090")
+        self.assertEqual(by_role["world"].env["FLEXGPU_MAX_POINTS"], "250000")
+
+    def test_dual_local_auto_uses_safe_quality_for_each_heterogeneous_role(self) -> None:
+        config = validate_config(
+            {
+                "topology": "dual_local",
+                "tier": "auto",
+                "gpu": {"ai": {"uuid": "GPU-5090"}, "render": {"index": 0}},
+                "transport": shared_transport(),
+                "processes": {
+                    "ai": {
+                        "command": [sys.executable, "-c", "print('{tier}')"],
+                        "touchdesigner": False,
+                    },
+                    "world": {
+                        "command": [sys.executable, "-c", "print('{tier}')"],
+                        "touchdesigner": False,
+                    },
+                },
+            }
+        )
+        plan = build_process_plan(config, [GPU_3080, GPU_5090])
+        by_role = {process.role: process for process in plan.processes}
+
+        self.assertEqual(plan.tier, "5090")
+        self.assertEqual(by_role["ai"].env["FLEXGPU_TIER"], "5090")
+        self.assertEqual(by_role["ai"].env["FLEXGPU_MAX_POINTS"], "400000")
+        self.assertIn("5090", by_role["ai"].command[-1])
+        self.assertEqual(by_role["world"].env["FLEXGPU_TIER"], "3080ti_16gb")
+        self.assertEqual(by_role["world"].env["FLEXGPU_MAX_POINTS"], "120000")
+        self.assertEqual(by_role["world"].env["FLEXGPU_GEOMETRY_RESOLUTION"], "384")
+        self.assertIn("3080ti_16gb", by_role["world"].command[-1])
 
     def test_dual_local_honors_explicit_zero_index_selector(self) -> None:
         config = validate_config(
             {
                 "topology": "dual_local",
                 "gpu": {"render": {"index": 0}, "ai": {"uuid": "GPU-4090"}},
+                "transport": shared_transport(),
                 "processes": {
                     "ai": python_process("ai"),
                     "world": python_process("world"),
@@ -129,6 +187,7 @@ class ConfigPlannerTests(unittest.TestCase):
             {
                 "topology": "network",
                 "node_role": "generator",
+                "transport": network_transport(),
                 "processes": {"ai_worker": python_process("ai")},
             }
         )
@@ -136,6 +195,7 @@ class ConfigPlannerTests(unittest.TestCase):
             {
                 "topology": "dual_network",
                 "node_role": "renderer",
+                "transport": network_transport(),
                 "processes": {"renderer": python_process("world")},
             }
         )
@@ -166,6 +226,19 @@ class ConfigPlannerTests(unittest.TestCase):
         self.assertIn("completion", message)
         self.assertIn("processes.world", message)
         self.assertIn("processes.ai", message)
+
+    def test_explicit_custom_tier_matches_public_schema_contract(self) -> None:
+        config = validate_config(
+            {
+                "topology": "single",
+                "tier": "custom",
+                "processes": {"world": python_process("world")},
+            }
+        )
+        plan = build_process_plan(config, [GPU_3080])
+        self.assertEqual(plan.tier, "custom")
+        self.assertEqual(plan.processes[0].env["FLEXGPU_TIER"], "custom")
+        self.assertTrue(any("does not match a tuned" in warning for warning in plan.warnings))
 
 
 if __name__ == "__main__":

@@ -83,6 +83,35 @@ PROCESS_ROLE_ALIASES = {
     "vr_client": "vr",
 }
 
+TRANSPORT_TYPE_ALIASES = {
+    "local": "local",
+    "in_process": "local",
+    "inprocess": "local",
+    "shared_memory": "shared_memory",
+    "shared_mem": "shared_memory",
+    "sharedmem": "shared_memory",
+    "touch_tcp": "touch_tcp",
+    "touch": "touch_tcp",
+    "touch_in_out": "touch_tcp",
+    "tcp": "touch_tcp",
+}
+TRANSPORT_FIELDS = {
+    "type",
+    "segment_name",
+    "bind_host",
+    "peer_host",
+    "atlas_width",
+    "atlas_height",
+    "atlas_fps",
+    "atlas_port",
+    "control_port",
+    "heartbeat_port",
+    "heartbeat_timeout_ms",
+    "drop_stale_frames",
+    "hold_last_complete_frame",
+}
+LOOPBACK_PEERS = {"127.0.0.1", "localhost", "::1"}
+
 
 def _choice(
     value: Any,
@@ -98,6 +127,205 @@ def _choice(
             % (field, ", ".join(sorted(set(aliases.values()))), value)
         )
         return key
+    return normalized
+
+
+def _transport_integer(
+    value: Any,
+    field: str,
+    errors: list[str],
+    minimum: int,
+    maximum: int,
+    multiple_of: int = 1,
+) -> int | None:
+    """Validate a transport integer without accepting booleans or coercing strings."""
+
+    if type(value) is not int:
+        errors.append("%s must be an integer" % field)
+        return None
+    if value < minimum or value > maximum:
+        errors.append("%s must be between %d and %d" % (field, minimum, maximum))
+        return None
+    if value % multiple_of:
+        errors.append("%s must be a multiple of %d" % (field, multiple_of))
+        return None
+    return value
+
+
+def _transport_string(
+    value: Any,
+    field: str,
+    errors: list[str],
+    maximum: int,
+    allow_internal_whitespace: bool,
+) -> str | None:
+    """Return a trimmed, non-empty transport identifier or host name."""
+
+    if not isinstance(value, str):
+        errors.append("%s must be a string" % field)
+        return None
+    normalized = value.strip()
+    if not normalized:
+        errors.append("%s must not be empty" % field)
+        return None
+    if len(normalized) > maximum:
+        errors.append("%s must be at most %d characters" % (field, maximum))
+        return None
+    if any(ord(character) < 32 for character in normalized):
+        errors.append("%s must not contain control characters" % field)
+        return None
+    if not allow_internal_whitespace and any(character.isspace() for character in normalized):
+        errors.append("%s must not contain whitespace" % field)
+        return None
+    return normalized
+
+
+def _transport_definition(
+    value: Any,
+    topology: str,
+    supplied: bool,
+    errors: list[str],
+) -> Mapping[str, Any]:
+    """Normalize the transport contract and reject values the TD bridge would ignore.
+
+    A missing transport is meaningful only for a single-process topology, where
+    it deterministically becomes ``local``. Split topologies require an explicit
+    type and the dimensions/cadence needed by the atomic atlas bridge.
+    """
+
+    if not supplied:
+        if topology == "single":
+            return {"type": "local"}
+        errors.append("transport is required for %s topology" % topology)
+        return {}
+
+    if isinstance(value, str):
+        candidate: dict[str, Any] = {"type": value}
+    elif isinstance(value, Mapping):
+        candidate = dict(value)
+    else:
+        errors.append("transport must be a string or object")
+        return {}
+
+    unknown = sorted(set(candidate) - TRANSPORT_FIELDS)
+    for key in unknown:
+        errors.append("transport has unsupported field %r" % key)
+
+    type_value = candidate.get("type")
+    normalized_type: str | None = None
+    if type_value is None:
+        errors.append("transport.type is required when transport is configured")
+    elif not isinstance(type_value, str):
+        errors.append("transport.type must be a string")
+    else:
+        type_key = type_value.strip().lower()
+        normalized_type = TRANSPORT_TYPE_ALIASES.get(type_key)
+        if normalized_type is None:
+            errors.append(
+                "transport.type must be one of local, shared_memory, or touch_tcp "
+                "(received %r)" % type_value
+            )
+
+    permitted = {
+        "single": {"local"},
+        "dual_local": {"shared_memory", "touch_tcp"},
+        "dual_network": {"touch_tcp"},
+    }.get(topology, set())
+    if normalized_type is not None and normalized_type not in permitted:
+        errors.append(
+            "transport.type %s is incompatible with topology %s"
+            % (normalized_type, topology)
+        )
+
+    required: set[str] = set()
+    if topology in {"dual_local", "dual_network"}:
+        required.update({"atlas_width", "atlas_height", "atlas_fps"})
+    if normalized_type == "shared_memory":
+        required.add("segment_name")
+    if normalized_type == "touch_tcp":
+        required.update({"peer_host", "atlas_port"})
+    if topology == "dual_network":
+        required.update({"control_port", "heartbeat_port", "heartbeat_timeout_ms"})
+    for key in sorted(required):
+        if key not in candidate:
+            errors.append("transport.%s is required for %s" % (key, topology))
+
+    normalized: dict[str, Any] = {}
+    if normalized_type is not None:
+        normalized["type"] = normalized_type
+
+    for key, maximum, whitespace in (
+        ("segment_name", 128, True),
+        ("bind_host", 255, False),
+        ("peer_host", 255, False),
+    ):
+        if key in candidate:
+            text = _transport_string(
+                candidate[key], "transport.%s" % key, errors, maximum, whitespace
+            )
+            if text is not None:
+                normalized[key] = text
+
+    peer = normalized.get("peer_host")
+    if isinstance(peer, str) and peer.lower() == "localhost":
+        normalized["peer_host"] = "localhost"
+        peer = "localhost"
+    if (
+        topology == "dual_local"
+        and normalized_type == "touch_tcp"
+        and peer is not None
+        and peer.lower() not in LOOPBACK_PEERS
+    ):
+        errors.append(
+            "transport.peer_host must be 127.0.0.1, localhost, or ::1 "
+            "for dual_local touch_tcp"
+        )
+
+    integer_fields = (
+        ("atlas_width", 2, 16384, 2),
+        ("atlas_height", 1, 16384, 1),
+        ("atlas_fps", 1, 240, 1),
+        ("atlas_port", 1, 65535, 1),
+        ("control_port", 1, 65535, 1),
+        ("heartbeat_port", 1, 65535, 1),
+        ("heartbeat_timeout_ms", 1, 600000, 1),
+    )
+    for key, minimum, maximum, multiple_of in integer_fields:
+        if key in candidate:
+            number = _transport_integer(
+                candidate[key],
+                "transport.%s" % key,
+                errors,
+                minimum,
+                maximum,
+                multiple_of,
+            )
+            if number is not None:
+                normalized[key] = number
+
+    used_ports: dict[int, str] = {}
+    for key in ("atlas_port", "control_port", "heartbeat_port"):
+        port = normalized.get(key)
+        if not isinstance(port, int):
+            continue
+        previous = used_ports.get(port)
+        if previous is not None:
+            errors.append(
+                "transport.%s must not reuse transport.%s port %d"
+                % (key, previous, port)
+            )
+        else:
+            used_ports[port] = key
+
+    for key in ("drop_stale_frames", "hold_last_complete_frame"):
+        if key not in candidate:
+            continue
+        flag = candidate[key]
+        if not isinstance(flag, bool):
+            errors.append("transport.%s must be true or false" % key)
+        else:
+            normalized[key] = flag
+
     return normalized
 
 
@@ -358,14 +586,9 @@ def validate_config(
         if process:
             processes[role] = process
 
-    transport_raw = raw.get("transport", {})
-    if isinstance(transport_raw, str):
-        transport: Mapping[str, Any] = {"type": transport_raw}
-    elif isinstance(transport_raw, Mapping):
-        transport = dict(transport_raw)
-    else:
-        errors.append("transport must be a string or object")
-        transport = {}
+    transport = _transport_definition(
+        raw.get("transport"), topology, "transport" in raw, errors
+    )
     runtime_dir = raw.get("runtime_dir", "runtime")
     if not isinstance(runtime_dir, str) or not runtime_dir.strip():
         errors.append("runtime_dir must be a non-empty path string")

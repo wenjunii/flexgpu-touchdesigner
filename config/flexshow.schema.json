@@ -24,7 +24,7 @@
       "enum": ["fog", "procedural", "hybrid"]
     },
     "tier": {
-      "enum": ["auto", "3080ti_16gb", "4090", "5090"]
+      "enum": ["auto", "3080ti_16gb", "4090", "5090", "custom"]
     },
     "node_role": {
       "enum": ["ai", "render"]
@@ -47,10 +47,12 @@
       },
       "minProperties": 1
     },
-    "transport": {
-      "type": "object",
-      "additionalProperties": true
-    },
+    "transport": { "$ref": "#/$defs/transport" },
+    "adaptive": { "$ref": "#/$defs/adaptive" },
+    "telemetry": { "$ref": "#/$defs/telemetry" },
+    "source": { "$ref": "#/$defs/source" },
+    "sensor": { "$ref": "#/$defs/sensor" },
+    "render": { "$ref": "#/$defs/render" },
     "runtime_dir": {
       "type": "string",
       "minLength": 1
@@ -62,7 +64,27 @@
         "properties": { "topology": { "const": "dual_network" } },
         "required": ["topology"]
       },
-      "then": { "required": ["node_role", "transport"] }
+      "then": {
+        "required": ["node_role", "transport"],
+        "properties": {
+          "transport": {
+            "required": [
+              "type",
+              "peer_host",
+              "atlas_width",
+              "atlas_height",
+              "atlas_fps",
+              "atlas_port",
+              "control_port",
+              "heartbeat_port",
+              "heartbeat_timeout_ms"
+            ],
+            "properties": {
+              "type": { "const": "touch_tcp" }
+            }
+          }
+        }
+      }
     },
     {
       "if": {
@@ -71,7 +93,13 @@
       },
       "then": {
         "properties": {
-          "processes": { "required": ["world"] }
+          "processes": { "required": ["world"] },
+          "transport": {
+            "required": ["type"],
+            "properties": {
+              "type": { "const": "local" }
+            }
+          }
         }
       }
     },
@@ -81,8 +109,29 @@
         "required": ["topology"]
       },
       "then": {
+        "required": ["transport"],
         "properties": {
-          "processes": { "required": ["ai", "world"] }
+          "processes": { "required": ["ai", "world"] },
+          "transport": {
+            "required": ["type", "atlas_width", "atlas_height", "atlas_fps"],
+            "oneOf": [
+              {
+                "required": ["segment_name"],
+                "properties": {
+                  "type": { "const": "shared_memory" }
+                }
+              },
+              {
+                "required": ["peer_host", "atlas_port"],
+                "properties": {
+                  "type": { "const": "touch_tcp" },
+                  "peer_host": {
+                    "enum": ["127.0.0.1", "localhost", "::1"]
+                  }
+                }
+              }
+            ]
+          }
         }
       }
     },
@@ -168,6 +217,134 @@
         { "required": ["command"] },
         { "required": ["executable"] }
       ]
+    },
+    "transport": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": { "enum": ["local", "shared_memory", "touch_tcp"] },
+        "segment_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "\\S"
+        },
+        "bind_host": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^\\S+$"
+        },
+        "peer_host": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^\\S+$"
+        },
+        "atlas_width": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 16384,
+          "multipleOf": 2
+        },
+        "atlas_height": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "atlas_fps": { "type": "integer", "minimum": 1, "maximum": 240 },
+        "atlas_port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "control_port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "heartbeat_port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "heartbeat_timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 600000
+        },
+        "drop_stale_frames": { "type": "boolean" },
+        "hold_last_complete_frame": { "type": "boolean" }
+      }
+    },
+    "adaptive": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "levels": { "type": "integer", "minimum": 2, "maximum": 16 },
+        "initial_level": { "type": "integer", "minimum": 0, "maximum": 15 },
+        "frame_budget_ms": { "type": "number", "exclusiveMinimum": 0, "maximum": 1000 },
+        "queue_budget_ms": { "type": "number", "exclusiveMinimum": 0, "maximum": 60000 },
+        "down_window": { "type": "integer", "minimum": 1, "maximum": 100000 },
+        "up_window": { "type": "integer", "minimum": 1, "maximum": 100000 },
+        "cooldown_samples": { "type": "integer", "minimum": 0, "maximum": 100000 },
+        "thresholds": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "frame_low": { "type": "number", "minimum": 0, "maximum": 10 },
+            "frame_high": { "type": "number", "exclusiveMinimum": 0, "maximum": 10 },
+            "vram_low": { "type": "number", "minimum": 0, "maximum": 1 },
+            "vram_high": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
+            "queue_low": { "type": "number", "minimum": 0, "maximum": 10 },
+            "queue_high": { "type": "number", "exclusiveMinimum": 0, "maximum": 10 },
+            "critical_frame": { "type": "number", "exclusiveMinimum": 0, "maximum": 20 },
+            "critical_vram": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
+            "critical_queue": { "type": "number", "exclusiveMinimum": 0, "maximum": 20 }
+          }
+        }
+      }
+    },
+    "telemetry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "jsonl_path": { "type": "string", "minLength": 1 },
+        "summary_path": { "type": "string", "minLength": 1 },
+        "sample_interval_frames": { "type": "integer", "minimum": 1, "maximum": 100000 },
+        "flush_every": { "type": "integer", "minimum": 1, "maximum": 100000 },
+        "include_operator_metrics": { "type": "boolean" }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "enum": ["demo", "streamdiffusion", "worldbus", "replay"] },
+        "streamdiffusion_tox": { "type": "string", "minLength": 1 },
+        "replay_path": { "type": "string", "minLength": 1 },
+        "rgb_operator": { "type": "string", "minLength": 1 },
+        "depth_operator": { "type": "string", "minLength": 1 },
+        "mask_operator": { "type": "string", "minLength": 1 },
+        "confidence_operator": { "type": "string", "minLength": 1 }
+      }
+    },
+    "sensor": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "enum": ["simulated", "depth_sensor", "replay", "disabled"] },
+        "adapter_tox": { "type": "string", "minLength": 1 },
+        "replay_path": { "type": "string", "minLength": 1 },
+        "mask_operator": { "type": "string", "minLength": 1 },
+        "position_operator": { "type": "string", "minLength": 1 },
+        "calibration_path": { "type": "string", "minLength": 1 },
+        "interaction_radius_m": { "type": "number", "exclusiveMinimum": 0, "maximum": 20 },
+        "force_gain": { "type": "number", "minimum": 0, "maximum": 100 },
+        "stale_timeout_ms": { "type": "integer", "minimum": 1, "maximum": 600000 }
+      }
+    },
+    "render": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "point_size_px": { "type": "number", "exclusiveMinimum": 0, "maximum": 128 },
+        "point_budget": { "type": "integer", "minimum": 1000, "maximum": 10000000 },
+        "installation_width": { "type": "integer", "minimum": 64, "maximum": 16384 },
+        "installation_height": { "type": "integer", "minimum": 64, "maximum": 16384 },
+        "installation_fps": { "type": "integer", "minimum": 1, "maximum": 240 },
+        "stereo_width": { "type": "integer", "minimum": 64, "maximum": 16384 },
+        "stereo_height": { "type": "integer", "minimum": 64, "maximum": 16384 },
+        "vr_fps": { "type": "integer", "minimum": 1, "maximum": 240 },
+        "fog_density": { "type": "number", "minimum": 0, "maximum": 10 },
+        "procedural_mix": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
     }
   }
 }

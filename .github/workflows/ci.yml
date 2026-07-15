@@ -1,0 +1,136 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-tests:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.12']
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install pinned schema validator
+        run: python -m pip install --disable-pip-version-check jsonschema==4.17.3
+
+      - name: Compile Python sources
+        run: python -m compileall -q src tools tests touchdesigner
+
+      - name: Validate JSON schema and shipped profiles
+        run: python tools/validate_configs.py
+
+      - name: Run dependency-free unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Smoke-test synthetic benchmark
+        shell: pwsh
+        run: |
+          $summary = Join-Path $env:RUNNER_TEMP 'flexshow-benchmark-summary.json'
+          python tools/benchmark_flexshow.py synthetic `
+            --tier 3080ti_16gb `
+            --samples 32 `
+            --pattern cycle `
+            --summary-json $summary `
+            --compact | Out-Null
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $summary)) {
+            throw 'Synthetic benchmark smoke test failed.'
+          }
+
+      - name: Parse PowerShell operator scripts
+        shell: pwsh
+        run: |
+          $failed = $false
+          Get-ChildItem -LiteralPath scripts -Filter '*.ps1' | ForEach-Object {
+            $tokens = $null
+            $parseErrors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName,
+              [ref]$tokens,
+              [ref]$parseErrors
+            ) | Out-Null
+            foreach ($parseError in @($parseErrors)) {
+              Write-Error "$($_.Name):$($parseError.Extent.StartLineNumber): $($parseError.Message)"
+              $failed = $true
+            }
+          }
+          if ($failed) {
+            throw 'One or more PowerShell scripts failed syntax validation.'
+          }
+
+      - name: Smoke-test machine initializer with synthetic GPU inventory
+        shell: pwsh
+        run: |
+          $fakeSmi = Join-Path $env:RUNNER_TEMP 'nvidia-smi.cmd'
+          $fakeTouchDesigner = Join-Path $env:RUNNER_TEMP 'TouchDesigner.exe'
+          @'
+          @echo off
+          echo 0, GPU-low, 00000000:01:00.0, NVIDIA GeForce RTX 3080 Ti Laptop GPU, 16384, 555.10
+          echo 1, GPU-high, 00000000:02:00.0, NVIDIA GeForce RTX 4090, 24564, 555.10
+          '@ | Set-Content -LiteralPath $fakeSmi -Encoding Ascii
+          New-Item -ItemType File -Path $fakeTouchDesigner -Force | Out-Null
+          $localConfig = Join-Path $PWD 'config\local-ci.json'
+          try {
+            $preview = & .\scripts\Initialize-FlexShow.ps1 `
+              -Topology auto `
+              -NvidiaSmi $fakeSmi `
+              -TouchDesignerExe $fakeTouchDesigner `
+              -Output $localConfig `
+              -WhatIf `
+              -Json
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Initializer -WhatIf smoke test returned a non-zero exit code.'
+            }
+            if (Test-Path -LiteralPath $localConfig) {
+              throw 'Initializer -WhatIf unexpectedly wrote a local configuration.'
+            }
+
+            $output = & .\scripts\Initialize-FlexShow.ps1 `
+              -Topology auto `
+              -NvidiaSmi $fakeSmi `
+              -TouchDesignerExe $fakeTouchDesigner `
+              -Output $localConfig `
+              -Force `
+              -Json
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $localConfig)) {
+              throw 'Initializer write smoke test failed.'
+            }
+            $result = @($output)[-1] | ConvertFrom-Json
+            if ($result.topology -ne 'dual_local' -or $result.tier -ne 'auto') {
+              throw "Unexpected initializer plan: $($result | ConvertTo-Json -Compress)"
+            }
+            if ($result.ai_tier -ne '4090' -or $result.render_tier -ne '3080ti_16gb') {
+              throw 'Initializer did not preserve per-role detected tiers.'
+            }
+            if ($result.ai_gpu.index -ne 1 -or $result.render_gpu.index -ne 0) {
+              throw 'Initializer did not assign the larger GPU to AI.'
+            }
+
+            $written = Get-Content -LiteralPath $localConfig -Raw | ConvertFrom-Json
+            if ($written.topology -ne $result.topology -or $written.tier -ne $result.tier) {
+              throw 'Written initializer configuration does not match its result.'
+            }
+            python tools/validate_configs.py $localConfig
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Written initializer configuration failed JSON Schema validation.'
+            }
+          }
+          finally {
+            Remove-Item -LiteralPath $localConfig -Force -ErrorAction SilentlyContinue
+          }
