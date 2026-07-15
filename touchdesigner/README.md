@@ -115,6 +115,11 @@ replacement workflow is:
    `WORKING_PIPELINE/TEMPORAL_WORLD/POSITION_HISTORY` so feedback does not mix
    incompatible position layouts.
 
+`projects/FlexShow-local.toe`, `local-components/`, and every `.tox` are ignored
+by the public-sync policy and are the safe places for private integration. Before
+updating canonical `projects/FlexShow.toe`, remove the private component and
+manually inspect the public project.
+
 Required contracts:
 
 - `OUT_RGB`: RGBA color with alpha 1; RGBA8 or floating-point color is valid.
@@ -268,11 +273,12 @@ uses frame interval only.
 ## 3080 Ti 16 GB starting limits
 
 The bootstrap and normal `3080ti_16gb` launcher tier start with a 120,000-point
-budget, 512-square diffusion at 10 Hz, 384-square geometry at 5 Hz, and a 72 Hz
-VR target. The diffusion number is a scheduling budget for your future `.tox`,
-not performance measured from the synthetic demo. These values are planning
-defaults, not guarantees; laptop power limits, thermals, drivers, model choice,
-and output resolution materially change throughput.
+budget, 512-square diffusion at 10 Hz, 384-square geometry at 5 Hz, and 72 Hz
+`vr_fps` target metadata. The runtime does not change `project.cookRate` or
+validate headset cadence. The diffusion number is likewise a scheduling budget
+for your future `.tox`, not performance measured from the synthetic demo. These
+values are planning defaults, not guarantees; laptop power limits, thermals,
+drivers, model choice, and output resolution materially change throughput.
 
 For a same-GPU combined run, keep the desktop-stereo render as the timing
 priority and target no more than roughly 11-12 GB total use in `nvidia-smi`.
@@ -289,8 +295,8 @@ rendered, and saved in TouchDesigner 2025.32820 on the RTX 3080 Ti Laptop 16 GB
 machine. The final idempotent health pass reused 220 managed operators in the
 bootstrap report, including 154 runtime-pipeline operators, with zero builder
 warnings and no operator errors. The installation preview and combined stereo
-desktop preview rendered;
-single-role local, AI sender, and world receiver stage gates were also checked.
+desktop preview rendered; single-role local, AI sender, and world receiver stage
+gates were also checked.
 This was a functional validation, not a throughput guarantee, and it did not
 include the private StreamDiffusionTD `.tox`, a physical sensor, or a headset.
 

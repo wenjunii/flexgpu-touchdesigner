@@ -187,6 +187,11 @@ For example, add these members to a complete preset:
 }
 ```
 
+Keep the referenced private `.tox`, SDKs, calibration, credentials, and local
+replay files under the repository's ignored `local-components/`, `private/`, or
+`calibration/` boundaries. They are machine-local inputs and must not be forced
+into the public Git index.
+
 These settings do not install external dependencies. At startup, the stock
 project binds resolved tier/adaptive values and the live render subset described
 above to source placeholders, reconstruction, point render, and output

@@ -115,11 +115,11 @@ each assigned process/GPU: a heterogeneous 5090 AI plus 3080 Ti world pair uses
 different source and world/render limits rather than inheriting the AI tier in
 both processes.
 
-| Tier | AI intent | Geometry intent | Experience support |
+| Tier | AI intent | Geometry intent | Stock branch budget |
 | --- | --- | --- | --- |
-| `3080ti_16gb` | 384-512 diffusion budget, 5-10 Hz target state | 256-384 geometry, 60k-120k points | installation, VR, combined-lite |
-| `4090` | 384-512 diffusion budget, 8-15 Hz target state | 256-512 geometry, 100k-250k points | installation, VR, combined |
-| `5090` | 384-512 diffusion budget, 10-20 Hz target state | 256-512 geometry, 150k-400k points | installation, VR, combined |
+| `3080ti_16gb` | 384-512 diffusion budget, 5-10 Hz target state | 256-384 geometry, 60k-120k points | installation, desktop-stereo (`vr`), combined-lite |
+| `4090` | 384-512 diffusion budget, 8-15 Hz target state | 256-512 geometry, 100k-250k points | installation, desktop-stereo (`vr`), combined |
+| `5090` | 384-512 diffusion budget, 10-20 Hz target state | 256-512 geometry, 150k-400k points | installation, desktop-stereo (`vr`), combined |
 
 Budgets are conservative starting points, not benchmark promises.  The
 operator should lower AI resolution/rate before lowering installation or VR

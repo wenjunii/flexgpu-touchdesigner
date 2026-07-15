@@ -30,10 +30,10 @@ Gaussian inference are likewise user-supplied adapters.
 .github/workflows/  Windows CI for tests, benchmark smoke, and script parsing
 config/             validated show profiles and quality presets
 docs/               architecture and WorldBus protocol
-scripts/            one-click Windows start, stop, and diagnosis
+scripts/            Windows initialize/start/stop plus guarded public sync
 src/flexgpu/         planner, adaptive governor, telemetry, and WorldBus reference
-tests/               planner/configuration tests
-tools/               launcher CLI, benchmark/replay, and WorldBus commands
+tests/               runtime, transport, configuration, and publication tests
+tools/               launcher, benchmark/replay, WorldBus, and public-sync checks
 projects/            generated and validated FlexShow.toe starter
 touchdesigner/       TD 2025 bootstrap source and integration guide
 ```
@@ -148,7 +148,7 @@ host on error, so omit it during an interactive session you want to keep open.
 
 | Available hardware | Start from | Recommended assignment |
 | --- | --- | --- |
-| 3080 Ti Laptop 16 GB | `single-3080ti-16gb.json` | Combined-lite, or installation/desktop-stereo alone |
+| 3080 Ti Laptop 16 GB | `single-3080ti-16gb.json` | Combined-lite stock preview, or installation/desktop-stereo alone |
 | 4090 24 GB | `single-4090.json` | All stock experience branches with more headroom |
 | 5090 32 GB | `single-5090.json` | All stock branches with more quality reserve |
 | Two different local NVIDIA GPUs | `dual-local-heterogeneous.json` | AI on one GPU, show/desktop-stereo on the other |
@@ -209,12 +209,13 @@ The chosen tier changes resolution, update-rate, and point-count budgets.  It
 does not change the network structure.
 
 - `3080ti_16gb`: SD-Turbo-oriented 512-square diffusion, 384-square geometry,
-  lean point budgets, and combined-lite defaults.
+  and lean point budgets; the supplied single-GPU preset starts in
+  installation/fog mode.
 - `4090`: higher update/geometry budget with room for measured conditioning.
 - `5090`: larger reserve for resolution, point count, or model experiments.
 
 The target architecture decouples AI updates from world/render cadence. On the
-3080 Ti, for example, the configured 4-10 Hz shape-update range is a scheduling
+3080 Ti, for example, the configured 5-10 Hz diffusion-update range is a scheduling
 budget for a future AI adapter; the stock demo does not prove that cadence. The
 point feedback and desktop-stereo render continue on TouchDesigner's frame
 clock, while headset timing requires a user-supplied runtime.
@@ -290,6 +291,75 @@ than burying those dependencies in the launcher.
 
 ## Testing and security
 
+### Public GitHub sync policy
+
+Sync project-owned source, documentation, tests, public configurations, CI,
+the stock `projects/FlexShow.toe`, and original or explicitly redistributable
+assets. Do **not** sync any of the following:
+
+- credentials, API keys, access tokens, passwords, private keys, certificates,
+  credential-bearing URLs, or non-placeholder `.env` files;
+- the private `StreamDiffusionTD.tox`, machine-local components/configuration,
+  calibration, captures, telemetry, logs, or runtime state. All `.tox` files
+  and every `.toe` except `projects/FlexShow.toe` are deliberately local by
+  default; relax the `.tox` rule only after you explicitly confirm a component
+  is project-owned or redistributable;
+- model weights, paid SDKs/plugins/assets, or anything whose license does not
+  explicitly permit redistribution. Free-to-use does not necessarily mean
+  GitHub-redistributable; include the required license or notice for any
+  redistributable third-party item;
+- opaque archives (`.zip`, `.7z`, `.rar`, compressed tar files, and similar
+  bundles). The guard does not unpack them, so distribute reviewed public
+  contents in inspectable form or use a separately reviewed release process.
+
+Keep excluded material in an ignored `private/`, `paid/`, `licensed/`,
+`local-components/`, `models/`, `weights/`, or `calibration/` directory. Never
+use `git add -f` to bypass this boundary. `.env.example` may contain placeholders
+only.
+
+Run the read-only guard at any time:
+
+```powershell
+.\scripts\Test-PublicSync.ps1 -SelfTest
+.\scripts\Sync-PublicRepo.ps1
+```
+
+The first command scans every non-ignored sync candidate, the exact Git index,
+all local ref and annotated-tag metadata, and every historical blob reachable
+from local refs (including a stash). It reports only path, rule, and line,
+never the matched value; secret-bearing filenames are replaced with a hash.
+Files above the 100 MiB scan ceiling fail closed and require a separate reviewed
+distribution plan. The second command is also read-only without action
+switches.
+For an intentional full update:
+
+```powershell
+.\scripts\Sync-PublicRepo.ps1 `
+  -Stage `
+  -Commit `
+  -Message "Describe the public update" `
+  -Push
+```
+
+The guarded sync scans before staging, scans the resulting index and commit
+message, and scans the complete history reachable from the exact `HEAD` it will
+publish. A private local stash or unrelated private branch is therefore not
+published and does not block that branch's sync. The script requires an
+explicit commit message and refuses to push a dirty or uncommitted tree. It
+pushes only the current branch with automatic tag following disabled. A change
+to `projects/FlexShow.toe` additionally requires
+`-AllowCanonicalProjectUpdate` after manual inspection: a compressed `.toe` can
+embed a private component that a text scanner cannot reliably see. Keep the
+working integration in ignored `projects/FlexShow-local.toe`; publish the
+canonical project only after removing private `.tox`, credentials, paid assets,
+and private paths.
+
+These checks are defense in depth, not a license oracle. If a credential is ever
+committed, revoke or rotate it immediately and purge it from Git history;
+deleting it only from the latest revision is insufficient.
+
+### Test suite
+
 Run the dependency-free tests with:
 
 ```powershell
@@ -298,8 +368,9 @@ python -m unittest discover -s tests -v
 
 GitHub Actions repeats Python compilation (including the TouchDesigner build
 sources), Draft 2020-12 validation of every shipped JSON profile, the unit
-suite, a synthetic benchmark, PowerShell syntax parsing, and a real
-initializer write/read/validation smoke test on `windows-latest`.
+suite, a synthetic benchmark, PowerShell syntax parsing, a full-history
+publication-safety scan, and a real initializer write/read/validation smoke
+test on `windows-latest`.
 
 Configuration files may contain arbitrary process commands. Treat downloaded
 or shared configurations as executable input: inspect them before using
