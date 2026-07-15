@@ -24,6 +24,8 @@ models/
 Backup/
 CrashAutoSave.*.toe
 projects/FlexShow.[0-9]*.toe
+projects/*-local.toe
 config/show-config.json
 config/local-*.json
 config/*-local.json
+config/presets/local-*.json

@@ -1,6 +1,6 @@
 # FlexShow configuration
 
-`flexgpu.py` reads one JSON configuration and turns it into a deterministic GPU/process plan. The PowerShell entry points in `../scripts` use `config/flexshow.json` unless `-Config` or `FLEXSHOW_CONFIG` selects another file.
+`flexgpu.py` reads one JSON or TOML configuration and turns it into a deterministic GPU/process plan. Config selection precedence is explicit `-Config`, `FLEXSHOW_CONFIG`, `FLEXGPU_CONFIG`, then `config/flexshow.json`.
 
 The configuration has five independent choices:
 
@@ -18,13 +18,20 @@ from your actual show network before launch.
 
 ## Safe first run
 
-All operator scripts are previews by default. `-Start` authorizes launch or active diagnostics; `-Stop` authorizes shutdown:
+Start and Stop are previews by default. `-Start` authorizes launch and `-Stop`
+authorizes forceful shutdown. Diagnose is always read-only; its legacy
+`-Start`/`-Run` switch is accepted but ignored with a warning:
 
 ```powershell
 .\scripts\Start-FlexShow.ps1
 .\scripts\Diagnose-FlexShow.ps1
 .\scripts\Start-FlexShow.ps1 -Config config\presets\single-4090.json -Experience vr
 ```
+
+For CI or another dedicated PowerShell process, `-Json -ExitWithCode` produces
+clean JSON and preserves controller exit `2` (configuration) or `3`
+(diagnostic/runtime). Do not use `-ExitWithCode` in an interactive host you
+want to keep open, because an error intentionally exits that host.
 
 After the plan is correct and the `.toe` project paths exist:
 
@@ -33,7 +40,12 @@ After the plan is correct and the `.toe` project paths exist:
 .\scripts\Stop-FlexShow.ps1  -Config config\presets\dual-network-ai-worker-3080ti-16gb.json -Stop
 ```
 
-`-Start` authorizes launch and `-Stop` authorizes shutdown. Repeating Start or Stop is safe; process ownership is tracked by the runtime manifest rather than by killing processes by name.
+Repeating Stop is safe. Repeating Start reuses a process only when its command
+and injected environment still match; changed experience, completion, tier, or
+GPU settings require Stop followed by Start. Process ownership is tracked by a
+creation token, executable, command-line hash, environment hash, and retained
+Windows process handle rather than by executable name. Windows Stop is forceful,
+so save edits in launched TouchDesigner processes first.
 
 ## Project paths
 
@@ -45,7 +57,17 @@ They expect `projects/FlexShow.toe` at the repository root. The planner injects 
 
 ## Presets
 
-Hardware/topology presets live in `presets/`. The three single-GPU examples also demonstrate installation/fog, VR/procedural, and combined/hybrid. CLI flags can independently override `experience`, `completion`, and `tier`, so the examples do not need to grow into a full combination matrix.
+Hardware/topology presets live in `presets/`. Run them in place. To customize a
+preset while preserving its relative paths, copy it within that directory—for
+example, `Copy-Item .\config\presets\single-3080ti-16gb.json .\config\presets\local-show.json`.
+Local preset names beginning with `local-` are gitignored. Explicit and
+environment-selected relative config paths resolve from the caller's current
+PowerShell directory; the default config resolves from the repository root.
+
+The three single-GPU examples also demonstrate installation/fog,
+VR/procedural, and combined/hybrid. CLI flags can independently override
+`experience`, `completion`, and `tier`, so the examples do not need to grow into
+a full combination matrix.
 
 | Preset | Topology | Experience | Completion |
 | --- | --- | --- | --- |

@@ -1,7 +1,9 @@
-# WorldBus v1 contract
+# WorldBus v1 AI-frame transport contract
 
-WorldBus carries a generated view and the minimum information needed to turn it
-into a temporally stable point target.  It deliberately does not carry the
+This document defines the wire/local transport from the AI producer into the
+show node. It carries a generated view and the minimum information needed to
+turn it into a temporally stable point target. It is not the four-TOP normalized
+adapter layout inside `FlexShow.toe`, and it deliberately does not carry the
 authoritative interactive particle simulation; that lives on the show node.
 
 ## Frame payload
@@ -32,6 +34,7 @@ projects can coexist:
 ```text
 <namespace>.worldbus.rgb
 <namespace>.worldbus.depth
+<namespace>.worldbus.mask
 <namespace>.worldbus.confidence
 <namespace>.worldbus.meta
 <namespace>.worldbus.heartbeat
@@ -73,6 +76,8 @@ fields validate.
 
 ## Versioning
 
-`v1` is part of both the OSC path and configuration.  Additive metadata fields
-may be ignored by older receivers.  A change to packing, units, or required
-fields must use a new version.
+`v1` is part of the OSC path and this protocol. Current presets are transport
+scaffolds and do not implement version negotiation; a real adapter should
+expose `transport.worldbus_version: 1`. Additive metadata fields may be ignored
+by older receivers. A change to packing, units, or required fields must use a
+new version.

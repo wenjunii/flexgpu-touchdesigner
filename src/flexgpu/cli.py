@@ -199,7 +199,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 },
                 compact,
             )
-            return 0
+            return 3 if not args.execute and summary["status"] == "fail" else 0
         parser.error("unsupported action")
         return 2
     except ConfigError as exc:

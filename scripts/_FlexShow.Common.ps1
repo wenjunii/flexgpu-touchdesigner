@@ -1,5 +1,10 @@
+#Requires -Version 5.1
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if ($env:OS -ne 'Windows_NT') {
+    throw 'FlexShow operator scripts currently support Windows only.'
+}
 
 function Get-FlexShowRepositoryRoot {
     return [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
@@ -13,28 +18,27 @@ function Resolve-FlexShowConfig {
 
     $root = Get-FlexShowRepositoryRoot
     $selected = $Config
+    $useRepositoryRoot = $false
 
     if ([string]::IsNullOrWhiteSpace($selected)) {
         $selected = $env:FLEXSHOW_CONFIG
     }
     if ([string]::IsNullOrWhiteSpace($selected)) {
+        $selected = $env:FLEXGPU_CONFIG
+    }
+    if ([string]::IsNullOrWhiteSpace($selected)) {
         $selected = 'config/flexshow.json'
+        $useRepositoryRoot = $true
     }
 
     if (-not [System.IO.Path]::IsPathRooted($selected)) {
-        $selected = Join-Path $root $selected
+        $basePath = if ($useRepositoryRoot) { $root } else { (Get-Location).Path }
+        $selected = Join-Path $basePath $selected
     }
 
     $fullPath = [System.IO.Path]::GetFullPath($selected)
     if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
         throw "FlexShow config does not exist: $fullPath"
-    }
-
-    try {
-        $null = Get-Content -LiteralPath $fullPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    }
-    catch {
-        throw "FlexShow config is not valid JSON: $fullPath`n$($_.Exception.Message)"
     }
 
     return $fullPath
@@ -49,7 +53,7 @@ function Test-FlexShowPython {
     )
 
     try {
-        & $Executable @PrefixArgs -c 'import sys; raise SystemExit(0)' *> $null
+        & $Executable @PrefixArgs -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' *> $null
         return ($LASTEXITCODE -eq 0)
     }
     catch {
@@ -121,7 +125,7 @@ function Get-FlexShowPython {
         }
     }
 
-    throw 'No usable Python 3 runtime was found. Set FLEXSHOW_PYTHON, create .venv, install Python, or install TouchDesigner.'
+    throw 'No usable Python 3.10+ runtime was found. Set FLEXSHOW_PYTHON, create .venv, install Python, or install TouchDesigner.'
 }
 
 function Invoke-FlexShowCli {
@@ -142,8 +146,15 @@ function Invoke-FlexShowCli {
         [ValidateSet('', 'auto', '3080ti_16gb', '4090', '5090')]
         [string]$Tier = '',
 
+        [AllowEmptyString()]
+        [string]$NvidiaSmi = '',
+
         [ValidateSet('None', 'DryRun', 'Execute')]
-        [string]$ActionMode = 'None'
+        [string]$ActionMode = 'None',
+
+        [switch]$Json,
+
+        [switch]$ExitWithCode
     )
 
     $root = Get-FlexShowRepositoryRoot
@@ -176,16 +187,47 @@ function Invoke-FlexShowCli {
         $arguments.Add('--tier')
         $arguments.Add($Tier)
     }
+    if (-not [string]::IsNullOrWhiteSpace($NvidiaSmi)) {
+        $arguments.Add('--nvidia-smi')
+        $arguments.Add($NvidiaSmi)
+    }
 
     switch ($ActionMode) {
         'DryRun' { $arguments.Add('--dry-run') }
         'Execute' { $arguments.Add('--execute') }
     }
+    if ($Json) {
+        $arguments.Add('--json')
+    }
 
-    Write-Host "[FlexShow] command=$Command mode=$ActionMode config=$configPath python=$($python.Source)"
-    & $python.Executable @arguments
-    $exitCode = $LASTEXITCODE
+    if (-not $Json) {
+        Write-Host "[FlexShow] command=$Command mode=$ActionMode config=$configPath python=$($python.Source)"
+    }
+    # Native stderr is useful structured CLI output, not a PowerShell parsing
+    # failure. Keep it visible while preventing ErrorActionPreference=Stop from
+    # interrupting us before the controller exit code is captured.
+    $previousErrorActionPreference = $ErrorActionPreference
+    $hadNativePreference = Test-Path Variable:PSNativeCommandUseErrorActionPreference
+    $previousNativePreference = $null
+    if ($hadNativePreference) {
+        $previousNativePreference = $PSNativeCommandUseErrorActionPreference
+        $PSNativeCommandUseErrorActionPreference = $false
+    }
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $python.Executable @arguments
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        if ($hadNativePreference) {
+            $PSNativeCommandUseErrorActionPreference = $previousNativePreference
+        }
+    }
     if ($exitCode -ne 0) {
+        if ($ExitWithCode) {
+            exit $exitCode
+        }
         throw "FlexShow controller exited with code $exitCode."
     }
 }

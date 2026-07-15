@@ -20,6 +20,7 @@ from flexgpu.diagnostics import diagnostic_summary, run_diagnostics  # noqa: E40
 from flexgpu.models import GPUInfo, RuntimeControlError  # noqa: E402
 from flexgpu.planner import build_process_plan  # noqa: E402
 from flexgpu.runtime import (  # noqa: E402
+    _environment_fingerprint,
     _inspect_process,
     _pid_alive,
     manifest_path,
@@ -122,6 +123,7 @@ class DiagnosticAndCliTests(unittest.TestCase):
                                 "command": list(process.command),
                                 "cwd": process.cwd,
                                 "identity": identity,
+                                "environment_sha256": _environment_fingerprint(process.env),
                             }
                         ],
                     },
@@ -130,6 +132,39 @@ class DiagnosticAndCliTests(unittest.TestCase):
             result = start_plan(plan, config, execute=True)
             self.assertEqual(result["started"], [])
             self.assertEqual(result["reused"][0]["pid"], os.getpid())
+
+    def test_execute_start_refuses_reuse_when_environment_changed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = usable_config(directory)
+            plan = build_process_plan(config, [GPU])
+            process = plan.processes[0]
+            identity = _inspect_process(os.getpid())
+            self.assertIsNotNone(identity)
+            path = manifest_path(config)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "version": 2,
+                        "started_at": "test",
+                        "config": config.source_path,
+                        "processes": [
+                            {
+                                "role": process.role,
+                                "pid": os.getpid(),
+                                "command": list(process.command),
+                                "cwd": process.cwd,
+                                "identity": identity,
+                                "environment_sha256": _environment_fingerprint(
+                                    {"FLEXGPU_EXPERIENCE": "different"}
+                                ),
+                            }
+                        ],
+                    },
+                    handle,
+                )
+            with self.assertRaises(RuntimeControlError):
+                start_plan(plan, config, execute=True)
 
     def test_stop_refuses_mismatched_pid_identity_without_signaling(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -184,6 +219,23 @@ class DiagnosticAndCliTests(unittest.TestCase):
                 with self.assertRaises(RuntimeControlError):
                     stop_managed(config, execute=False)
 
+    def test_stop_refuses_manifest_from_different_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = usable_config(directory)
+            path = manifest_path(config)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "version": 2,
+                        "config": os.path.join(directory, "another-show.json"),
+                        "processes": [],
+                    },
+                    handle,
+                )
+            with self.assertRaises(RuntimeControlError):
+                stop_managed(config, execute=False)
+
     def test_cli_contract_accepts_all_actions_and_overrides(self) -> None:
         parser = build_argument_parser()
         self.assertEqual(parser.parse_args(["discover"]).action, "discover")
@@ -229,6 +281,31 @@ class DiagnosticAndCliTests(unittest.TestCase):
             payload = json.loads(output.getvalue())
             self.assertEqual(payload["status"], "dry-run")
             self.assertFalse(os.path.exists(os.path.join(directory, "runtime")))
+
+    def test_cli_start_dry_run_fails_when_preflight_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "show.json")
+            data = {
+                "topology": "single",
+                "runtime_dir": "runtime",
+                "processes": {
+                    "world": {
+                        "executable": sys.executable,
+                        "project": "missing.toe",
+                        "touchdesigner": False,
+                    }
+                },
+            }
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(data, handle)
+            output = io.StringIO()
+            with mock.patch("flexgpu.cli.discover_nvidia_gpus", return_value=[GPU]):
+                with contextlib.redirect_stdout(output):
+                    status = main(["start", "--config", path, "--json"])
+            self.assertEqual(status, 3)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["status"], "dry-run")
+            self.assertEqual(payload["diagnostics"]["summary"]["status"], "fail")
 
 
 if __name__ == "__main__":

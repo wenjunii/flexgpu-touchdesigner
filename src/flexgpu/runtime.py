@@ -19,6 +19,17 @@ from .models import FlexConfig, ProcessPlan, RuntimeControlError
 MANIFEST_NAME = "flexgpu-manifest.json"
 
 
+def _environment_fingerprint(environment: Mapping[str, str]) -> str:
+    """Hash launch settings without persisting possible secret values."""
+
+    payload = json.dumps(
+        sorted((str(key), str(value)) for key, value in environment.items()),
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _windows_kernel32():
     from ctypes import wintypes
 
@@ -385,6 +396,13 @@ def start_plan(
                     "active %s process command differs from the new plan; stop it before restarting"
                     % process.role
                 )
+            if current and current.get("environment_sha256") != _environment_fingerprint(
+                process.env
+            ):
+                raise RuntimeControlError(
+                    "active %s process environment differs from the new plan; stop it before applying overrides"
+                    % process.role
+                )
 
     runtime_dir = runtime_directory(config)
     os.makedirs(runtime_dir, exist_ok=True)
@@ -441,6 +459,7 @@ def start_plan(
                     "log": log_path,
                     "gpu_uuid": process.gpu.uuid if process.gpu else "",
                     "identity": identity,
+                    "environment_sha256": _environment_fingerprint(process.env),
                 }
             )
         manifest = {
@@ -476,6 +495,15 @@ def stop_managed(config: FlexConfig, execute: bool = False) -> dict[str, Any]:
 
     path = manifest_path(config)
     manifest = _read_manifest(path)
+    if manifest:
+        recorded_config = manifest.get("config")
+        if isinstance(recorded_config, str) and recorded_config and config.source_path:
+            if os.path.normcase(os.path.abspath(recorded_config)) != os.path.normcase(
+                os.path.abspath(config.source_path)
+            ):
+                raise RuntimeControlError(
+                    "runtime manifest belongs to a different config: %s" % recorded_config
+                )
     records = manifest.get("processes", []) if manifest else []
     targets: list[dict[str, Any]] = []
     verified_records: list[Mapping[str, Any]] = []

@@ -5,10 +5,10 @@ real-time generated point world.  It supports:
 
 - NVIDIA RTX 3080 Ti Laptop 16 GB, RTX 4090 24 GB, and RTX 5090 32 GB tiers.
 - One GPU, two GPUs in one Windows computer, or two networked computers.
-- Installation, VR, and combined experience modes.
-- Thick-points/fog, procedural backfill, and hybrid completion modes.
-- A non-blocking AI pipeline: audience interaction and rendering continue when
-  a diffusion or depth frame is late.
+- Configuration branches for installation, VR, and combined experiences.
+- Selectors for thick-points/fog, procedural backfill, and hybrid completion.
+- An asynchronous role design intended to keep interaction and rendering
+  responsive when a future diffusion or depth adapter is late.
 
 It does **not** bundle StreamDiffusionTD, a depth sensor SDK, a headset runtime,
 or model weights.  Their locations are configured as adapters so the same show
@@ -36,38 +36,74 @@ projects/            generated and validated FlexShow.toe starter
 touchdesigner/       TD 2025 bootstrap source and integration guide
 ```
 
+## Current implementation status
+
+| Area | Status |
+| --- | --- |
+| GPU discovery, tier selection, process planning and affinity | Implemented and tested |
+| Safe preview/start/identity-verified stop | Implemented and tested on Windows |
+| `FlexShow.toe` component layout and runtime parameters | Generated, launchable integration shell |
+| StreamDiffusionTD, depth estimation and sensor calibration | Adapter boundaries only |
+| Point simulation, fog/backfill completion and WorldBus transport | Contracts/placeholders only |
+| Projection/LED output and PCVR rendering | Output branches only; no production renderer |
+
+Experience and completion flags currently select declarative branches in the
+integration shell. They do not yet provide finished projection, VR, particle,
+fog, or procedural-completion systems.
+
 ## Quick start
 
-Open PowerShell in this folder.  First inspect the machine without launching
-anything:
+Open PowerShell in the repository root. Presets are ready to run in place. To
+make an untracked local copy, keep it in the same directory so its relative
+project paths remain valid:
 
 ```powershell
-.\scripts\Diagnose-FlexShow.ps1 -Config .\config\presets\single-3080ti-16gb.json
+Copy-Item .\config\presets\single-3080ti-16gb.json .\config\presets\local-show.json
 ```
 
-Preview exactly which processes and GPU affinities would be used:
+First inspect the machine without launching anything:
 
 ```powershell
-.\scripts\Start-FlexShow.ps1 -Config .\config\presets\single-3080ti-16gb.json
+.\scripts\Diagnose-FlexShow.ps1 -Config .\config\presets\local-show.json
 ```
 
-The start script is intentionally a dry run unless `-Start` is present:
+Diagnostics are always read-only. Preview the complete Start preflight,
+including paths, GPU affinity and runtime settings:
 
 ```powershell
-.\scripts\Start-FlexShow.ps1 -Config .\config\presets\single-3080ti-16gb.json -Start
+.\scripts\Start-FlexShow.ps1 -Config .\config\presets\local-show.json
 ```
 
-Stop only processes recorded by this project's runtime manifest:
+The Start script remains non-mutating unless `-Start` is present:
 
 ```powershell
-.\scripts\Stop-FlexShow.ps1 -Config .\config\presets\single-3080ti-16gb.json -Stop
+.\scripts\Start-FlexShow.ps1 -Config .\config\presets\local-show.json -Start
+```
+
+Stop only identity-verified processes recorded by that configuration's runtime
+manifest:
+
+```powershell
+.\scripts\Stop-FlexShow.ps1 -Config .\config\presets\local-show.json -Stop
 ```
 
 The included `projects/FlexShow.toe` is launchable now, but its AI, sensor,
-particle, projection, and VR modules are labelled integration shells. Copy the
-nearest preset to `config/show-config.json`, then connect your real
-StreamDiffusionTD and device components at those boundaries. A missing required
-path is reported by validation instead of silently launching the wrong file.
+particle, projection, and VR modules are labelled integration shells. Connect
+your real StreamDiffusionTD and device components at those boundaries. A
+missing required path is reported by validation instead of silently launching
+the wrong file.
+
+Add `-Json` to any operator script for compact machine-readable output. Start
+and Diagnose also accept `-NvidiaSmi C:\path\to\nvidia-smi.exe`. Config selection
+precedence is explicit `-Config`, `FLEXSHOW_CONFIG`, `FLEXGPU_CONFIG`, then
+`config/flexshow.json`. Explicit or environment-provided relative paths resolve
+from the caller's current PowerShell directory; the default resolves from the
+repository root. The CLI accepts JSON and TOML configurations.
+
+For a dedicated automation process, combine `-Json -ExitWithCode` so
+`powershell.exe -File` exits with the controller's `2` (configuration) or `3`
+(diagnostic/runtime) status. `-ExitWithCode` deliberately exits that PowerShell
+host on error, so omit it during an interactive session you want to keep open.
 
 ## Choose a deployment
 
@@ -88,13 +124,43 @@ assignment as well: keeping the faster card on rendering can matter more than
 AI update rate. The network examples intentionally demonstrate a 3080 Ti AI
 worker feeding a faster 4090/5090 show node.
 
+The three single-GPU presets intentionally demonstrate different starting
+modes: 3080 Ti uses installation/fog, 4090 uses VR/procedural, and 5090 uses
+combined/hybrid. Overrides let you keep both completion options while testing:
+
+```powershell
+.\scripts\Start-FlexShow.ps1 -Config .\config\presets\single-3080ti-16gb.json -Experience combined -Completion hybrid
+```
+
+Preview a two-GPU computer with one command:
+
+```powershell
+.\scripts\Start-FlexShow.ps1 -Config .\config\presets\dual-local-heterogeneous.json
+```
+
+For two networked computers, run the matching profile on each machine. Replace
+the RFC 5737 example addresses in local preset copies with the machines' static
+show-network addresses first:
+
+```powershell
+# AI computer
+.\scripts\Start-FlexShow.ps1 -Config .\config\presets\dual-network-ai-worker-3080ti-16gb.json
+
+# Show/VR computer; choose the installed render GPU profile
+.\scripts\Start-FlexShow.ps1 -Config .\config\presets\dual-network-show-node-4090.json
+```
+
+These commands are previews. Add `-Start` only after both plans and diagnostics
+are correct. See [config/README.md](config/README.md) for selectors, local copies,
+network fields, and all supplied profiles.
+
 ## Quality behavior
 
 The chosen tier changes resolution, update-rate, and point-count budgets.  It
 does not change the network structure.
 
-- `3080ti_16gb`: SD-Turbo-oriented, asynchronous 384-512 generation, lean
-  geometry, and combined-lite defaults.
+- `3080ti_16gb`: SD-Turbo-oriented 512-square diffusion, 384-square geometry,
+  lean point budgets, and combined-lite defaults.
 - `4090`: higher update/geometry budget with room for measured conditioning.
 - `5090`: larger reserve for resolution, point count, or model experiments.
 
@@ -109,10 +175,10 @@ See [touchdesigner/README.md](touchdesigner/README.md) for building the starter
 
 - StreamDiffusionTD RGB and optional depth/confidence.
 - Depth-camera audience points and interaction forces.
-- Global shared memory or Touch In/Out WorldBus transport.
-- Persistent point simulation.
-- The three completion choices.
-- Installation and VR outputs plus operator status.
+- Global shared-memory or Touch In/Out transport adapter boundaries.
+- A persistent point-simulation boundary.
+- Selectors and placeholders for the three completion choices.
+- Installation and VR output adapters plus operator status.
 
 The scaffold is deliberately adapter-based.  Connect the exact StreamDiffusionTD
 component, camera SDK, and VR component available on the show machine rather
@@ -131,6 +197,10 @@ or shared configurations as executable input: inspect them before using
 `-Start`. Shutdown records include process creation time, executable identity,
 and a command-line hash so stale PID reuse fails closed. Do not edit or trust a
 runtime manifest supplied by another user.
+
+If `-Experience`, `-Completion`, `-Tier`, GPU selection, or another injected
+launch setting differs from an already running process, Start refuses to reuse
+the old environment. Stop the owned process, preview again, and then restart.
 
 On Windows, an authorized `-Stop` force-terminates only the identity-verified
 show processes recorded by this project. Save any interactive TouchDesigner

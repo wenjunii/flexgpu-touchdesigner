@@ -15,20 +15,29 @@ The builder is safe to run in an existing project:
 - Saving writes a copy of the complete current TouchDesigner project to the
   requested `.toe` path.
 
+Bootstrap-owned tables and Text DATs are rewritten when the builder runs. Keep
+custom code in separate operators rather than editing generated DAT contents.
+
 ## Build in TouchDesigner
 
-Run the following as one line in the TouchDesigner Textport, changing `root`
-to the folder where you cloned this repository:
+Start from a blank project. Run the following as one line in the TouchDesigner
+Textport, changing `root` to the clone folder. It deliberately saves to an
+ignored local filename so the tracked canonical project is not overwritten:
 
 ```python
-from pathlib import Path; import sys; root = Path(r'C:\path\to\flexgpu-touchdesigner'); sys.path.insert(0, str(root / 'touchdesigner')); import bootstrap_project as b; b.build(str(root / 'projects' / 'FlexShow.toe'), config_path=None, save=True)
+from pathlib import Path; import sys; root = Path(r'C:\path\to\flexgpu-touchdesigner'); sys.path.insert(0, str(root / 'touchdesigner')); import bootstrap_project as b; b.build(str(root / 'projects' / 'FlexShow-local.toe'), config_path=None, save=True)
 ```
 
 To load a JSON profile:
 
 ```python
-from pathlib import Path; import sys; root = Path(r'C:\path\to\flexgpu-touchdesigner'); sys.path.insert(0, str(root / 'touchdesigner')); import bootstrap_project as b; b.build(str(root / 'projects' / 'FlexShow.toe'), config_path=str(root / 'config' / 'flexshow.json'), save=True)
+from pathlib import Path; import sys; root = Path(r'C:\path\to\flexgpu-touchdesigner'); sys.path.insert(0, str(root / 'touchdesigner')); import bootstrap_project as b; b.build(str(root / 'projects' / 'FlexShow-local.toe'), config_path=str(root / 'config' / 'flexshow.json'), save=True)
 ```
+
+When adding the scaffold to an existing project, use
+`b.build(None, config_path=..., save=False)` and save the full project yourself
+to an untracked location. `save=True` saves every operator in the current
+TouchDesigner session, including unrelated nodes and external paths.
 
 `build(output_path, config_path=None, save=True)` returns the `flexgpu` COMP.
 Use `save=False` to build without saving; in that case `output_path` may be
@@ -45,19 +54,20 @@ because node creation requires the TouchDesigner API.
 |---|---|
 | `CONFIG` | Build profile, flattened JSON and live runtime state |
 | `AI_PIPELINE` | Placeholder producer for generated RGB and generated XYZ |
-| `WORLD_CORE` | Sensor ingest, calibration, interactions and persistent point simulation |
+| `WORLD_CORE` | Placeholder boundary for sensor ingest, calibration, interactions and point simulation |
 | `WORLD_BUS_IN` | Normalizes local or network AI/sensor inputs into stable texture contracts |
-| `COMPLETION` | Selects fog, procedural, or hybrid view completion |
-| `WORLD_BUS_OUT` | Publishes the one authoritative world to every renderer |
-| `INSTALLATION_OUT` | Projection/LED renderer and mapping boundary |
-| `VR_OUT` | Stereo PCVR renderer boundary |
-| `OPERATOR_DASHBOARD` | Runtime controls, status and a commissioning checklist |
+| `COMPLETION` | Selects fog, procedural, or hybrid placeholder branches |
+| `WORLD_BUS_OUT` | Placeholder publisher for a future authoritative world |
+| `INSTALLATION_OUT` | Projection/LED output and mapping boundary |
+| `VR_OUT` | Stereo PCVR output boundary |
+| `OPERATOR_DASHBOARD` | Declarative settings, status and commissioning checklist |
 | `STARTUP` | Environment-aware helper module and startup callbacks |
 
 Both output modules consume the same world. Combined mode therefore adds two
 camera/render views; it does not create a second simulation.
 
-The WorldBus shell uses four TOP contracts:
+Inside the `.toe`, the normalized show-side adapter layer uses four TOP
+contracts:
 
 1. `generated_rgb`: generated color.
 2. `generated_position`: AI-estimated XYZ with valid alpha.
@@ -67,6 +77,12 @@ The WorldBus shell uses four TOP contracts:
 The placeholders are Constant/In/Out/Null TOPs so the project opens without
 models, sensors, SteamVR, Spout, or third-party Python packages. Replace the
 placeholder sources while retaining the named contracts.
+
+This internal adapter layer is distinct from the wire-level AI frame transport
+in [`docs/WORLDBUS.md`](../docs/WORLDBUS.md), which carries RGB, depth, mask,
+confidence, and metadata. A future `WORLD_BUS_IN` implementation translates
+that transport frame into the normalized internal TOPs above. The authoritative
+interactive simulation remains on the show node.
 
 ## One project, single or dual topology
 
@@ -96,6 +112,11 @@ declarative `Enabled` parameters and `CONFIG/runtime_state`; it deliberately
 does not change `project.cookRate` or destroy/bypass operators. After adding
 real networks, use the `Enabled` values to gate cooking.
 
+The generated dashboard is not a finished control surface: its Apply and
+Emergency Reset pulses are not wired to callbacks. Its legacy topology menu
+shows only `single` and `dual`; ignore that menu and use launcher environment
+values, which are authoritative for `single`, `dual_local`, and `dual_network`.
+
 To reapply environment values manually:
 
 ```python
@@ -104,11 +125,11 @@ op('/project1/flexgpu/STARTUP/runtime_helpers').module.apply(op('/project1/flexg
 
 ## 3080 Ti 16 GB starting limits
 
-The scaffold defaults to the conservative `3080ti_16gb` tier: SD-Turbo-class
-AI around 512 square, asynchronous geometry updates, approximately 150,000
-points, installation at 60 Hz, and VR at 72 Hz. These are planning defaults,
-not measured guarantees. A laptop's thermal/power configuration materially
-changes throughput.
+The standalone bootstrap table starts around 150,000 points. The normal
+`3080ti_16gb` launcher preset overrides that with the more conservative 120,000
+point budget, 512-square diffusion at 10 Hz, 384-square geometry at 5 Hz, and
+VR at 72 Hz. These are planning defaults, not measured guarantees. A laptop's
+thermal/power configuration materially changes throughput.
 
 For a same-GPU combined run, keep VR as the timing priority, keep queues at one
 frame, drop stale AI frames, and target no more than roughly 11-12 GB total use
@@ -134,3 +155,7 @@ has ample measured headroom.
 - The script creates a `.toe` only when run inside TouchDesigner with
   `save=True`. The included `projects/FlexShow.toe` is a generated convenience
   artifact; the human-readable builder remains the source of truth.
+
+For the process split and failure behavior, see
+[`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md). For the transport/frame
+contract, see [`docs/WORLDBUS.md`](../docs/WORLDBUS.md).
