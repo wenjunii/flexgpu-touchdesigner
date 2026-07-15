@@ -1,0 +1,35 @@
+{
+  "$schema": "../flexshow.schema.json",
+  "topology": "dual_network",
+  "node_role": "render",
+  "experience": "combined",
+  "completion": "hybrid",
+  "tier": "5090",
+  "gpu": {
+    "ai": "auto",
+    "render": "auto"
+  },
+  "processes": {
+    "world": {
+      "executable": "C:\\Program Files\\Derivative\\TouchDesigner\\bin\\TouchDesigner.exe",
+      "project": "../../projects/FlexShow.toe",
+      "cwd": "../..",
+      "touchdesigner": true
+    }
+  },
+  "transport": {
+    "type": "touch_tcp",
+    "bind_host": "192.168.50.20",
+    "peer_host": "192.168.50.10",
+    "atlas_width": 1024,
+    "atlas_height": 512,
+    "atlas_fps": 5,
+    "atlas_port": 12000,
+    "control_port": 12001,
+    "heartbeat_port": 12002,
+    "heartbeat_timeout_ms": 2000,
+    "drop_stale_frames": true,
+    "hold_last_complete_frame": true
+  },
+  "runtime_dir": "../runtime/dual-network-show-node"
+}

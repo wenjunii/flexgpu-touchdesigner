@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.flexgpu/
+runtime/
+logs/
+*.log
+*.tmp
+*.bak
+Backup/
+CrashAutoSave.*.toe
+projects/FlexShow.[0-9]*.toe

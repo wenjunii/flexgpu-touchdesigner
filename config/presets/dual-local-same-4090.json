@@ -1,0 +1,37 @@
+{
+  "$schema": "../flexshow.schema.json",
+  "topology": "dual_local",
+  "experience": "combined",
+  "completion": "hybrid",
+  "tier": "4090",
+  "gpu": {
+    "ai": 0,
+    "render": 1
+  },
+  "processes": {
+    "ai": {
+      "executable": "C:\\Program Files\\Derivative\\TouchDesigner\\bin\\TouchDesigner.exe",
+      "project": "../../projects/FlexShow.toe",
+      "cwd": "../..",
+      "touchdesigner": true
+    },
+    "world": {
+      "executable": "C:\\Program Files\\Derivative\\TouchDesigner\\bin\\TouchDesigner.exe",
+      "project": "../../projects/FlexShow.toe",
+      "cwd": "../..",
+      "touchdesigner": true
+    }
+  },
+  "transport": {
+    "type": "shared_memory",
+    "segment_name": "FlexShowWorldBus",
+    "atlas_width": 1024,
+    "atlas_height": 512,
+    "atlas_fps": 10,
+    "atlas_port": 12000,
+    "control_port": 12001,
+    "heartbeat_port": 12002,
+    "heartbeat_timeout_ms": 2000
+  },
+  "runtime_dir": "../runtime/dual-local-same-4090"
+}

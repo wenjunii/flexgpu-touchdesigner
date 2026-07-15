@@ -1,0 +1,173 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flexshow.local/schema/flexshow.schema.json",
+  "title": "FlexShow GPU orchestration configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "topology",
+    "experience",
+    "completion",
+    "tier",
+    "gpu",
+    "processes"
+  ],
+  "properties": {
+    "$schema": { "type": "string" },
+    "topology": {
+      "enum": ["single", "dual_local", "dual_network"]
+    },
+    "experience": {
+      "enum": ["installation", "vr", "combined"]
+    },
+    "completion": {
+      "enum": ["fog", "procedural", "hybrid"]
+    },
+    "tier": {
+      "enum": ["auto", "3080ti_16gb", "4090", "5090"]
+    },
+    "node_role": {
+      "enum": ["ai", "render"]
+    },
+    "gpu": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ai", "render"],
+      "properties": {
+        "ai": { "$ref": "#/$defs/gpuSelector" },
+        "render": { "$ref": "#/$defs/gpuSelector" }
+      }
+    },
+    "processes": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ai": { "$ref": "#/$defs/process" },
+        "world": { "$ref": "#/$defs/process" }
+      },
+      "minProperties": 1
+    },
+    "transport": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "runtime_dir": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "topology": { "const": "dual_network" } },
+        "required": ["topology"]
+      },
+      "then": { "required": ["node_role", "transport"] }
+    },
+    {
+      "if": {
+        "properties": { "topology": { "const": "single" } },
+        "required": ["topology"]
+      },
+      "then": {
+        "properties": {
+          "processes": { "required": ["world"] }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "topology": { "const": "dual_local" } },
+        "required": ["topology"]
+      },
+      "then": {
+        "properties": {
+          "processes": { "required": ["ai", "world"] }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "topology": { "const": "dual_network" },
+          "node_role": { "const": "ai" }
+        },
+        "required": ["topology", "node_role"]
+      },
+      "then": {
+        "properties": {
+          "processes": { "required": ["ai"] }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "topology": { "const": "dual_network" },
+          "node_role": { "const": "render" }
+        },
+        "required": ["topology", "node_role"]
+      },
+      "then": {
+        "properties": {
+          "processes": { "required": ["world"] }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "gpuSelector": {
+      "oneOf": [
+        { "const": "auto" },
+        { "type": "integer", "minimum": 0 },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["index"],
+          "properties": { "index": { "type": "integer", "minimum": 0 } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["uuid"],
+          "properties": { "uuid": { "type": "string", "minLength": 1 } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["bus_id"],
+          "properties": { "bus_id": { "type": "string", "minLength": 1 } }
+        }
+      ]
+    },
+    "process": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": ["string", "number"] }
+        },
+        "executable": { "type": "string", "minLength": 1 },
+        "project": { "type": "string", "minLength": 1 },
+        "args": {
+          "type": "array",
+          "items": { "type": ["string", "number"] }
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": { "type": ["string", "number", "boolean"] }
+        },
+        "cwd": { "type": "string", "minLength": 1 },
+        "touchdesigner": { "type": "boolean" },
+        "gpu_affinity": { "type": "boolean" },
+        "affinity": { "type": "boolean" }
+      },
+      "oneOf": [
+        { "required": ["command"] },
+        { "required": ["executable"] }
+      ]
+    }
+  }
+}

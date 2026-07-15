@@ -1,0 +1,34 @@
+{
+  "$schema": "../flexshow.schema.json",
+  "topology": "dual_network",
+  "node_role": "ai",
+  "experience": "combined",
+  "completion": "hybrid",
+  "tier": "3080ti_16gb",
+  "gpu": {
+    "ai": "auto",
+    "render": "auto"
+  },
+  "processes": {
+    "ai": {
+      "executable": "C:\\Program Files\\Derivative\\TouchDesigner\\bin\\TouchDesigner.exe",
+      "project": "../../projects/FlexShow.toe",
+      "cwd": "../..",
+      "touchdesigner": true
+    }
+  },
+  "transport": {
+    "type": "touch_tcp",
+    "bind_host": "192.168.50.10",
+    "peer_host": "192.168.50.20",
+    "atlas_width": 1024,
+    "atlas_height": 512,
+    "atlas_fps": 5,
+    "atlas_port": 12000,
+    "control_port": 12001,
+    "heartbeat_port": 12002,
+    "heartbeat_timeout_ms": 2000,
+    "drop_stale_frames": true
+  },
+  "runtime_dir": "../runtime/dual-network-ai-worker"
+}
