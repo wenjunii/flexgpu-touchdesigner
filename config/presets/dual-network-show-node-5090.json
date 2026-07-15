@@ -19,8 +19,8 @@
   },
   "transport": {
     "type": "touch_tcp",
-    "bind_host": "192.168.50.20",
-    "peer_host": "192.168.50.10",
+    "bind_host": "192.0.2.20",
+    "peer_host": "192.0.2.10",
     "atlas_width": 1024,
     "atlas_height": 512,
     "atlas_fps": 5,

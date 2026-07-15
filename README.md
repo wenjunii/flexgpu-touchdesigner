@@ -12,7 +12,16 @@ real-time generated point world.  It supports:
 
 It does **not** bundle StreamDiffusionTD, a depth sensor SDK, a headset runtime,
 or model weights.  Their locations are configured as adapters so the same show
-network can move between machines.
+network can move between machines. WorldBus networking, particle simulation,
+geometry completion, projection mapping, and VR are currently documented
+adapter contracts rather than production implementations.
+
+## Prerequisites
+
+- Windows 10/11 with PowerShell 5.1 or newer.
+- An NVIDIA driver that provides `nvidia-smi`.
+- TouchDesigner 2025; the included project was generated with build 2025.32820.
+- Python 3.10 or newer, or TouchDesigner's bundled Python runtime.
 
 ## What is included
 
@@ -74,7 +83,10 @@ path is reported by validation instead of silently launching the wrong file.
 For a mixed pair, put the higher-VRAM card on AI and connect the headset and
 projection/LED outputs to the render card.  This is only a starting policy;
 `gpu.ai` and `gpu.render` can be swapped in configuration after measuring the
-actual show.
+actual show. For a latency-critical combined VR/LED show, benchmark the reverse
+assignment as well: keeping the faster card on rendering can matter more than
+AI update rate. The network examples intentionally demonstrate a 3080 Ti AI
+worker feeding a faster 4090/5090 show node.
 
 ## Quality behavior
 
@@ -105,6 +117,24 @@ See [touchdesigner/README.md](touchdesigner/README.md) for building the starter
 The scaffold is deliberately adapter-based.  Connect the exact StreamDiffusionTD
 component, camera SDK, and VR component available on the show machine rather
 than burying those dependencies in the launcher.
+
+## Testing and security
+
+Run the dependency-free tests with:
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
+Configuration files may contain arbitrary process commands. Treat downloaded
+or shared configurations as executable input: inspect them before using
+`-Start`. Shutdown records include process creation time, executable identity,
+and a command-line hash so stale PID reuse fails closed. Do not edit or trust a
+runtime manifest supplied by another user.
+
+On Windows, an authorized `-Stop` force-terminates only the identity-verified
+show processes recorded by this project. Save any interactive TouchDesigner
+edits in those launched processes before stopping them.
 
 ## Production order
 

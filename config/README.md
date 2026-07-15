@@ -12,6 +12,10 @@ The configuration has five independent choices:
 
 For a network pair, both computers use their own configuration. The AI computer sets `node_role` to `ai`; the show computer sets it to `render`. Keep their atlas/control ports identical and set each `transport.peer_host` to the other computer's static address.
 
+The network presets use the RFC 5737 documentation range `192.0.2.0/24` on
+purpose. Replace those non-routable example addresses with static addresses
+from your actual show network before launch.
+
 ## Safe first run
 
 All operator scripts are previews by default. `-Start` authorizes launch or active diagnostics; `-Stop` authorizes shutdown:

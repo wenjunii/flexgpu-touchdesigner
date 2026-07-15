@@ -17,9 +17,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from flexgpu.cli import build_argument_parser, main  # noqa: E402
 from flexgpu.config import validate_config  # noqa: E402
 from flexgpu.diagnostics import diagnostic_summary, run_diagnostics  # noqa: E402
-from flexgpu.models import GPUInfo  # noqa: E402
+from flexgpu.models import GPUInfo, RuntimeControlError  # noqa: E402
 from flexgpu.planner import build_process_plan  # noqa: E402
-from flexgpu.runtime import _pid_alive, manifest_path, start_plan, stop_managed  # noqa: E402
+from flexgpu.runtime import (  # noqa: E402
+    _inspect_process,
+    _pid_alive,
+    manifest_path,
+    start_plan,
+    stop_managed,
+)
 
 
 GPU = GPUInfo(
@@ -101,10 +107,12 @@ class DiagnosticAndCliTests(unittest.TestCase):
             path = manifest_path(config)
             os.makedirs(os.path.dirname(path), exist_ok=True)
             process = plan.processes[0]
+            identity = _inspect_process(os.getpid())
+            self.assertIsNotNone(identity)
             with open(path, "w", encoding="utf-8") as handle:
                 json.dump(
                     {
-                        "version": 1,
+                        "version": 2,
                         "started_at": "test",
                         "config": config.source_path,
                         "processes": [
@@ -113,6 +121,7 @@ class DiagnosticAndCliTests(unittest.TestCase):
                                 "pid": os.getpid(),
                                 "command": list(process.command),
                                 "cwd": process.cwd,
+                                "identity": identity,
                             }
                         ],
                     },
@@ -121,6 +130,59 @@ class DiagnosticAndCliTests(unittest.TestCase):
             result = start_plan(plan, config, execute=True)
             self.assertEqual(result["started"], [])
             self.assertEqual(result["reused"][0]["pid"], os.getpid())
+
+    def test_stop_refuses_mismatched_pid_identity_without_signaling(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = usable_config(directory)
+            path = manifest_path(config)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            identity = _inspect_process(os.getpid())
+            self.assertIsNotNone(identity)
+            tampered = dict(identity or {})
+            tampered["creation_token"] = "0"
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "version": 2,
+                        "started_at": "test",
+                        "config": config.source_path,
+                        "processes": [
+                            {
+                                "role": "world",
+                                "pid": os.getpid(),
+                                "command": [sys.executable],
+                                "cwd": directory,
+                                "identity": tampered,
+                            }
+                        ],
+                    },
+                    handle,
+                )
+            preview = stop_managed(config, execute=False)
+            self.assertEqual(preview["targets"], [])
+            self.assertEqual(preview["refused"][0]["pid"], os.getpid())
+            with mock.patch("flexgpu.runtime.os.kill") as kill:
+                with self.assertRaises(RuntimeControlError):
+                    stop_managed(config, execute=True)
+                kill.assert_not_called()
+
+    def test_manifest_rejects_non_integer_pid_and_non_string_role(self) -> None:
+        cases = ((True, "world"), (1.5, "world"), ("123", "world"), (123, None))
+        for pid, role in cases:
+            with self.subTest(pid=pid, role=role), tempfile.TemporaryDirectory() as directory:
+                config = usable_config(directory)
+                path = manifest_path(config)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as handle:
+                    json.dump(
+                        {
+                            "version": 2,
+                            "processes": [{"role": role, "pid": pid, "identity": {}}],
+                        },
+                        handle,
+                    )
+                with self.assertRaises(RuntimeControlError):
+                    stop_managed(config, execute=False)
 
     def test_cli_contract_accepts_all_actions_and_overrides(self) -> None:
         parser = build_argument_parser()
