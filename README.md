@@ -36,7 +36,7 @@ Gaussian inference are likewise user-supplied adapters.
 .github/workflows/  Windows CI for tests, benchmark smoke, and script parsing
 config/             validated show profiles and quality presets
 docs/               architecture and WorldBus protocol
-scripts/            Windows lifecycle/status/recovery plus guarded public sync
+scripts/            Windows lifecycle, release verification, and guarded sync
 src/flexgpu/         planner, adaptive governor, telemetry, and WorldBus reference
 tests/               runtime, transport, configuration, and publication tests
 tools/               launcher, commissioning/profile, benchmark, WorldBus, sync checks
@@ -75,6 +75,29 @@ private StreamDiffusionTD component, a physical depth sensor, projection/LED
 mapping, an OpenXR/OpenVR compositor, or a headset. Treat all GPU budgets as
 commissioning starting points until the complete local system passes thermal,
 latency, visual, and failover soaks.
+
+### Verified v1.2.1 synthetic baseline
+
+The retained machine-local evidence for the public starter was captured at
+2026-07-16T16:22:54.018Z from source revision `e4cc9a3`, with TouchDesigner
+2025.32820 and the RTX 3080 Ti Laptop 16 GB GPU.
+Combined mode passed all 15 validator checks, including managed operator and
+shader checks, exact output dimensions, nonblank finite readback, metric stereo
+cameras, distinct eye images, disabled-sensor zero output, and installation and
+stereo capture export. The validated local project and tracked canonical
+`projects/FlexShow.toe` were byte-identical at validation handoff:
+
+```text
+SHA-256  7765FC25F107A1B77C1CA8224628E743F7285C670E0075322F400498AA669CD5
+Bytes    66650
+Installation capture bytes  5058804
+Stereo capture bytes        9971239
+```
+
+The raw report and captures contain machine-local paths and remain gitignored.
+This is reproducible synthetic/operator evidence, not a claim that the private
+StreamDiffusionTD adapter, physical sensor, 4090/5090 profiles, dual-GPU
+transport, headset runtime, or venue outputs have passed hardware acceptance.
 
 ## Quick start
 
@@ -448,11 +471,48 @@ component, camera SDK, and VR component available on the show machine rather
 than burying those dependencies in the launcher.
 
 After building `projects/FlexShow-local.toe`, select the intended experience
-and run the machine-local validator inside TouchDesigner's Python runtime:
+and save the project. Paste the validator into a Text DAT in that open project
+and choose **Run Script**, or use another in-process TouchDesigner context with
+the live `op()` namespace. Do not run it with system Python or the standalone
+TouchDesigner `bin/python.exe`. Use a new evidence directory for every run:
 
 ```python
-from pathlib import Path; import sys; root = Path(r'C:\path\to\flexgpu-touchdesigner'); sys.path.insert(0, str(root / 'touchdesigner')); import validate_project as v; report = v.validate(expected_experience='combined', report_path=str(root / 'runtime' / 'td-validation-v1.2.1.json'), capture_dir=str(root / 'captures' / 'td-validation-v1.2.1')); print(report)
+from datetime import datetime, timezone
+from pathlib import Path
+import sys
+
+root = Path(r'C:\path\to\flexgpu-touchdesigner')
+sys.path.insert(0, str(root / 'touchdesigner'))
+import validate_project as validator
+
+run = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+report = validator.validate(
+    expected_build='1.2.1',
+    expected_experience='combined',
+    report_path=str(root / 'runtime' / 'td-validation' / run / 'report.json'),
+    capture_dir=str(root / 'captures' / 'td-validation' / run),
+)
+failed = [item for item in report['checks'] if item['status'] != 'pass']
+assert report['status'] == 'pass' and not failed, failed
+print(report['status'], len(report['checks']), report['report_path'])
 ```
+
+For a public handoff, remove private/paid components and machine-local paths
+before that save and do not modify or rebuild the live project between saving
+and validation. After the PASS, hash the exact ignored file, copy that inspected
+file to the canonical path, and require byte-for-byte hash equality:
+
+```powershell
+$local = (Resolve-Path .\projects\FlexShow-local.toe).Path
+$localHash = (Get-FileHash -LiteralPath $local -Algorithm SHA256).Hash
+Copy-Item -LiteralPath $local -Destination .\projects\FlexShow.toe
+$publicHash = (Get-FileHash -LiteralPath .\projects\FlexShow.toe -Algorithm SHA256).Hash
+if ($publicHash -ne $localHash) { throw 'Canonical project does not match the validated file.' }
+```
+
+Then repeat the compressed-project manual inspection described below before
+using `-AllowCanonicalProjectUpdate`. A hash proves file identity, not that a
+`.toe` is free of private, paid, credential, or machine-local content.
 
 It force-cooks managed shaders and active outputs, checks managed operator
 types/errors, enforces exact active-mode dimensions, rejects blank/non-finite
@@ -509,7 +569,7 @@ legal/privacy review and cannot make a capture safe to collect or retain.
 Run the read-only guard at any time:
 
 ```powershell
-.\scripts\Test-PublicSync.ps1 -SelfTest
+.\scripts\Test-PublicSync.ps1 -Scope All -SelfTest -ExitWithCode
 .\scripts\Sync-PublicRepo.ps1
 ```
 
@@ -549,17 +609,44 @@ deleting it only from the latest revision is insufficient.
 
 ### Test suite
 
-Run the dependency-free tests with:
+Point the gate at the Python 3.10+ interpreter you intend to use, install the
+same pinned schema validator used by CI into that exact interpreter, then run
+the complete non-publishing source release gate:
+
+```powershell
+$env:FLEXSHOW_PYTHON = (Get-Command python).Source
+& $env:FLEXSHOW_PYTHON -m pip install --disable-pip-version-check jsonschema==4.17.3
+.\scripts\Test-FlexShowRelease.ps1
+```
+
+Set `FLEXSHOW_PYTHON` directly to `.venv\Scripts\python.exe` or another full
+path when that is the intended runtime. The release script reports a failure if
+the selected interpreter cannot load the pinned validator.
+
+The release script selects a working Python 3.10+ interpreter through the same
+logic as the launcher, compiles `src`, `tools`, `tests`, and `touchdesigner`,
+validates every shipped JSON profile, runs the unit suite and deterministic
+3080 Ti benchmark, parses every PowerShell script, smoke-tests initializer
+write/read/validation with synthetic GPUs, and scans the exact candidates,
+index, and history reachable from `HEAD`. `-AllRefs` performs the stricter scan
+of every local branch, tag, and stash. CI uses `-SkipPublicSync` only because
+its separate publication-safety job already performs that all-ref scan.
+
+This source gate uses temporary and gitignored outputs, but it does not mutate
+Git or tracked project files. It does not launch TouchDesigner, open the
+canonical `.toe`, load private adapters, or exercise physical sensors, GPUs,
+transport, headset, or venue output. Run the timestamped TouchDesigner validator
+above and complete hardware acceptance separately. `Sync-PublicRepo.ps1` still
+repeats its own publication checks before staging, committing, or pushing.
+
+For a focused unit-only rerun:
 
 ```powershell
 python -m unittest discover -s tests -v
 ```
 
-GitHub Actions repeats Python compilation (including the TouchDesigner build
-sources), Draft 2020-12 validation of every shipped JSON profile, the unit
-suite, a synthetic benchmark, PowerShell syntax parsing, a full-history
-publication-safety scan, and a real initializer write/read/validation smoke
-test on `windows-latest`.
+GitHub Actions executes the same release script on Python 3.10 and 3.12 after
+the independent full-history publication-safety job passes.
 
 Configuration files may contain arbitrary process commands. Treat downloaded
 or shared configurations as executable input: inspect them before using

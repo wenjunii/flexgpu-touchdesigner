@@ -383,12 +383,39 @@ shader force-cook/compile, operator-error, finite/nonblank readback, metric
 camera, and nontrivial capture-file validation for both installation and stereo.
 This was a short operator/visual sanity check, not a frame-rate or thermal soak.
 
-After rebuilding the ignored `projects/FlexShow-local.toe`, run this inside the
-same TouchDesigner Python session:
+After rebuilding the ignored `projects/FlexShow-local.toe`, select the intended
+experience and save it. Paste this into a Text DAT in that open project and
+choose **Run Script**, or use another in-process TouchDesigner context with the
+live `op()` namespace. Do not use system Python or the standalone TouchDesigner
+`bin/python.exe`. Preserve each run in a new gitignored evidence directory:
 
 ```python
-from pathlib import Path; import sys; root = Path(r'C:\path\to\flexgpu-touchdesigner'); sys.path.insert(0, str(root / 'touchdesigner')); import validate_project as v; report = v.validate(expected_experience='combined', report_path=str(root / 'runtime' / 'td-validation-v1.2.1.json'), capture_dir=str(root / 'captures' / 'td-validation-v1.2.1')); print(report)
+from datetime import datetime, timezone
+from pathlib import Path
+import sys
+
+root = Path(r'C:\path\to\flexgpu-touchdesigner')
+sys.path.insert(0, str(root / 'touchdesigner'))
+import validate_project as validator
+
+run = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+report = validator.validate(
+    expected_build='1.2.1',
+    expected_experience='combined',
+    report_path=str(root / 'runtime' / 'td-validation' / run / 'report.json'),
+    capture_dir=str(root / 'captures' / 'td-validation' / run),
+)
+failed = [item for item in report['checks'] if item['status'] != 'pass']
+assert report['status'] == 'pass' and not failed, failed
+print(report['status'], len(report['checks']), report['report_path'])
 ```
+
+For a public handoff, remove private/paid components and local paths before the
+save, do not change or rebuild the project between saving and validation, and
+hash that exact ignored `.toe` after the PASS. Copy only that inspected file to
+`projects/FlexShow.toe`, require its SHA-256 to match the validated local file,
+then repeat the manual compressed-project inspection before using
+`-AllowCanonicalProjectUpdate`. File identity does not prove publication safety.
 
 `validate_project.py` checks build/runtime identity and required operator types,
 force-cooks every managed shader and active output, enforces exact active-mode
@@ -402,6 +429,11 @@ sensor validation, projector/LED acceptance, or headset/compositor validation.
 
 ## Hardware and integration limitations
 
+- The retained 15/15 live-validation baseline used only the RTX 3080 Ti Laptop
+  16 GB machine in synthetic combined mode. The 4090 and 5090 presets, other
+  single-GPU presets, all dual-GPU presets, and two-machine profiles are
+  configuration- and CI-tested starting points, not measured throughput,
+  thermal, latency, or failover results.
 - StreamDiffusionTD was not bundled or run during validation. Its image format,
   model latency, VRAM use, and depth availability must be tested after the
   private `.tox` is connected.
