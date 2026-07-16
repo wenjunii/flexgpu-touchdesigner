@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -166,7 +167,10 @@ class TouchDesignerValidationSourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "nested" / "report.json"
             result = module._atomic_json(path, {"status": "pass", "count": 1})
-            self.assertEqual(Path(result), path.resolve())
+            # GitHub's Windows runners may expose the same temporary directory
+            # through both its 8.3 short name and long name.  Compare filesystem
+            # identity instead of requiring those equivalent spellings to match.
+            self.assertTrue(os.path.samefile(result, path))
             self.assertEqual(
                 json.loads(path.read_text(encoding="utf-8")),
                 {"count": 1, "status": "pass"},
