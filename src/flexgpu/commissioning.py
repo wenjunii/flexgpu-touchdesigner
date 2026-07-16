@@ -13,6 +13,9 @@ import json
 import math
 import os
 import re
+import shutil
+import struct
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -41,6 +44,9 @@ MEDIA_ROLE_FORMATS = {
     "confidence": frozenset({"pgm-u8", "pgm-u16", "raw-r32f-le"}),
 }
 SESSION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+TRANSFORM_TOLERANCE = 1e-4
+METRIC_TOLERANCE = 1e-6
 
 
 class CommissioningError(ValueError):
@@ -115,16 +121,56 @@ def _matrix(value: Any, label: str) -> tuple[float, ...]:
     result = tuple(_finite_number(item, "%s[%d]" % (label, index)) for index, item in enumerate(value))
     if any(abs(result[index] - expected) > 1e-6 for index, expected in zip((12, 13, 14, 15), (0.0, 0.0, 0.0, 1.0))):
         raise CommissioningError(label + " must use homogeneous final row [0, 0, 0, 1]")
+    basis = (
+        result[0:3],
+        result[4:7],
+        result[8:11],
+    )
+    for index, axis in enumerate(basis):
+        length_squared = sum(component * component for component in axis)
+        if abs(length_squared - 1.0) > TRANSFORM_TOLERANCE:
+            raise CommissioningError(
+                "%s spatial basis axis %d must have unit length; scaling must be "
+                "represented outside the rigid transform" % (label, index)
+            )
+    for first, second in ((0, 1), (0, 2), (1, 2)):
+        dot = sum(
+            basis[first][component] * basis[second][component]
+            for component in range(3)
+        )
+        if abs(dot) > TRANSFORM_TOLERANCE:
+            raise CommissioningError(label + " spatial basis must be orthonormal")
     determinant = (
         result[0] * (result[5] * result[10] - result[6] * result[9])
         - result[1] * (result[4] * result[10] - result[6] * result[8])
         + result[2] * (result[4] * result[9] - result[5] * result[8])
     )
-    if determinant <= 1e-8:
+    if determinant <= 0.0 or abs(determinant - 1.0) > TRANSFORM_TOLERANCE * 4:
         raise CommissioningError(
-            label + " must have a non-singular right-handed spatial basis"
+            label + " must have a rigid right-handed spatial basis"
         )
     return result
+
+
+def _canonical_json_bytes(value: Mapping[str, Any]) -> bytes:
+    """Return the sole byte representation used for semantic digests."""
+
+    try:
+        return json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise CommissioningError("calibration cannot be canonically encoded") from exc
+
+
+def _require_sha256(value: Any, label: str) -> str:
+    if not isinstance(value, str) or SHA256_PATTERN.fullmatch(value) is None:
+        raise CommissioningError(label + " must be a lowercase SHA-256 digest")
+    return value
 
 
 def _identity_matrix() -> tuple[float, ...]:
@@ -166,8 +212,21 @@ class CalibrationProfile:
     far_m: float
     camera_to_world: tuple[float, ...]
     sensor_to_world: tuple[float, ...]
+    calibration_digest: str = ""
     coordinate_system: str = "right_handed_y_up_metres"
     version: str = CALIBRATION_VERSION
+
+    def __post_init__(self) -> None:
+        computed = hashlib.sha256(_canonical_json_bytes(self._content_dict())).hexdigest()
+        if self.calibration_digest:
+            supplied = _require_sha256(
+                self.calibration_digest, "calibration_digest"
+            )
+            if supplied != computed:
+                raise CommissioningError(
+                    "calibration_digest does not match the canonical calibration content"
+                )
+        object.__setattr__(self, "calibration_digest", computed)
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> "CalibrationProfile":
@@ -182,6 +241,7 @@ class CalibrationProfile:
             "camera_to_world",
             "sensor_to_world",
             "coordinate_system",
+            "calibration_digest",
         }
         unknown = sorted(set(data).difference(allowed))
         if unknown:
@@ -252,11 +312,18 @@ class CalibrationProfile:
             far_m=far_m,
             camera_to_world=_matrix(data.get("camera_to_world"), "camera_to_world"),
             sensor_to_world=_matrix(data.get("sensor_to_world"), "sensor_to_world"),
+            calibration_digest=(
+                ""
+                if "calibration_digest" not in data
+                else _require_sha256(
+                    data.get("calibration_digest"), "calibration_digest"
+                )
+            ),
             coordinate_system=coordinate_system,
             version=str(version),
         )
 
-    def to_dict(self) -> dict[str, Any]:
+    def _content_dict(self) -> dict[str, Any]:
         return {
             "version": self.version,
             "calibration_id": self.calibration_id,
@@ -273,6 +340,11 @@ class CalibrationProfile:
             "sensor_to_world": list(self.sensor_to_world),
             "coordinate_system": self.coordinate_system,
         }
+
+    def to_dict(self) -> dict[str, Any]:
+        result = self._content_dict()
+        result["calibration_digest"] = self.calibration_digest
+        return result
 
 
 def demo_calibration(width: int, height: int) -> CalibrationProfile:
@@ -300,6 +372,19 @@ def demo_calibration(width: int, height: int) -> CalibrationProfile:
     )
 
 
+def calibration_content_digest(
+    value: CalibrationProfile | Mapping[str, Any],
+) -> str:
+    """Return the validated semantic digest for calibration content."""
+
+    profile = (
+        value
+        if isinstance(value, CalibrationProfile)
+        else CalibrationProfile.from_mapping(value)
+    )
+    return profile.calibration_digest
+
+
 @dataclass(frozen=True)
 class AdapterFrameState:
     """Small status record published beside adapter textures."""
@@ -310,9 +395,35 @@ class AdapterFrameState:
     width: int
     height: int
     calibration_id: str
+    calibration_digest: str
     valid_fraction: float
     confidence_mean: float
     version: str = FRAME_STATE_VERSION
+
+    def __post_init__(self) -> None:
+        if self.version != FRAME_STATE_VERSION:
+            raise CommissioningError("unsupported adapter frame-state version")
+        if (
+            not isinstance(self.session_id, str)
+            or SESSION_PATTERN.fullmatch(self.session_id) is None
+        ):
+            raise CommissioningError("session_id must be a conservative identifier")
+        if (
+            not isinstance(self.calibration_id, str)
+            or SESSION_PATTERN.fullmatch(self.calibration_id) is None
+        ):
+            raise CommissioningError("calibration_id must be a conservative identifier")
+        _bounded_int(self.frame_id, "frame_id", 0, 2**63 - 1)
+        _bounded_int(self.timestamp_ns, "timestamp_ns", 1, 2**63 - 1)
+        _bounded_int(self.width, "width", 1, MAX_DIMENSION)
+        _bounded_int(self.height, "height", 1, MAX_DIMENSION)
+        _require_sha256(self.calibration_digest, "calibration_digest")
+        valid = _finite_number(self.valid_fraction, "valid_fraction")
+        confidence = _finite_number(self.confidence_mean, "confidence_mean")
+        if not 0.0 <= valid <= 1.0 or not 0.0 <= confidence <= 1.0:
+            raise CommissioningError(
+                "coverage and confidence must be between zero and one"
+            )
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> "AdapterFrameState":
@@ -326,6 +437,7 @@ class AdapterFrameState:
             "width",
             "height",
             "calibration_id",
+            "calibration_digest",
             "valid_fraction",
             "confidence_mean",
         }
@@ -350,6 +462,9 @@ class AdapterFrameState:
             width=_bounded_int(data.get("width"), "width", 1, MAX_DIMENSION),
             height=_bounded_int(data.get("height"), "height", 1, MAX_DIMENSION),
             calibration_id=calibration_id,
+            calibration_digest=_require_sha256(
+                data.get("calibration_digest"), "calibration_digest"
+            ),
             valid_fraction=valid,
             confidence_mean=confidence,
         )
@@ -377,6 +492,7 @@ class AdapterFrameState:
             "width": self.width,
             "height": self.height,
             "calibration_id": self.calibration_id,
+            "calibration_digest": self.calibration_digest,
             "valid_fraction": self.valid_fraction,
             "confidence_mean": self.confidence_mean,
         }
@@ -494,6 +610,130 @@ def _validate_media_layout(
         raise CommissioningError("bundle media byte length does not match its format")
 
 
+def _iter_scalar_samples(path: Path, media_format: str) -> Iterable[float]:
+    """Yield normalized scalar pixels, preserving raw float values."""
+
+    if media_format == "raw-r32f-le":
+        try:
+            with path.open("rb") as handle:
+                while True:
+                    chunk = handle.read(1024 * 1024)
+                    if not chunk:
+                        return
+                    for (value,) in struct.iter_unpack("<f", chunk):
+                        yield float(value)
+        except (OSError, struct.error) as exc:
+            raise CommissioningError("unable to decode raw float media") from exc
+        return
+
+    if media_format not in {"pgm-u8", "pgm-u16"}:
+        raise CommissioningError("scalar metric media must use a scalar format")
+    _, _, _, _, offset = _netpbm_layout(path)
+    sample_bytes = 1 if media_format == "pgm-u8" else 2
+    denominator = 255.0 if sample_bytes == 1 else 65_535.0
+    try:
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    return
+                if sample_bytes == 1:
+                    for value in chunk:
+                        yield value / denominator
+                else:
+                    if len(chunk) % 2:
+                        raise CommissioningError("16-bit scalar media is misaligned")
+                    for (value,) in struct.iter_unpack(">H", chunk):
+                        yield value / denominator
+    except OSError as exc:
+        raise CommissioningError("unable to decode scalar media") from exc
+
+
+def _depth_is_valid(raw: float, calibration: CalibrationProfile) -> bool:
+    if not math.isfinite(raw):
+        raise CommissioningError("depth payload contains a non-finite raw sample")
+    calibrated = raw * calibration.depth_scale + calibration.depth_bias
+    if not math.isfinite(calibrated):
+        raise CommissioningError("depth payload conversion is non-finite")
+    if calibration.depth_encoding == "normalized":
+        if not 0.0 <= calibrated <= 1.0:
+            return False
+        metres = calibration.near_m + calibrated * (
+            calibration.far_m - calibration.near_m
+        )
+    elif calibration.depth_encoding in {"metres", "millimetres"}:
+        metres = calibrated
+    else:
+        if calibrated <= 0.0:
+            return False
+        metres = 1.0 / calibrated
+    return (
+        math.isfinite(metres)
+        and calibration.near_m <= metres <= calibration.far_m
+    )
+
+
+def _recomputed_frame_metrics(
+    depth: Mapping[str, Any],
+    mask: Mapping[str, Any] | None,
+    confidence: Mapping[str, Any] | None,
+    calibration: CalibrationProfile,
+    pixels: int,
+) -> tuple[float, float]:
+    depth_samples = _iter_scalar_samples(depth["local_path"], str(depth["format"]))
+    mask_samples = (
+        _iter_scalar_samples(mask["local_path"], str(mask["format"]))
+        if mask is not None
+        else None
+    )
+    valid_count = 0
+    depth_count = 0
+    for raw_depth in depth_samples:
+        if depth_count >= pixels:
+            raise CommissioningError("depth payload contains too many samples")
+        depth_count += 1
+        depth_valid = _depth_is_valid(raw_depth, calibration)
+        mask_valid = True
+        if mask_samples is not None:
+            try:
+                mask_value = next(mask_samples)
+            except StopIteration as exc:
+                raise CommissioningError("mask payload contains too few samples") from exc
+            if not math.isfinite(mask_value) or not 0.0 <= mask_value <= 1.0:
+                raise CommissioningError("mask payload contains an invalid sample")
+            mask_valid = mask_value > 0.0
+        if depth_valid and mask_valid:
+            valid_count += 1
+    if depth_count != pixels:
+        raise CommissioningError("depth payload contains too few samples")
+    if mask_samples is not None:
+        try:
+            next(mask_samples)
+        except StopIteration:
+            pass
+        else:
+            raise CommissioningError("mask payload contains too many samples")
+
+    confidence_mean = 1.0
+    if confidence is not None:
+        total = 0.0
+        count = 0
+        for value in _iter_scalar_samples(
+            confidence["local_path"], str(confidence["format"])
+        ):
+            if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                raise CommissioningError(
+                    "confidence payload contains an invalid sample"
+                )
+            total += value
+            count += 1
+        if count != pixels:
+            raise CommissioningError("confidence payload sample count is invalid")
+        confidence_mean = total / float(pixels)
+    return valid_count / float(pixels), confidence_mean
+
+
 def _validate_media(
     root: Path,
     value: Any,
@@ -525,6 +765,7 @@ def _validate_media(
         "format": media_format,
         "sha256": expected,
         "resolved": os.path.normcase(str(path)),
+        "local_path": path,
     }
 
 
@@ -554,16 +795,26 @@ def validate_bundle(
 
     root = manifest.parent.resolve()
     calibration_ref = data.get("calibration")
-    if not isinstance(calibration_ref, Mapping) or set(calibration_ref).difference({"path", "sha256"}):
+    if not isinstance(calibration_ref, Mapping) or set(calibration_ref).difference(
+        {"path", "sha256", "calibration_digest"}
+    ):
         raise CommissioningError("bundle calibration reference is invalid")
     calibration_relative = _relative_path(calibration_ref.get("path"), "calibration.path")
-    calibration_digest = calibration_ref.get("sha256")
-    if not isinstance(calibration_digest, str) or re.fullmatch(r"[0-9a-f]{64}", calibration_digest) is None:
-        raise CommissioningError("calibration.sha256 must be a lowercase SHA-256 digest")
+    calibration_file_digest = _require_sha256(
+        calibration_ref.get("sha256"), "calibration.sha256"
+    )
+    calibration_content_digest = _require_sha256(
+        calibration_ref.get("calibration_digest"),
+        "calibration.calibration_digest",
+    )
     calibration_path = _safe_bundle_file(root, calibration_relative)
-    if verify_hashes and _sha256_file(calibration_path) != calibration_digest:
+    if verify_hashes and _sha256_file(calibration_path) != calibration_file_digest:
         raise CommissioningError("calibration failed SHA-256 verification")
     calibration = CalibrationProfile.from_mapping(load_strict_json(calibration_path))
+    if calibration_content_digest != calibration.calibration_digest:
+        raise CommissioningError(
+            "bundle calibration_digest does not match the calibration content"
+        )
 
     frames = data.get("frames")
     if not isinstance(frames, list) or not frames:
@@ -591,6 +842,10 @@ def validate_bundle(
         state = AdapterFrameState.from_mapping(raw.get("state"))
         if state.calibration_id != calibration.calibration_id:
             raise CommissioningError(label + " calibration_id does not match the bundle")
+        if state.calibration_digest != calibration.calibration_digest:
+            raise CommissioningError(
+                label + " calibration_digest does not match the bundle"
+            )
         if state.width != calibration.width or state.height != calibration.height:
             raise CommissioningError(label + " dimensions do not match calibration")
         previous_id = last_ids.get(state.session_id)
@@ -604,6 +859,7 @@ def validate_bundle(
         total_pixels += state.width * state.height
         if total_pixels > MAX_AGGREGATE_PIXELS:
             raise CommissioningError("bundle exceeds the aggregate-pixel limit")
+        validated_media: dict[str, dict[str, Any]] = {}
         for media_name in ("rgb", "depth"):
             media = _validate_media(
                 root,
@@ -617,6 +873,7 @@ def validate_bundle(
             if media["resolved"] in media_files:
                 raise CommissioningError("bundle media paths must be unique per frame")
             media_files.add(media["resolved"])
+            validated_media[media_name] = media
         for media_name in ("mask", "confidence"):
             if raw.get(media_name) is not None:
                 media = _validate_media(
@@ -631,6 +888,23 @@ def validate_bundle(
                 if media["resolved"] in media_files:
                     raise CommissioningError("bundle media paths must be unique per frame")
                 media_files.add(media["resolved"])
+                validated_media[media_name] = media
+
+        valid_fraction, confidence_mean = _recomputed_frame_metrics(
+            validated_media["depth"],
+            validated_media.get("mask"),
+            validated_media.get("confidence"),
+            calibration,
+            state.width * state.height,
+        )
+        if abs(state.valid_fraction - valid_fraction) > METRIC_TOLERANCE:
+            raise CommissioningError(
+                label + ".state.valid_fraction does not match captured payloads"
+            )
+        if abs(state.confidence_mean - confidence_mean) > METRIC_TOLERANCE:
+            raise CommissioningError(
+                label + ".state.confidence_mean does not match captured payloads"
+            )
 
     duration_ns = max(0, last_timestamp - AdapterFrameState.from_mapping(frames[0]["state"]).timestamp_ns)
     return {
@@ -638,6 +912,7 @@ def validate_bundle(
         "version": BUNDLE_VERSION,
         "source": {"name": source_name, "kind": source_kind},
         "calibration_id": calibration.calibration_id,
+        "calibration_digest": calibration.calibration_digest,
         "dimensions": {"width": calibration.width, "height": calibration.height},
         "depth_encoding": calibration.depth_encoding,
         "frames": len(frames),
@@ -714,6 +989,84 @@ def _pgm_u16_payload(width: int, height: int, frame: int) -> bytes:
     return ("P5\n%d %d\n65535\n" % (width, height)).encode("ascii") + bytes(pixels)
 
 
+def _build_demo_bundle(
+    root: Path,
+    frame_count: int,
+    width: int,
+    height: int,
+    interval_ns: int,
+) -> dict[str, Any]:
+    """Populate and validate a private staging directory."""
+
+    calibration = demo_calibration(width, height)
+    calibration_path = root / "calibration.json"
+    _atomic_write(calibration_path, _json_bytes(calibration.to_dict()))
+    calibration_hash = _sha256_file(calibration_path)
+    started_ns = 1_700_000_000_000_000_000
+    records: list[dict[str, Any]] = []
+    for index in range(frame_count):
+        prefix = "frames/frame-%06d" % index
+        media_payloads = {
+            "rgb": (prefix + "-rgb.ppm", "ppm-rgb8", _ppm_payload(width, height, index)),
+            "depth": (prefix + "-depth.pgm", "pgm-u16", _pgm_u16_payload(width, height, index)),
+            "mask": (prefix + "-mask.pgm", "pgm-u8", _pgm_u8_payload(width, height, index)),
+            "confidence": (
+                prefix + "-confidence.pgm",
+                "pgm-u8",
+                _pgm_u8_payload(width, height, index, confidence=True),
+            ),
+        }
+        media: dict[str, dict[str, Any]] = {}
+        metric_media: dict[str, dict[str, Any]] = {}
+        for name, (relative, media_format, payload) in media_payloads.items():
+            path = root / Path(*PurePosixPath(relative).parts)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write(path, payload)
+            media[name] = {
+                "path": relative,
+                "format": media_format,
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+            metric_media[name] = {
+                "format": media_format,
+                "local_path": path,
+            }
+        valid_fraction, confidence_mean = _recomputed_frame_metrics(
+            metric_media["depth"],
+            metric_media["mask"],
+            metric_media["confidence"],
+            calibration,
+            width * height,
+        )
+        state = AdapterFrameState(
+            session_id="demo-session",
+            frame_id=index,
+            timestamp_ns=started_ns + index * interval_ns,
+            width=width,
+            height=height,
+            calibration_id=calibration.calibration_id,
+            calibration_digest=calibration.calibration_digest,
+            valid_fraction=valid_fraction,
+            confidence_mean=confidence_mean,
+        )
+        records.append({"state": state.to_dict(), **media})
+
+    manifest = {
+        "version": BUNDLE_VERSION,
+        "created_ns": started_ns,
+        "source": {"name": "deterministic-demo", "kind": "synthetic"},
+        "calibration": {
+            "path": "calibration.json",
+            "sha256": calibration_hash,
+            "calibration_digest": calibration.calibration_digest,
+        },
+        "frames": records,
+    }
+    manifest_path = root / "manifest.json"
+    _atomic_write(manifest_path, _json_bytes(manifest))
+    return validate_bundle(manifest_path)
+
+
 def generate_demo_bundle(
     output_directory: str | os.PathLike[str],
     *,
@@ -736,70 +1089,54 @@ def generate_demo_bundle(
     if frame_count * width * height > MAX_AGGREGATE_PIXELS:
         raise CommissioningError("demo bundle exceeds the aggregate-pixel limit")
 
-    root = Path(output_directory).resolve()
-    if root.exists():
+    destination = Path(output_directory).resolve()
+    destination_existed = destination.exists()
+    if destination_existed:
         try:
-            if not root.is_dir() or any(root.iterdir()):
+            if not destination.is_dir() or any(destination.iterdir()):
                 raise CommissioningError("output directory must not exist or must be empty")
         except OSError as exc:
             raise CommissioningError("unable to inspect output directory") from exc
-    else:
-        try:
-            root.mkdir(parents=True)
-        except OSError as exc:
-            raise CommissioningError("unable to create output directory") from exc
-
-    calibration = demo_calibration(width, height)
-    calibration_path = root / "calibration.json"
-    _atomic_write(calibration_path, _json_bytes(calibration.to_dict()))
-    calibration_hash = _sha256_file(calibration_path)
-    started_ns = 1_700_000_000_000_000_000
-    records: list[dict[str, Any]] = []
-    for index in range(frame_count):
-        prefix = "frames/frame-%06d" % index
-        media_payloads = {
-            "rgb": (prefix + "-rgb.ppm", "ppm-rgb8", _ppm_payload(width, height, index)),
-            "depth": (prefix + "-depth.pgm", "pgm-u16", _pgm_u16_payload(width, height, index)),
-            "mask": (prefix + "-mask.pgm", "pgm-u8", _pgm_u8_payload(width, height, index)),
-            "confidence": (
-                prefix + "-confidence.pgm",
-                "pgm-u8",
-                _pgm_u8_payload(width, height, index, confidence=True),
-            ),
-        }
-        media: dict[str, dict[str, Any]] = {}
-        for name, (relative, media_format, payload) in media_payloads.items():
-            path = root / Path(*PurePosixPath(relative).parts)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            _atomic_write(path, payload)
-            media[name] = {
-                "path": relative,
-                "format": media_format,
-                "sha256": hashlib.sha256(payload).hexdigest(),
-            }
-        state = AdapterFrameState(
-            session_id="demo-session",
-            frame_id=index,
-            timestamp_ns=started_ns + index * interval_ns,
-            width=width,
-            height=height,
-            calibration_id=calibration.calibration_id,
-            valid_fraction=0.82,
-            confidence_mean=0.74,
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        staging = Path(
+            tempfile.mkdtemp(
+                prefix=".%s.commissioning-" % (destination.name or "flexshow"),
+                dir=destination.parent,
+            )
         )
-        records.append({"state": state.to_dict(), **media})
+    except OSError as exc:
+        raise CommissioningError("unable to create transactional output staging") from exc
 
-    manifest = {
-        "version": BUNDLE_VERSION,
-        "created_ns": started_ns,
-        "source": {"name": "deterministic-demo", "kind": "synthetic"},
-        "calibration": {"path": "calibration.json", "sha256": calibration_hash},
-        "frames": records,
-    }
-    manifest_path = root / "manifest.json"
-    _atomic_write(manifest_path, _json_bytes(manifest))
-    summary = validate_bundle(manifest_path)
-    summary["manifest"] = str(manifest_path)
+    removed_empty_destination = False
+    published = False
+    try:
+        summary = _build_demo_bundle(
+            staging, frame_count, width, height, interval_ns
+        )
+        if destination.exists():
+            if not destination_existed:
+                raise CommissioningError("output destination appeared during generation")
+            if not destination.is_dir() or any(destination.iterdir()):
+                raise CommissioningError("output destination changed during generation")
+            destination.rmdir()
+            removed_empty_destination = True
+        os.replace(staging, destination)
+        published = True
+    except CommissioningError:
+        raise
+    except OSError as exc:
+        raise CommissioningError("unable to publish transactional demo bundle") from exc
+    finally:
+        if not published:
+            shutil.rmtree(staging, ignore_errors=True)
+            if removed_empty_destination and not destination.exists():
+                try:
+                    destination.mkdir()
+                except OSError:
+                    pass
+
+    summary["manifest"] = str(destination / "manifest.json")
     return summary
 
 
@@ -823,12 +1160,17 @@ def validate_frame_sequence(states: Iterable[AdapterFrameState]) -> dict[str, An
     last_ids: dict[str, int] = {}
     last_timestamp = -1
     calibration_id: str | None = None
+    calibration_digest: str | None = None
     for state in states:
         if not isinstance(state, AdapterFrameState):
             raise CommissioningError("frame sequence contains a non-frame-state item")
         if calibration_id is None:
             calibration_id = state.calibration_id
-        elif state.calibration_id != calibration_id:
+            calibration_digest = state.calibration_digest
+        elif (
+            state.calibration_id != calibration_id
+            or state.calibration_digest != calibration_digest
+        ):
             raise CommissioningError("calibration changed without starting a new sequence")
         previous_id = last_ids.get(state.session_id)
         if previous_id is not None and state.frame_id <= previous_id:
@@ -843,7 +1185,12 @@ def validate_frame_sequence(states: Iterable[AdapterFrameState]) -> dict[str, An
             raise CommissioningError("frame sequence exceeds the supported limit")
     if count == 0:
         raise CommissioningError("frame sequence must not be empty")
-    return {"frames": count, "sessions": len(sessions), "calibration_id": calibration_id}
+    return {
+        "frames": count,
+        "sessions": len(sessions),
+        "calibration_id": calibration_id,
+        "calibration_digest": calibration_digest,
+    }
 
 
 __all__ = [
@@ -853,6 +1200,7 @@ __all__ = [
     "CommissioningError",
     "CalibrationProfile",
     "FRAME_STATE_VERSION",
+    "calibration_content_digest",
     "demo_calibration",
     "generate_demo_bundle",
     "load_strict_json",

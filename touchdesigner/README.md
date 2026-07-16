@@ -1,6 +1,6 @@
 # FlexGPU TouchDesigner project
 
-`bootstrap_project.py` and `runtime_pipeline.py` version `1.2.0` build a
+`bootstrap_project.py` and `runtime_pipeline.py` version `1.2.1` build a
 labelled TouchDesigner 2025 project at `/project1/flexgpu`. It includes a
 stock-operator `WORKING_PIPELINE` that runs
 without third-party packages: animated RGB/depth, depth-to-position GLSL,
@@ -127,10 +127,14 @@ manually inspect the public project.
 Required contracts:
 
 - `OUT_RGB`: RGBA color with alpha 1; RGBA8 or floating-point color is valid.
-- `OUT_DEPTH`: normalized R depth in `0..1`, with near at 0 and far at 1. The
-  current unprojection treats values very near 0 or 1 as invalid.
+- `OUT_DEPTH`: normalized R depth in `0..1`, with near at 0 and far at 1.
+  Both endpoints are valid samples; mark missing geometry through `OUT_MASK`
+  and/or `OUT_CONFIDENCE` instead of reserving depth values as sentinels.
 - `OUT_CONFIDENCE`: normalized R confidence/validity aligned with depth. Leaving
   the stock placeholder connected preserves the earlier confidence=1 behavior.
+- `OUT_MASK`: normalized R geometry-validity mask aligned with depth. It remains
+  separate from confidence through transport and is multiplied exactly once
+  before reconstruction.
 
 Without a calibration profile, convert metric depth, millimetres, disparity,
 or inverse depth to normalized `0..1` before `OUT_DEPTH`. With a validated
@@ -160,8 +164,30 @@ calibration needed to reconstruct received depth.
 `source.calibration_path` or `sensor.calibration_path` may reference a local
 `flexgpu-calibration/v1` JSON profile. The helper validates dimensions,
 intrinsics, depth convention/scale/range, homogeneous camera/sensor transforms,
-and matching calibration IDs before applying it. Invalid calibration fails back
-to the demo or simulated sensor instead of cooking spatially incorrect data.
+matching calibration IDs, and the canonical calibration-content SHA-256 before
+applying it. Transforms must be rigid right-handed matrices with orthonormal
+unit axes and final row `[0, 0, 0, 1]`; scaling belongs in depth conversion.
+Invalid calibration fails back to the demo or simulated sensor instead of
+cooking spatially incorrect data.
+
+For production frame pacing, point `source.frame_state_operator` and optionally
+`sensor.frame_state_operator` at a DAT/CHOP/stored mapping containing the full
+`flexgpu-frame-state/v1` contract: session/frame/timestamp, dimensions,
+calibration ID/digest, valid fraction, and mean confidence. The helper accepts
+each advancing pair once and turns it into a one-cook `new_frame` pulse. Held
+textures age/decay without being reabsorbed; retired sessions, regressions,
+future timestamps, digest mismatches, and stale frames fail closed. Without
+explicit metadata it uses an operator cook token when available. The final
+`legacy_each_cook` fallback keeps old adapters running but cannot distinguish a
+held producer frame from a new one.
+
+That local fallback does not authorize receiver cook frames as producer state.
+Touch TCP receivers use Touch In's `num_received_frames` for transport-arrival
+preview pacing. Shared Mem In has no corresponding receive counter, so an
+unverified metadata-less Shared Mem receiver fails closed. A Shared Mem config
+must point `source.frame_state_operator` at a producer-backed sidecar that
+actually crosses the process boundary and resolves in both roles; a local
+receiver-cook DAT/CHOP is not valid producer metadata.
 
 ## Generated component contracts
 
@@ -178,12 +204,12 @@ to the demo or simulated sensor instead of cooking spatially incorrect data.
 | `OPERATOR_DASHBOARD` | Declarative settings, status and commissioning checklist |
 | `STARTUP` | Environment-aware helper module and startup callbacks |
 | `WORKING_PIPELINE/SOURCES` | Demo RGB/depth plus private StreamDiffusionTD adapter |
-| `WORKING_PIPELINE/ROLE_BRIDGE` | Atomic RGBA16F direct preview over local, Shared Mem, or Touch TCP routes |
+| `WORKING_PIPELINE/ROLE_BRIDGE` | Atomic RGBA32F RGB/raw-depth/mask/confidence path over local, Shared Mem, or Touch TCP routes |
 | `WORKING_PIPELINE/RECONSTRUCTION` | Aligned color and depth-to-position GLSL |
-| `WORKING_PIPELINE/SENSOR_INTERACTION` | Simulated/replay mask and interaction field |
-| `WORKING_PIPELINE/TEMPORAL_WORLD` | Confidence/age lifecycle plus position and color feedback, sensor forces, and automatic contract resets |
+| `WORKING_PIPELINE/SENSOR_INTERACTION` | Calibrated sensor validity plus bounded 8x8 world-space occupancy interaction |
+| `WORKING_PIPELINE/TEMPORAL_WORLD` | One-cook frame-aware confidence/age lifecycle plus dt-integrated position/color feedback and automatic contract resets |
 | `WORKING_PIPELINE/COMPLETION` | Working fog, procedural and hybrid GLSL branches |
-| `WORKING_PIPELINE/POINT_RENDER` | TOP-to-POP point renderer with inspectable fallback |
+| `WORKING_PIPELINE/POINT_RENDER` | Metric TOP-to-POP point renderer, center/parallel-eye cameras, and honest mono fallback |
 | `WORKING_PIPELINE/INSTALLATION_OUTPUT` | Center render and view-space edge-fog development preview |
 | `WORKING_PIPELINE/STEREO_PREVIEW` | Per-eye view-space completion plus side-by-side desktop preview |
 | `WORKING_PIPELINE/TELEMETRY` | Info CHOP metrics used by live telemetry and adaptive monitoring |
@@ -206,9 +232,14 @@ models, sensors, SteamVR, Spout, or third-party Python packages.
 This internal adapter layer is distinct from the wire-level AI frame transport
 in [`docs/WORLDBUS.md`](../docs/WORLDBUS.md), which carries RGB, depth, mask,
 confidence, metadata and control. The built-in `WORKING_PIPELINE/ROLE_BRIDGE`
-automatically packs RGB plus normalized depth into one atomic RGBA16F atlas for
-Shared Mem or Touch TCP preview transport. It deliberately is not WorldBus v1;
-a production `WORLD_BUS_IN` adapter remains responsible for the full contract.
+automatically packs RGB in the left half and raw depth/confidence/mask in
+right-half R/G/B of one RGBA32F atlas for Shared Mem or Touch TCP transport.
+Metric, millimetre, disparity and inverse depth are not clamped. It deliberately
+is not WorldBus v1: Touch TCP's receive counter reports transport arrival, not
+producer generation, while Shared Mem requires a separate strict metadata
+sidecar. Producer session/timestamp strings, camera matrices, network heartbeat
+and control do not cross in the image atlas. A production `WORLD_BUS_IN`
+adapter remains responsible for the full contract.
 The authoritative interactive simulation remains on the show node.
 
 ## One project, single or dual topology
@@ -239,6 +270,16 @@ The startup helper reads these environment variables:
 | `FLEXGPU_ATLAS_WIDTH`, `FLEXGPU_ATLAS_HEIGHT`, `FLEXGPU_ATLAS_PORT` | Atomic atlas endpoint |
 | `FLEXGPU_TRANSPORT_FPS` | Target atlas cadence |
 
+The launcher additionally owns `FLEXGPU_SESSION_ID`,
+`FLEXGPU_HEARTBEAT_PATH`, and `FLEXGPU_HEARTBEAT_TIMEOUT_MS`. Do not put those,
+or any `CUDA_*`/`FLEXGPU_*` override, in a process config. The helper uses them
+to atomically publish application readiness and cook/source/sensor/transport
+health under the ignored runtime directory. This is separate from WorldBus
+network heartbeat traffic.
+Readiness waits therefore require a v1.2.1 project. The tracked synthetic
+canonical `.toe` satisfies this heartbeat contract; rebuild older or privately
+modified projects before enabling readiness waits.
+
 Explicit environment values override `FLEXGPU_CONFIG`. The helper updates
 `CONFIG/runtime_state`, endpoint activity, source/receiver route switches and
 stage-COMP `allowCooking` gates. Endpoint TOPs use their Active expressions;
@@ -248,9 +289,10 @@ only; split world roles cook receiver, reconstruction, simulation and only the
 selected output module.
 
 The same `.toe` can be launched for each role. `ROLE_BRIDGE` is installed and
-configured automatically: one global Shared Mem atlas by default (or a loopback
-Touch TCP fallback) for `dual_local`, or one uncompressed Touch TCP atlas for
-`dual_network`. Single topology bypasses atlas pack/unpack. See
+configured automatically: one loopback Touch TCP atlas by default for
+`dual_local`, or one uncompressed Touch TCP atlas for `dual_network`. Shared Mem
+is an advanced dual-local path requiring an explicit producer frame-state
+sidecar. Single topology bypasses atlas pack/unpack. See
 [`docs/DUAL_GPU_RUNTIME.md`](../docs/DUAL_GPU_RUNTIME.md) for
 atlas layout, cadence, inspection and the boundary between this preview bridge
 and production WorldBus v1.
@@ -259,6 +301,10 @@ With `tier: auto`, the launcher injects `FLEXGPU_TIER` and quality limits per
 process from its assigned GPU. On a heterogeneous local pair, the AI process
 can therefore use a 5090 tier while a 3080 Ti world process keeps its own lower
 geometry and point limits.
+
+The 5090 preset intentionally defaults to 262,144 points: a 512-square
+position texture has exactly that many samples. Raise geometry resolution
+explicitly before requesting a larger physically reachable point budget.
 
 The generated dashboard is not a finished control surface: its Apply and
 Emergency Reset pulses are not wired to callbacks. Launcher environment values
@@ -306,22 +352,53 @@ drivers, model choice, and output resolution materially change throughput.
 For a same-GPU combined run, keep the desktop-stereo render as the timing
 priority and target no more than roughly 11-12 GB total use in `nvidia-smi`.
 Configure the private AI adapter—or a production WorldBus adapter—to keep its
-queue at one frame and drop stale AI frames; the stock direct bridge has no
-explicit stale-frame policy. Do not add SDXL, Video Depth Anything, SHARP,
+queue at one frame and drop stale AI frames. The stock Touch TCP bridge holds
+and ages the last received atlas from its receive counter, but that is only
+transport-arrival preview semantics; it cannot reject an old producer
+generation. Metadata-less Shared Mem fails closed. Do not add SDXL, Video Depth Anything, SHARP,
 Gaussian reconstruction, expensive shadows, or high MSAA until the actual
 target system has ample measured headroom.
 
+The v1.2.1 point path preserves calibrated metres through a Geometry/Camera/
+Render network; it no longer normalizes geometry to a unit cube. The desktop
+left/right views use parallel cameras shifted by plus/minus half the configured
+preview IPD, with no toe-in and no world translation. The pre-2025 fallback is
+deliberately mono rather than fake stereo. None of these development cameras
+consume headset pose or runtime projection matrices, and the SBS texture is not
+a compositor submission.
+
+Sensor interaction samples a bounded 8x8 set of calibrated world-space
+occupancy primitives for each generated point. Mask and confidence are applied
+once, and force in metres/second is integrated with a clamped render delta.
+This removes same-UV coupling and frame-rate-dependent acceleration, but it is
+still a low-resolution approximation rather than a full SDF, tracked skeleton,
+controller volume, or collision solver.
+
 ## Live-validation status
 
-The last canonical-project live validation was build `1.1.0`: it was rebuilt,
-opened, rendered, and saved in TouchDesigner 2025.32820 on the RTX 3080 Ti
-Laptop 16 GB machine with zero builder warnings or operator errors. Build
-`1.2.0` adds the calibrated/confidence lifecycle foundation described above and
-is covered by dependency-free source/helper tests, but still requires a fresh
-TouchDesigner rebuild and visual shader/operator validation before replacing
-that earlier live-validation statement. Neither validation includes the private
-StreamDiffusionTD `.tox`, a physical sensor, or a headset, and neither is a
-throughput guarantee.
+The tracked canonical project is build `1.2.1`. It was rebuilt, rendered, and
+saved in TouchDesigner 2025.32820 on the RTX 3080 Ti Laptop 16 GB machine. A
+combined-mode synthetic check passed managed node-type, exact-resolution,
+shader force-cook/compile, operator-error, finite/nonblank readback, metric
+camera, and nontrivial capture-file validation for both installation and stereo.
+This was a short operator/visual sanity check, not a frame-rate or thermal soak.
+
+After rebuilding the ignored `projects/FlexShow-local.toe`, run this inside the
+same TouchDesigner Python session:
+
+```python
+from pathlib import Path; import sys; root = Path(r'C:\path\to\flexgpu-touchdesigner'); sys.path.insert(0, str(root / 'touchdesigner')); import validate_project as v; report = v.validate(expected_experience='combined', report_path=str(root / 'runtime' / 'td-validation-v1.2.1.json'), capture_dir=str(root / 'captures' / 'td-validation-v1.2.1')); print(report)
+```
+
+`validate_project.py` checks build/runtime identity and required operator types,
+force-cooks every managed shader and active output, enforces exact active-mode
+dimensions, rejects blank/non-finite visual readback, checks managed errors and
+metric-camera regressions, and verifies saved synthetic installation/stereo
+captures exist with nontrivial size. The report is written atomically. The local
+`.toe`, report, and captures are ignored, machine-local artifacts and must not
+be synced. A passing report is necessary source/operator validation, not visual
+approval, measured metric accuracy, sustained GPU/thermal performance, physical
+sensor validation, projector/LED acceptance, or headset/compositor validation.
 
 ## Hardware and integration limitations
 
@@ -342,15 +419,19 @@ throughput guarantee.
   age with automatic contract resets. It remains a compact per-pixel GPU
   lifecycle rather than optical-flow reprojection or a general-purpose particle
   solver. SHARP/Gaussian nodes are disabled contracts and contain no inference.
-- Configured frame-state and camera-metadata operators are currently resolved
-  as adapter contract boundaries but are not sampled into `LIVE_HEALTH`.
-  Source/sensor age and frame-ID health fields therefore remain adapter-written
-  parameters until a production metadata bridge is added.
+- Configured frame-state operators are sampled into lifecycle state,
+  `LIVE_HEALTH`, and the launcher application heartbeat. The separate
+  camera-metadata operator is still only a resolved adapter boundary; runtime
+  projection/intrinsic changes must come through validated calibration or a
+  production metadata adapter.
 - The atomic Shared Mem/Touch `.toe` preview bridge is installed automatically,
-  but it carries RGB/depth only. It has no mask/confidence plane, frame/session
-  IDs, camera metadata, heartbeat/control, replay, or explicit stale/drop/hold
-  policy. The separate WorldBus Python reference remains the full contract and
-  needs a production TD adapter when those semantics are required.
+  and it carries RGB/raw depth/mask/confidence atomically. The 32-bit float
+  atlas itself has no producer session/timestamp strings, camera matrices,
+  heartbeat/control, or replay. Touch TCP's `num_received_frames` supplies
+  transport-arrival preview pacing, not producer-exact ordering. Shared Mem has
+  no metadata-less receive fallback and requires a separately transported strict
+  frame-state sidecar. The separate WorldBus Python reference remains the full
+  contract and needs a production TD adapter when those semantics are required.
 - JSON loading is tolerant and recognizes simple top-level values plus
   `flexgpu`, `runtime`, `show`, and `profile` sections. Every JSON leaf is still
   exposed in `CONFIG/profile_flat` even when it is not a recognized bootstrap

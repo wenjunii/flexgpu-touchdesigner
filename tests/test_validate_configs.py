@@ -60,6 +60,29 @@ class ConfigValidationToolTests(unittest.TestCase):
         python_types = set(TRANSPORT_TYPE_ALIASES.values())
         self.assertEqual(schema_types, python_types)
 
+    def test_shipped_dual_local_presets_use_turnkey_loopback_touch_tcp(self) -> None:
+        for name in (
+            "dual-local-heterogeneous.json",
+            "dual-local-same-4090.json",
+        ):
+            with self.subTest(name=name):
+                profile = self.tool.load_strict_json(
+                    ROOT / "config" / "presets" / name
+                )
+                self.assertEqual(profile["transport"]["type"], "touch_tcp")
+                self.assertEqual(profile["transport"]["peer_host"], "127.0.0.1")
+                self.assertNotIn("segment_name", profile["transport"])
+
+    def test_initializer_generates_loopback_touch_for_dual_local(self) -> None:
+        source = (ROOT / "scripts" / "Initialize-FlexShow.ps1").read_text(
+            encoding="utf-8-sig"
+        )
+        self.assertIn(
+            "$transportType = if ($resolvedTopology -eq 'dual_local') { 'touch_tcp' }",
+            source,
+        )
+        self.assertIn("$transport.peer_host = '127.0.0.1'", source)
+
     @unittest.skipUnless(importlib.util.find_spec("jsonschema"), "jsonschema is optional")
     def test_schema_enforces_topology_specific_transport_contracts(self) -> None:
         import jsonschema
@@ -96,6 +119,7 @@ class ConfigValidationToolTests(unittest.TestCase):
             "dual_local",
             {"type": "shared_memory", "segment_name": "FlexShowWorldBus", **atlas},
         )
+        shared["source"] = {"frame_state_operator": "PRODUCER_FRAME_STATE"}
         loopback = profile(
             "dual_local",
             {
@@ -132,7 +156,13 @@ class ConfigValidationToolTests(unittest.TestCase):
             "type": "shared_memory",
             "segment_name": "FlexShowWorldBus",
         }
-        for invalid in (remote_loopback_profile, wrong_network_type):
+        metadata_less_shared = dict(shared)
+        metadata_less_shared.pop("source")
+        for invalid in (
+            remote_loopback_profile,
+            wrong_network_type,
+            metadata_less_shared,
+        ):
             self.assertTrue(list(validator.iter_errors(invalid)))
 
     @unittest.skipUnless(importlib.util.find_spec("jsonschema"), "jsonschema is optional")

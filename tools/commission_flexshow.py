@@ -89,6 +89,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "status": "valid",
             "version": profile.version,
             "calibration_id": profile.calibration_id,
+            "calibration_digest": profile.calibration_digest,
             "dimensions": {"width": profile.width, "height": profile.height},
             "depth_encoding": profile.depth_encoding,
             "coordinate_system": profile.coordinate_system,

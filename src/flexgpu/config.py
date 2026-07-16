@@ -84,6 +84,18 @@ PROCESS_ROLE_ALIASES = {
     "vr_client": "vr",
 }
 
+PROCESS_FIELDS = {
+    "command",
+    "executable",
+    "project",
+    "args",
+    "env",
+    "cwd",
+    "touchdesigner",
+    "gpu_affinity",
+    "affinity",
+}
+
 TRANSPORT_TYPE_ALIASES = {
     "local": "local",
     "in_process": "local",
@@ -133,6 +145,7 @@ TOP_LEVEL_FIELDS = {
     "source",
     "sensor",
     "render",
+    "supervisor",
     "runtime_dir",
 }
 
@@ -195,6 +208,11 @@ RUNTIME_SECTION_FIELDS = {
         "vr_fps",
         "fog_density",
         "procedural_mix",
+    },
+    "supervisor": {
+        "heartbeat_timeout_ms",
+        "readiness_timeout_ms",
+        "require_ready",
     },
 }
 
@@ -530,6 +548,7 @@ def _process_definition(
     if not isinstance(value, Mapping):
         errors.append("processes.%s must be an object" % role)
         return None
+    _validate_process_fields(value, "processes.%s" % role, errors)
     merged = dict(defaults)
     merged.update(value)
     command = _string_tuple(merged.get("command"), "processes.%s.command" % role, errors)
@@ -581,6 +600,13 @@ def _process_definition(
         touchdesigner=touchdesigner,
         gpu_affinity=gpu_affinity,
     )
+
+
+def _validate_process_fields(
+    value: Mapping[str, Any], path: str, errors: list[str]
+) -> None:
+    for key in sorted(set(value).difference(PROCESS_FIELDS), key=lambda item: repr(item)):
+        errors.append("%s has unsupported field %r" % (path, key))
 
 
 def _strict_object_pairs(pairs: Sequence[tuple[str, Any]]) -> dict[str, Any]:
@@ -871,6 +897,26 @@ def _validate_runtime_sections(
         _runtime_number(render, "fog_density", "render", errors, 0, 10)
         _runtime_number(render, "procedural_mix", "render", errors, 0, 1)
 
+    supervisor = _runtime_mapping(raw, "supervisor", errors)
+    if supervisor is not None:
+        _runtime_integer(
+            supervisor,
+            "heartbeat_timeout_ms",
+            "supervisor",
+            errors,
+            250,
+            600000,
+        )
+        _runtime_integer(
+            supervisor,
+            "readiness_timeout_ms",
+            "supervisor",
+            errors,
+            0,
+            600000,
+        )
+        _runtime_bool(supervisor, "require_ready", "supervisor", errors)
+
 
 def _validate_json_compatible(value: Any, path: str, errors: list[str]) -> None:
     if isinstance(value, Mapping):
@@ -990,6 +1036,8 @@ def validate_config(
     if not isinstance(defaults, Mapping):
         errors.append("processes.defaults must be an object")
         defaults = {}
+    else:
+        _validate_process_fields(defaults, "processes.defaults", errors)
     normalized_process_raw: dict[str, Any] = {}
     for key, value in processes_raw.items():
         if key in {"default", "defaults"}:
@@ -1014,10 +1062,28 @@ def validate_config(
     transport = _transport_definition(
         raw.get("transport"), topology, "transport" in raw, errors
     )
+    if topology == "dual_local" and transport.get("type") == "shared_memory":
+        source = raw.get("source")
+        frame_state_operator = (
+            source.get("frame_state_operator") if isinstance(source, Mapping) else None
+        )
+        if not isinstance(frame_state_operator, str) or not frame_state_operator.strip():
+            errors.append(
+                "source.frame_state_operator is required for dual_local "
+                "shared_memory and must resolve to a producer-backed metadata sidecar"
+            )
     runtime_dir = raw.get("runtime_dir", "runtime")
     if not isinstance(runtime_dir, str) or not runtime_dir.strip():
         errors.append("runtime_dir must be a non-empty path string")
         runtime_dir = "runtime"
+    supervisor = {
+        "heartbeat_timeout_ms": 5000,
+        "readiness_timeout_ms": 0,
+        "require_ready": False,
+    }
+    configured_supervisor = raw.get("supervisor")
+    if isinstance(configured_supervisor, Mapping):
+        supervisor.update(configured_supervisor)
 
     if errors:
         raise ConfigError(errors)
@@ -1030,6 +1096,7 @@ def validate_config(
         gpu=gpu,
         processes=processes,
         transport=transport,
+        supervisor=supervisor,
         runtime_dir=runtime_dir,
         source_path=os.path.abspath(source_path) if source_path else "",
         raw=raw,

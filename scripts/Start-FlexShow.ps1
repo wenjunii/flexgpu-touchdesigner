@@ -7,7 +7,8 @@ Without -Start this script runs the full preflight and previews the resolved
 runtime plan. Supplying -Start explicitly authorizes process launch. Repeating an authorized start is
 safe because flexgpu.py reuses its runtime manifest and skips owned processes
 that are already running. If launch settings changed, it refuses reuse and asks
-you to stop the old process first.
+you to stop the old process first. -WaitReadyMs optionally requires each app to
+publish the atomic heartbeat/readiness contract before start succeeds.
 #>
 #Requires -Version 5.1
 [CmdletBinding()]
@@ -21,12 +22,15 @@ param(
     [ValidateSet('', 'fog', 'procedural', 'hybrid')]
     [string]$Completion = '',
 
-    [ValidateSet('', 'auto', '3080ti_16gb', '4090', '5090')]
+    [ValidateSet('', 'auto', '3080ti_16gb', '4090', '5090', 'custom')]
     [string]$Tier = '',
 
     [string]$NvidiaSmi = '',
 
     [switch]$Start,
+
+    [ValidateRange(0, 600000)]
+    [Nullable[int]]$WaitReadyMs = $null,
 
     [switch]$Json,
 
@@ -36,11 +40,11 @@ param(
 . (Join-Path $PSScriptRoot '_FlexShow.Common.ps1')
 
 if ($Start) {
-    Invoke-FlexShowCli -Command start -Config $Config -Experience $Experience -Completion $Completion -Tier $Tier -NvidiaSmi $NvidiaSmi -ActionMode Execute -Json:$Json -ExitWithCode:$ExitWithCode
+    Invoke-FlexShowCli -Command start -Config $Config -Experience $Experience -Completion $Completion -Tier $Tier -NvidiaSmi $NvidiaSmi -WaitReadyMs $WaitReadyMs -ActionMode Execute -Json:$Json -ExitWithCode:$ExitWithCode
 }
 else {
     if (-not $Json) {
         Write-Host '[FlexShow] Full preflight preview only. Add -Start to authorize process launch.'
     }
-    Invoke-FlexShowCli -Command start -Config $Config -Experience $Experience -Completion $Completion -Tier $Tier -NvidiaSmi $NvidiaSmi -ActionMode DryRun -Json:$Json -ExitWithCode:$ExitWithCode
+    Invoke-FlexShowCli -Command start -Config $Config -Experience $Experience -Completion $Completion -Tier $Tier -NvidiaSmi $NvidiaSmi -WaitReadyMs $WaitReadyMs -ActionMode DryRun -Json:$Json -ExitWithCode:$ExitWithCode
 }

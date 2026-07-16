@@ -10,11 +10,12 @@ GPU-native point rendering, installation output, and stereo preview.
 from __future__ import print_function
 
 import json
+import math
 import os
 import re
 
 
-BUILD_VERSION = "1.2.0"
+BUILD_VERSION = "1.2.1"
 ROOT_PATH = "/project1/flexgpu"
 LAST_REPORT = None
 
@@ -40,11 +41,29 @@ DEFAULTS = {
 
 
 RUNTIME_HELPERS = r'''# FlexGPU runtime helpers (embedded by bootstrap_project.py)
+import datetime
+import hashlib
 import json
 import math
 import os
 import re
 import time
+
+RUNTIME_BUILD_VERSION = '1.2.1'
+FRAME_STATE_VERSION = 'flexgpu-frame-state/v1'
+HEARTBEAT_VERSION = 1
+IDENTIFIER_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$')
+SHA256_PATTERN = re.compile(r'^[0-9a-f]{64}$')
+TRANSFORM_TOLERANCE = 1e-4
+
+# Readiness inspection runs on the heartbeat path, so keep both its cadence and
+# result size bounded. The generated network is well below this operator limit;
+# exceeding it makes readiness fail closed instead of silently skipping nodes.
+READINESS_HEALTH_INTERVAL_SECONDS = 0.5
+READINESS_MANAGED_OPERATOR_LIMIT = 512
+READINESS_ISSUE_LIMIT = 8
+READINESS_MESSAGE_LIMIT = 240
+READINESS_MAX_OUTPUT_DIMENSION = 32768
 
 ENV_KEYS = {
     'FLEXGPU_ROLE': 'role',
@@ -76,7 +95,7 @@ QUALITY_PRESETS = {
              'point_budget':250000, 'vr_fps':90},
     '5090': {'diffusion_resolution':512, 'diffusion_fps':20,
              'geometry_resolution':512, 'geometry_fps':15,
-             'point_budget':400000, 'vr_fps':90},
+             'point_budget':262144, 'vr_fps':90},
     'custom': {'diffusion_resolution':384, 'diffusion_fps':5,
                'geometry_resolution':256, 'geometry_fps':3,
                'point_budget':50000, 'vr_fps':60},
@@ -236,18 +255,68 @@ def _integer(value, fallback):
 
 def _number(value, fallback):
     try:
-        return float(value)
+        result = float(value)
+        return result if math.isfinite(result) else float(fallback)
     except (TypeError, ValueError):
         return float(fallback)
 
+def _bounded_integer(value, fallback, low, high, label, errors):
+    if isinstance(value, bool):
+        errors.append(label + ' must be an integer')
+        return int(fallback)
+    try:
+        parsed = int(value)
+        if isinstance(value, float) and value != parsed:
+            raise ValueError()
+    except (TypeError, ValueError, OverflowError):
+        errors.append(label + ' must be an integer')
+        return int(fallback)
+    if parsed < low or parsed > high:
+        errors.append('%s must be between %d and %d' % (label, low, high))
+        return min(high, max(low, parsed))
+    return parsed
+
+def _bounded_number(value, fallback, low, high, label, errors,
+                    exclusive_low=False):
+    if isinstance(value, bool):
+        errors.append(label + ' must be numeric')
+        return float(fallback)
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        errors.append(label + ' must be numeric')
+        return float(fallback)
+    invalid = (not math.isfinite(parsed) or parsed > high or
+               (parsed <= low if exclusive_low else parsed < low))
+    if invalid:
+        comparator = 'greater than' if exclusive_low else 'at least'
+        errors.append('%s must be %s %s and at most %s' %
+                      (label, comparator, low, high))
+        if not math.isfinite(parsed):
+            return float(fallback)
+        floor = max(float(fallback), float(low)) if exclusive_low else float(low)
+        return min(float(high), max(floor, parsed))
+    return parsed
+
 def _materialize(state):
+    runtime_errors = []
     defaults = {'role':'standalone', 'topology':'single',
                 'experience':'installation', 'completion':'hybrid',
                 'tier':'3080ti_16gb'}
     for key, fallback in defaults.items():
         state[key] = str(state.get(key, fallback)).lower()
     if state['tier'] not in QUALITY_PRESETS:
+        runtime_errors.append('tier has unsupported value %r' % state['tier'])
         state['tier'] = 'custom'
+    for key, permitted in (
+        ('role', ('standalone', 'world', 'render', 'ai')),
+        ('topology', ('single', 'dual_local', 'dual_network')),
+        ('experience', ('installation', 'vr', 'combined')),
+        ('completion', ('fog', 'procedural', 'hybrid')),
+    ):
+        if state[key] not in permitted:
+            runtime_errors.append('%s has unsupported value %r' % (key, state[key]))
+            state[key] = defaults[key]
 
     supplied = dict((key, state[key]) for key in QUALITY_KEYS if key in state)
     for key, value in QUALITY_PRESETS[state['tier']].items():
@@ -260,19 +329,49 @@ def _materialize(state):
             state[state_key] = render[source_key]
     state.update(supplied)  # explicit FLEXGPU_* values have highest precedence
 
+    integer_bounds = {
+        'diffusion_resolution':(64, 2048),
+        'diffusion_fps':(1, 240),
+        'geometry_resolution':(64, 2048),
+        'geometry_fps':(1, 240),
+        'point_budget':(1000, 10000000),
+        'vr_fps':(1, 240),
+    }
     for key in QUALITY_KEYS:
-        state[key] = _integer(state[key], QUALITY_PRESETS[state['tier']][key])
-    state['installation_fps'] = _integer(
-        state.get('installation_fps', 60), 60)
-    state['installation_width'] = _integer(
-        render.get('installation_width', 1280), 1280)
-    state['installation_height'] = _integer(
-        render.get('installation_height', 720), 720)
-    state['stereo_width'] = _integer(render.get('stereo_width', 2560), 2560)
-    state['stereo_height'] = _integer(render.get('stereo_height', 720), 720)
-    state['point_size_px'] = _number(render.get('point_size_px', 3.0), 3.0)
-    state['fog_density'] = _number(render.get('fog_density', 0.35), 0.35)
-    state['procedural_mix'] = _number(render.get('procedural_mix', 0.72), 0.72)
+        low, high = integer_bounds[key]
+        state[key] = _bounded_integer(
+            state[key], QUALITY_PRESETS[state['tier']][key], low, high,
+            key, runtime_errors)
+    state['installation_fps'] = _bounded_integer(
+        state.get('installation_fps', 60), 60, 1, 240,
+        'installation_fps', runtime_errors)
+    state['installation_width'] = _bounded_integer(
+        render.get('installation_width', 1280), 1280, 64, 16384,
+        'render.installation_width', runtime_errors)
+    state['installation_height'] = _bounded_integer(
+        render.get('installation_height', 720), 720, 64, 16384,
+        'render.installation_height', runtime_errors)
+    state['stereo_width'] = _bounded_integer(
+        render.get('stereo_width', 2560), 2560, 64, 16384,
+        'render.stereo_width', runtime_errors)
+    state['stereo_height'] = _bounded_integer(
+        render.get('stereo_height', 720), 720, 64, 16384,
+        'render.stereo_height', runtime_errors)
+    state['point_size_px'] = _bounded_number(
+        render.get('point_size_px', 3.0), 3.0, 0.0, 128.0,
+        'render.point_size_px', runtime_errors, True)
+    state['fog_density'] = _bounded_number(
+        render.get('fog_density', 0.35), 0.35, 0.0, 10.0,
+        'render.fog_density', runtime_errors)
+    state['procedural_mix'] = _bounded_number(
+        render.get('procedural_mix', 0.72), 0.72, 0.0, 1.0,
+        'render.procedural_mix', runtime_errors)
+    available_points = state['geometry_resolution'] ** 2
+    if state['point_budget'] > available_points:
+        state['point_budget_requested'] = state['point_budget']
+        state['point_budget'] = available_points
+        state['point_budget_adjustment'] = (
+            'capped to geometry_resolution^2 (%d)' % available_points)
 
     transport = _mapping(state.get('transport'))
     transport_type = str(state.get(
@@ -281,15 +380,18 @@ def _materialize(state):
                         transport.get('segment_name', 'FlexShowWorldBus'))
     peer_host = state.get('transport_peer_host',
                           transport.get('peer_host', '127.0.0.1'))
-    atlas_width = _integer(state.get(
-        'transport_atlas_width', transport.get('atlas_width', 1024)), 1024)
-    atlas_height = _integer(state.get(
-        'transport_atlas_height', transport.get('atlas_height', 512)), 512)
-    atlas_port = _integer(state.get(
-        'transport_atlas_port', transport.get('atlas_port', 12000)), 12000)
-    transport_fps = _integer(state.get(
+    atlas_width = _bounded_integer(state.get(
+        'transport_atlas_width', transport.get('atlas_width', 1024)),
+        1024, 2, 16384, 'transport.atlas_width', runtime_errors)
+    atlas_height = _bounded_integer(state.get(
+        'transport_atlas_height', transport.get('atlas_height', 512)),
+        512, 1, 16384, 'transport.atlas_height', runtime_errors)
+    atlas_port = _bounded_integer(state.get(
+        'transport_atlas_port', transport.get('atlas_port', 12000)),
+        12000, 1, 65535, 'transport.atlas_port', runtime_errors)
+    transport_fps = _bounded_integer(state.get(
         'transport_fps', transport.get('atlas_fps', state['geometry_fps'])),
-        state['geometry_fps'])
+        state['geometry_fps'], 1, 240, 'transport.atlas_fps', runtime_errors)
     state.update({'transport_type':transport_type,
                   'transport_segment':str(segment),
                   'transport_peer_host':str(peer_host),
@@ -341,6 +443,8 @@ def _materialize(state):
         state['transport_atlas_height'] = min(16384, max(1, atlas_height))
         state['transport_atlas_port'] = min(65535, max(1, atlas_port))
         state['transport_fps'] = min(240, max(1, transport_fps))
+    if runtime_errors:
+        state['runtime_error'] = '; '.join(runtime_errors)
     return state
 
 def _role_policy(state):
@@ -349,12 +453,12 @@ def _role_policy(state):
         role = 'world'
         state['role'] = role
     topology = state['topology']
-    invalid_transport = bool(state.get('transport_error'))
-    ai_on = (not invalid_transport and
+    invalid_runtime = bool(state.get('transport_error') or state.get('runtime_error'))
+    ai_on = (not invalid_runtime and
              (role in ('standalone', 'ai') or
               (role == 'world' and topology == 'single')))
-    world_on = not invalid_transport and role in ('standalone', 'world')
-    split_role = (not invalid_transport and
+    world_on = not invalid_runtime and role in ('standalone', 'world')
+    split_role = (not invalid_runtime and
                   topology in ('dual_local', 'dual_network') and
                   role in ('ai', 'world'))
     sender_on = split_role and role == 'ai'
@@ -395,15 +499,32 @@ def _display(value):
             pass
     return value
 
+def _public_state(state):
+    public_keys = (
+        'role', 'topology', 'experience', 'completion', 'tier',
+        'diffusion_resolution', 'diffusion_fps', 'geometry_resolution',
+        'geometry_fps', 'point_budget', 'vr_fps', 'installation_fps',
+        'installation_width', 'installation_height', 'stereo_width',
+        'stereo_height', 'point_size_px', 'fog_density', 'procedural_mix',
+        'ai_active', 'world_active', 'installation_active', 'vr_active',
+        'transport_type', 'transport_fps', 'transport_atlas_width',
+        'transport_atlas_height', 'bridge_mode', 'adaptive_enabled',
+        'adaptive_level', 'sensor_mode_active', 'source_mode_active',
+        'source_frame_decision', 'source_metadata_mode',
+        'sensor_frame_decision', 'sensor_metadata_mode',
+    )
+    return dict((key, state[key]) for key in public_keys if key in state)
+
 def _write_state(root_comp, state):
     table = root_comp.op('CONFIG/runtime_state')
     if table is None:
         return
+    public = _public_state(state)
     try:
         table.clear()
         table.appendRow(['key', 'value'])
-        for key in sorted(state):
-            table.appendRow([key, _display(state[key])])
+        for key in sorted(public):
+            table.appendRow([key, _display(public[key])])
     except Exception:
         pass
 
@@ -555,15 +676,8 @@ def _apply_calibrated_contracts(root_comp, state):
     temporal_shader = 'WORKING_PIPELINE/TEMPORAL_WORLD/temporal_state_PIXEL'
     confidence_decay = min(1.0, max(
         0.0, _number(_value(temporal, 'Confidencedecay', 0.985), 0.985)))
-    age_seconds = max(0.05, _number(_value(temporal, 'Ageseconds', 2.0), 2.0))
-    try:
-        cook_rate = max(1.0, float(project.cookRate))
-    except Exception:
-        cook_rate = 60.0
     _set_shader_constant(root_comp, temporal_shader, 'confidenceDecay',
                          'FLEXGPU_CONFIDENCE_DECAY', confidence_decay)
-    _set_shader_constant(root_comp, temporal_shader, 'ageStep',
-                         'FLEXGPU_AGE_STEP', 1.0 / (cook_rate * age_seconds))
 
     completion = root_comp.op('WORKING_PIPELINE/COMPLETION')
     radius = max(1.0, _number(_value(completion, 'Disocclusionradius', 2.0), 2.0))
@@ -614,6 +728,8 @@ def _temporal_signature(root_comp, state):
         _number(_value(reconstruction, 'Cxnormalized', 0.5), 0.5),
         _number(_value(reconstruction, 'Cynormalized', 0.5), 0.5),
         _integer(_value(reconstruction, 'Calibrationepoch', 0), 0),
+        str(state.get('calibration_id', '')),
+        str(state.get('calibration_digest', '')),
     ]
     for index in range(4):
         values.append(tuple(_vec4(
@@ -670,8 +786,20 @@ def _health_snapshot(root_comp, runtime, frame_ms):
     state = runtime['state']
     sources = root_comp.op('WORKING_PIPELINE/SOURCES')
     sensor = root_comp.op('WORKING_PIPELINE/SENSOR_INTERACTION')
-    source_age = _number(_value(sources, 'Sourceagems', -1.0), -1.0)
-    sensor_age = _number(_value(sensor, 'Sensoragems', -1.0), -1.0)
+    lifecycle = runtime.get('frame_lifecycle', {})
+    source_frame = lifecycle.get('source', {})
+    sensor_frame = lifecycle.get('sensor', {})
+    source_parameter_age = _number(_value(sources, 'Sourceagems', -1.0), -1.0)
+    sensor_parameter_age = _number(_value(sensor, 'Sensoragems', -1.0), -1.0)
+    source_age = _number(source_frame.get('age_ms', source_parameter_age), -1.0)
+    sensor_age = _number(sensor_frame.get('age_ms', sensor_parameter_age), -1.0)
+    # Metadata-less legacy adapters may publish age directly on the component.
+    if (source_frame.get('metadata_mode') == 'legacy_each_cook' and
+            source_parameter_age >= 0):
+        source_age = source_parameter_age
+    if (sensor_frame.get('metadata_mode') == 'legacy_each_cook' and
+            sensor_parameter_age >= 0):
+        sensor_age = sensor_parameter_age
     source_config = _mapping(state.get('source'))
     sensor_config = _mapping(state.get('sensor'))
     source_timeout = _number(source_config.get('stale_timeout_ms', 1000), 1000)
@@ -681,10 +809,22 @@ def _health_snapshot(root_comp, runtime, frame_ms):
         warnings.append('source_stale')
     if sensor_age >= 0 and sensor_age > sensor_timeout:
         warnings.append('sensor_stale')
+    if source_frame.get('decision') in (
+            'future_rejected', 'retired_session_rejected',
+            'out_of_order_rejected', 'cook_frame_regression_rejected',
+            'metadata_rejected', 'remote_metadata_required',
+            'transport_disconnected', 'stale_remote_unverified'):
+        warnings.append('source_frame_rejected')
+    if sensor_frame.get('decision') in (
+            'future_rejected', 'retired_session_rejected',
+            'out_of_order_rejected', 'cook_frame_regression_rejected',
+            'metadata_rejected'):
+        warnings.append('sensor_frame_rejected')
     if state.get('transport_error'):
         warnings.append('transport_error')
     for field, warning in (
         ('source_contract_error', 'source_contract_error'),
+        ('sensor_contract_error', 'sensor_contract_error'),
         ('calibration_error', 'calibration_error'),
         ('source_fallback', 'source_fallback'),
         ('sensor_fallback', 'sensor_fallback'),
@@ -698,8 +838,15 @@ def _health_snapshot(root_comp, runtime, frame_ms):
         'operator_cook_time_ms':_operator_cook_ms(root_comp),
         'source_age_ms':source_age,
         'sensor_age_ms':sensor_age,
-        'source_frame_id':_integer(_value(sources, 'Frameid', -1), -1),
-        'sensor_frame_id':_integer(_value(sensor, 'Sensorframeid', -1), -1),
+        'source_frame_id':source_frame.get(
+            'frame_id', _integer(_value(sources, 'Frameid', -1), -1)),
+        'sensor_frame_id':sensor_frame.get(
+            'frame_id', _integer(_value(sensor, 'Sensorframeid', -1), -1)),
+        'source_new_frame':bool(source_frame.get('new_frame', False)),
+        'source_valid':bool(source_frame.get('valid', True)),
+        'source_frame_decision':source_frame.get('decision', 'unknown'),
+        'source_metadata_mode':source_frame.get('metadata_mode', 'unknown'),
+        'sensor_frame_decision':sensor_frame.get('decision', 'unknown'),
         'source_session_epoch':_integer(_value(sources, 'Sessionepoch', 0), 0),
         'temporal_resets':int(runtime.get('temporal_reset_count', 0)),
         'temporal_last_reset_reason':runtime.get('temporal_last_reset_reason', ''),
@@ -869,7 +1016,8 @@ def _load_calibration(root_comp, state, configured_path):
         if not isinstance(data, dict) or data.get('version') != 'flexgpu-calibration/v1':
             raise ValueError('unsupported calibration version')
         allowed = {'version', 'calibration_id', 'image', 'intrinsics', 'depth',
-                   'camera_to_world', 'sensor_to_world', 'coordinate_system'}
+                   'camera_to_world', 'sensor_to_world', 'coordinate_system',
+                   'calibration_digest'}
         if set(data).difference(allowed):
             raise ValueError('unsupported calibration field')
         if data.get('coordinate_system', 'right_handed_y_up_metres') != \
@@ -929,13 +1077,54 @@ def _load_calibration(root_comp, state, configured_path):
             if (abs(matrix[12]) > 1e-6 or abs(matrix[13]) > 1e-6 or
                     abs(matrix[14]) > 1e-6 or abs(matrix[15] - 1.0) > 1e-6):
                 raise ValueError('transform must be homogeneous row-major')
+            basis = (matrix[0:3], matrix[4:7], matrix[8:11])
+            for index, axis in enumerate(basis):
+                length_squared = sum(component * component for component in axis)
+                if abs(length_squared - 1.0) > TRANSFORM_TOLERANCE:
+                    raise ValueError(
+                        'transform spatial basis axis %d must have unit length' % index)
+            for first, second in ((0, 1), (0, 2), (1, 2)):
+                dot = sum(
+                    basis[first][component] * basis[second][component]
+                    for component in range(3))
+                if abs(dot) > TRANSFORM_TOLERANCE:
+                    raise ValueError('transform spatial basis must be orthonormal')
             determinant = (
                 matrix[0] * (matrix[5] * matrix[10] - matrix[6] * matrix[9]) -
                 matrix[1] * (matrix[4] * matrix[10] - matrix[6] * matrix[8]) +
                 matrix[2] * (matrix[4] * matrix[9] - matrix[5] * matrix[8]))
-            if determinant <= 1e-8:
-                raise ValueError(
-                    'transform must have a non-singular right-handed spatial basis')
+            if (determinant <= 0.0 or
+                    abs(determinant - 1.0) > TRANSFORM_TOLERANCE * 4):
+                raise ValueError('transform must have a rigid right-handed spatial basis')
+        # Bind the user-facing calibration_id to the validated semantic content.
+        # File whitespace/key order and a supplied digest field are deliberately
+        # excluded; normalized numeric values match commissioning.py.
+        semantic = {
+            'version':'flexgpu-calibration/v1',
+            'calibration_id':calibration_id,
+            'image':{'width':width, 'height':height},
+            'intrinsics':{'fx':float(fx), 'fy':float(fy),
+                          'cx':float(cx), 'cy':float(cy)},
+            'depth':{'encoding':encoding, 'scale':float(scale),
+                     'bias':float(bias), 'near_m':float(near_m),
+                     'far_m':float(far_m)},
+            'camera_to_world':[float(item) for item in camera],
+            'sensor_to_world':[float(item) for item in sensor],
+            'coordinate_system':'right_handed_y_up_metres',
+        }
+        canonical = json.dumps(
+            semantic, sort_keys=True, separators=(',', ':'),
+            ensure_ascii=False, allow_nan=False).encode('utf-8')
+        calibration_digest = hashlib.sha256(canonical).hexdigest()
+        supplied_digest = data.get('calibration_digest')
+        if supplied_digest is not None:
+            if (not isinstance(supplied_digest, str) or
+                    SHA256_PATTERN.fullmatch(supplied_digest) is None or
+                    supplied_digest != calibration_digest):
+                raise ValueError('calibration digest does not match content')
+        existing_digest = state.get('calibration_digest')
+        if existing_digest and existing_digest != calibration_digest:
+            raise ValueError('source and sensor calibration digests differ')
         reconstruction = root_comp.op('WORKING_PIPELINE/RECONSTRUCTION')
         _set(reconstruction, 'Depthmode', mode)
         _set(reconstruction, 'Depthscale', scale)
@@ -946,8 +1135,7 @@ def _load_calibration(root_comp, state, configured_path):
         _set(reconstruction, 'Fynormalized', fy / float(height))
         _set(reconstruction, 'Cxnormalized', cx / float(width))
         _set(reconstruction, 'Cynormalized', cy / float(height))
-        epoch = sum((index + 1) * ord(char)
-                    for index, char in enumerate(calibration_id)) % 2147483647
+        epoch = int(calibration_digest[:8], 16) % 2147483647
         _set(reconstruction, 'Calibrationepoch', epoch)
         sensor_comp = root_comp.op('WORKING_PIPELINE/SENSOR_INTERACTION')
         for index in range(4):
@@ -956,6 +1144,7 @@ def _load_calibration(root_comp, state, configured_path):
             _set(sensor_comp, 'Sensortoworld%d' % index,
                  ' '.join('%.12g' % item for item in sensor[index * 4:index * 4 + 4]))
         state['calibration_id'] = calibration_id
+        state['calibration_digest'] = calibration_digest
         state['calibration_status'] = 'ready'
         return True
     except Exception:
@@ -989,11 +1178,13 @@ def _configure_source_adapter(root_comp, state, source):
             return False
     for field in ('frame_state_operator', 'camera_metadata_operator'):
         configured = source.get(field)
-        if (configured and
-                _child_op(root_comp, search_root, configured,
-                          require_top=False) is None):
-            state['source_adapter_error'] = field + ' could not be resolved'
-            return False
+        if configured:
+            resolved = _child_op(root_comp, search_root, configured,
+                                 require_top=False)
+            if resolved is None:
+                state['source_adapter_error'] = field + ' could not be resolved'
+                return False
+            state['source_' + field + '_path'] = str(resolved.path)
     calibration_path = source.get('calibration_path')
     if calibration_path and not _load_calibration(root_comp, state, calibration_path):
         return False
@@ -1024,16 +1215,465 @@ def _configure_sensor_adapter(root_comp, state, sensor):
             return False
     for field in ('frame_state_operator',):
         configured = sensor.get(field)
-        if (configured and
-                _child_op(root_comp, search_root, configured,
-                          require_top=False) is None):
-            state['sensor_adapter_error'] = field + ' could not be resolved'
-            return False
+        if configured:
+            resolved = _child_op(root_comp, search_root, configured,
+                                 require_top=False)
+            if resolved is None:
+                state['sensor_adapter_error'] = field + ' could not be resolved'
+                return False
+            state['sensor_' + field + '_path'] = str(resolved.path)
     calibration_path = sensor.get('calibration_path')
     if calibration_path and not _load_calibration(root_comp, state, calibration_path):
         return False
     state['sensor_adapter_status'] = 'ready'
     return True
+
+def _operator_mapping(node):
+    """Read a small JSON/table/CHOP metadata operator without sampling imagery."""
+    if node is None:
+        raise ValueError('frame-state operator is unavailable')
+    try:
+        stored = node.fetch('_flexgpu_frame_state', None)
+        if isinstance(stored, dict):
+            return dict(stored)
+    except Exception:
+        pass
+    try:
+        text = str(node.text).strip()
+        if text.startswith('{'):
+            value = json.loads(text, object_pairs_hook=_strict_pairs,
+                               parse_constant=_reject_json_constant)
+            if isinstance(value, dict):
+                return value
+            raise ValueError('frame-state JSON must be an object')
+        if text.startswith('['):
+            raise ValueError('frame-state JSON must be an object')
+    except AttributeError:
+        pass
+    except Exception:
+        raise ValueError('frame-state JSON is invalid')
+    try:
+        rows = int(node.numRows)
+        result = {}
+        start = 1 if rows and str(node[0, 0]).strip().lower() in (
+            'key', 'field', 'metric') else 0
+        for row in range(start, rows):
+            key = str(node[row, 0]).strip()
+            if not key:
+                continue
+            if key in result:
+                raise ValueError('duplicate frame-state field')
+            result[key] = str(node[row, 1]).strip()
+        if result:
+            return result
+    except ValueError:
+        raise
+    except Exception:
+        pass
+    try:
+        result = {}
+        for channel in node.chans():
+            name = str(channel.name)
+            if name in result:
+                raise ValueError('duplicate frame-state channel')
+            result[name] = channel.eval()
+        if result:
+            return result
+    except ValueError:
+        raise
+    except Exception:
+        pass
+    raise ValueError('frame-state operator has no supported mapping')
+
+def _strict_frame_integer(value, field, low, high):
+    if isinstance(value, bool):
+        raise ValueError(field + ' must be an integer')
+    if isinstance(value, str):
+        if re.fullmatch(r'0|[1-9][0-9]*', value.strip()) is None:
+            raise ValueError(field + ' must be a decimal integer')
+        parsed = int(value.strip())
+    elif isinstance(value, int):
+        parsed = value
+    else:
+        raise ValueError(field + ' must be an integer')
+    if parsed < low or parsed > high:
+        raise ValueError(field + ' is outside the supported range')
+    return parsed
+
+def _validate_frame_state(value, state):
+    if not isinstance(value, dict):
+        raise ValueError('frame state must be an object')
+    allowed = {'version', 'session_id', 'frame_id', 'timestamp_ns',
+               'width', 'height', 'calibration_id', 'calibration_digest',
+               'valid_fraction', 'confidence_mean'}
+    if set(value).difference(allowed):
+        raise ValueError('frame state contains an unsupported field')
+    if value.get('version') != FRAME_STATE_VERSION:
+        raise ValueError('unsupported frame-state version')
+    required = allowed
+    missing = sorted(required.difference(value))
+    if missing:
+        raise ValueError('frame state is missing ' + missing[0])
+    session_id = value.get('session_id')
+    calibration_id = value.get('calibration_id')
+    for field, identifier in (('session_id', session_id),
+                              ('calibration_id', calibration_id)):
+        if (not isinstance(identifier, str) or len(identifier) > 64 or
+                IDENTIFIER_PATTERN.fullmatch(identifier) is None):
+            raise ValueError(field + ' must be a conservative identifier')
+    digest = value.get('calibration_digest')
+    if not isinstance(digest, str) or SHA256_PATTERN.fullmatch(digest) is None:
+        raise ValueError('calibration_digest must be lowercase SHA-256')
+    expected_id = state.get('calibration_id')
+    expected_digest = state.get('calibration_digest')
+    if expected_id and calibration_id != expected_id:
+        raise ValueError('frame calibration_id does not match loaded calibration')
+    if expected_digest and digest != expected_digest:
+        raise ValueError('frame calibration_digest does not match loaded calibration')
+    valid_fraction = _finite(value.get('valid_fraction'), 'valid_fraction')
+    confidence_mean = _finite(value.get('confidence_mean'), 'confidence_mean')
+    if not 0.0 <= valid_fraction <= 1.0:
+        raise ValueError('valid_fraction must be between zero and one')
+    if not 0.0 <= confidence_mean <= 1.0:
+        raise ValueError('confidence_mean must be between zero and one')
+    return {
+        'version':FRAME_STATE_VERSION,
+        'session_id':session_id,
+        'frame_id':_strict_frame_integer(
+            value.get('frame_id'), 'frame_id', 0, 2 ** 63 - 1),
+        'timestamp_ns':_strict_frame_integer(
+            value.get('timestamp_ns'), 'timestamp_ns', 1, 2 ** 63 - 1),
+        'width':_strict_frame_integer(value.get('width'), 'width', 1, 16384),
+        'height':_strict_frame_integer(value.get('height'), 'height', 1, 16384),
+        'calibration_id':calibration_id,
+        'calibration_digest':digest,
+        'valid_fraction':valid_fraction,
+        'confidence_mean':confidence_mean,
+    }
+
+def _lifecycle_slot(runtime, label):
+    lifecycle = runtime.setdefault('frame_lifecycle', {})
+    return lifecycle.setdefault(label, {
+        'session_id':None, 'frame_id':None, 'timestamp_ns':None,
+        'arrival_monotonic':None, 'retired_sessions':[],
+        'new_frame':False, 'valid':True, 'age_ms':-1.0,
+        'accepted_count':0, 'decision':'initializing',
+        'metadata_mode':'legacy_each_cook',
+    })
+
+def _accept_explicit_frame(runtime, label, metadata, now_ns, now_monotonic,
+                           stale_timeout_ms):
+    slot = _lifecycle_slot(runtime, label)
+    session_id = metadata['session_id']
+    frame_id = metadata['frame_id']
+    timestamp_ns = metadata['timestamp_ns']
+    age_ms = (now_ns - timestamp_ns) / 1000000.0
+    if age_ms < -100.0:
+        slot.update({'new_frame':False, 'valid':False, 'age_ms':age_ms,
+                     'decision':'future_rejected', 'metadata_mode':'explicit'})
+        return slot
+    if session_id in slot['retired_sessions']:
+        slot.update({'new_frame':False, 'valid':False, 'age_ms':age_ms,
+                     'decision':'retired_session_rejected',
+                     'metadata_mode':'explicit'})
+        return slot
+    previous_session = slot.get('session_id')
+    session_changed = previous_session not in (None, session_id)
+    if session_changed:
+        retired = list(slot.get('retired_sessions', []))
+        retired.append(previous_session)
+        slot['retired_sessions'] = retired[-8:]
+    if not session_changed and previous_session == session_id:
+        previous_id = slot.get('frame_id')
+        previous_timestamp = slot.get('timestamp_ns')
+        if (previous_id is not None and
+                (frame_id < previous_id or timestamp_ns < previous_timestamp or
+                 ((frame_id == previous_id) !=
+                  (timestamp_ns == previous_timestamp)))):
+            slot.update({'new_frame':False, 'valid':False, 'age_ms':age_ms,
+                         'decision':'out_of_order_rejected',
+                         'metadata_mode':'explicit'})
+            return slot
+        if frame_id == previous_id and timestamp_ns == previous_timestamp:
+            slot.update({'new_frame':False,
+                         'valid':age_ms <= stale_timeout_ms,
+                         'age_ms':age_ms,
+                         'decision':('held' if age_ms <= stale_timeout_ms
+                                     else 'stale'),
+                         'metadata_mode':'explicit'})
+            return slot
+    slot.update(metadata)
+    slot['accepted_count'] = int(slot.get('accepted_count', 0)) + 1
+    slot.update({'new_frame':True, 'valid':age_ms <= stale_timeout_ms,
+                 'age_ms':age_ms, 'arrival_monotonic':now_monotonic,
+                 'decision':('new_session' if session_changed else 'accepted'),
+                 'metadata_mode':'explicit'})
+    return slot
+
+def _operator_cook_token(node):
+    if node is None:
+        return None
+    for name in ('cookAbsFrame', 'cookFrame', 'numCooks'):
+        try:
+            value = getattr(node, name)
+            if value is not None:
+                return int(value)
+        except Exception:
+            pass
+    return None
+
+def _accept_fallback_frame(runtime, label, token, now_monotonic,
+                           stale_timeout_ms, metadata_mode=None,
+                           session_id='fallback-local'):
+    slot = _lifecycle_slot(runtime, label)
+    if token is None:
+        token = int(slot.get('fallback_counter', -1)) + 1
+        slot['fallback_counter'] = token
+        mode = metadata_mode or 'legacy_each_cook'
+    else:
+        mode = metadata_mode or 'operator_cook_frame'
+    previous = slot.get('fallback_token')
+    if previous is not None and token < previous:
+        slot.update({'new_frame':False, 'valid':False,
+                     'decision':'cook_frame_regression_rejected',
+                     'metadata_mode':mode})
+        return slot
+    new_frame = previous != token
+    if new_frame:
+        slot['fallback_token'] = token
+        slot['arrival_monotonic'] = now_monotonic
+        slot['accepted_count'] = int(slot.get('accepted_count', 0)) + 1
+    arrival = slot.get('arrival_monotonic')
+    age_ms = -1.0 if arrival is None else (now_monotonic - arrival) * 1000.0
+    valid = age_ms < 0 or age_ms <= stale_timeout_ms
+    slot.update({'session_id':session_id, 'frame_id':token,
+                 'new_frame':new_frame, 'valid':valid, 'age_ms':age_ms,
+                 'decision':('accepted_fallback' if new_frame else
+                             'held_fallback' if valid else 'stale_fallback'),
+                 'metadata_mode':mode})
+    return slot
+
+def _channel_integer(node, name):
+    if node is None:
+        return None
+    try:
+        channel = node[name]
+    except Exception:
+        return None
+    for candidate in (
+            lambda: channel.eval(),
+            lambda: channel[0],
+            lambda: channel):
+        try:
+            value = candidate()
+            if isinstance(value, bool):
+                return None
+            parsed = int(value)
+            if float(value) != parsed:
+                return None
+            return parsed
+        except (TypeError, ValueError, OverflowError, IndexError):
+            pass
+        except Exception:
+            pass
+    return None
+
+def _receiver_frame_token(root_comp, state):
+    """Return only a producer-observable transport counter.
+
+    Touch In exposes ``num_received_frames`` through its Info CHOP. Shared Mem
+    In exposes no producer frame counter, so its metadata-less direct path must
+    fail closed instead of treating the receiver's local cook frame as new.
+    """
+    if state.get('transport_endpoint_active') != 'RX_TCP_ATLAS':
+        return None, 'explicit_metadata_required'
+    info = root_comp.op('WORKING_PIPELINE/ROLE_BRIDGE/RX_TCP_ATLAS_INFO')
+    connected = _channel_integer(info, 'connected')
+    if connected is not None and connected <= 0:
+        return None, 'transport_disconnected'
+    received_count = _channel_integer(info, 'num_received_frames')
+    if received_count is not None and received_count > 0:
+        return received_count, 'transport_receive_counter'
+    return None, 'transport_counter_unavailable'
+
+def _accept_unverified_remote_frame(runtime, label, now_monotonic,
+                                    stale_timeout_ms, reason):
+    """Hold/fail closed when remote producer freshness is not observable."""
+    slot = _lifecycle_slot(runtime, label)
+    observed = slot.get('remote_observed_monotonic')
+    if observed is None:
+        observed = now_monotonic
+        slot['remote_observed_monotonic'] = observed
+    accepted = slot.get('arrival_monotonic')
+    reference = accepted if accepted is not None else observed
+    age_ms = max(0.0, (now_monotonic - reference) * 1000.0)
+    previously_accepted = int(slot.get('accepted_count', 0)) > 0
+    still_fresh = previously_accepted and age_ms <= stale_timeout_ms
+    if reason == 'transport_disconnected':
+        slot['transport_disconnected'] = True
+        slot['transport_connected'] = False
+    if age_ms > stale_timeout_ms:
+        decision = 'stale_remote_unverified'
+    elif previously_accepted:
+        decision = reason
+    else:
+        decision = (reason if reason == 'transport_disconnected' else
+                    'remote_metadata_required')
+    slot.update({
+        'session_id':'transport-receiver',
+        'frame_id':slot.get('frame_id', -1),
+        'new_frame':False,
+        'valid':still_fresh,
+        'age_ms':age_ms,
+        'decision':decision,
+        'metadata_mode':'remote_requires_explicit',
+        'error':('configure source.frame_state_operator; Shared Mem In and '
+                 'receiver cook frames do not prove producer freshness'),
+    })
+    return slot
+
+def _accept_receiver_counter_frame(runtime, label, token, now_monotonic,
+                                   stale_timeout_ms):
+    slot = _lifecycle_slot(runtime, label)
+    previous_token = slot.get('fallback_token')
+    counter_restarted = (previous_token is not None and token < previous_token)
+    reconnected = (bool(slot.pop('transport_disconnected', False)) or
+                   counter_restarted)
+    serial = int(slot.get('transport_session_serial', 0))
+    if reconnected:
+        serial += 1
+        slot.pop('fallback_token', None)
+        slot.pop('arrival_monotonic', None)
+    slot['transport_session_serial'] = serial
+    result = _accept_fallback_frame(
+        runtime, label, token, now_monotonic, stale_timeout_ms,
+        metadata_mode='transport_receive_counter',
+        session_id='transport-receiver-%d' % serial)
+    result['transport_connected'] = True
+    if reconnected and result.get('new_frame'):
+        result['decision'] = 'new_transport_session'
+    return result
+
+def _accept_inactive_frame(runtime, label, mode):
+    slot = _lifecycle_slot(runtime, label)
+    slot.clear()
+    slot.update({
+        'session_id':None,
+        'frame_id':-1,
+        'timestamp_ns':None,
+        'new_frame':False,
+        'valid':False,
+        'age_ms':-1.0,
+        'accepted_count':0,
+        'decision':mode,
+        'metadata_mode':mode,
+    })
+    return slot
+
+def _frame_state_node(root_comp, state, label):
+    path = state.get(label + '_frame_state_operator_path')
+    if not path:
+        config = _mapping(state.get(label))
+        path = config.get('frame_state_operator')
+    if not path:
+        return None
+    try:
+        return root_comp.op(str(path))
+    except Exception:
+        return None
+
+def _fallback_frame_node(root_comp, state, label):
+    if label == 'source':
+        if state.get('transport_receiver_active'):
+            endpoint = state.get('transport_endpoint_active')
+            if endpoint:
+                return root_comp.op('WORKING_PIPELINE/ROLE_BRIDGE/' + endpoint)
+        return root_comp.op('WORKING_PIPELINE/SOURCES/RGB_SOURCE')
+    mode = state.get('sensor_mode_active', 'simulated')
+    names = {'depth_sensor':'DEPTH_SENSOR_ADAPTER',
+             'replay':'REPLAY_SENSOR_ADAPTER'}
+    name = names.get(mode, 'SIMULATED_SENSOR_MASK')
+    return root_comp.op('WORKING_PIPELINE/SENSOR_INTERACTION/' + name)
+
+def _sample_frame_lifecycle(root_comp, runtime, now_ns, now_monotonic):
+    state = runtime['state']
+    results = {}
+    for label in ('source', 'sensor'):
+        config = _mapping(state.get(label))
+        timeout = _number(config.get('stale_timeout_ms', 1000), 1000)
+        timeout = min(600000.0, max(1.0, timeout))
+        configured = bool(config.get('frame_state_operator'))
+        inactive_mode = (state.get('sensor_mode_active')
+                         if label == 'sensor' else None)
+        if inactive_mode in ('disabled', 'inactive'):
+            result = _accept_inactive_frame(runtime, label, inactive_mode)
+        elif configured:
+            try:
+                metadata = _validate_frame_state(
+                    _operator_mapping(_frame_state_node(root_comp, state, label)),
+                    state)
+                result = _accept_explicit_frame(
+                    runtime, label, metadata, now_ns, now_monotonic, timeout)
+            except Exception as exc:
+                result = _lifecycle_slot(runtime, label)
+                result.update({'new_frame':False, 'valid':False,
+                               'decision':'metadata_rejected',
+                               'metadata_mode':'explicit',
+                               'error':str(exc)[:160]})
+        elif label == 'source' and state.get('transport_receiver_active'):
+            token, receiver_status = _receiver_frame_token(root_comp, state)
+            if token is None:
+                result = _accept_unverified_remote_frame(
+                    runtime, label, now_monotonic, timeout, receiver_status)
+            else:
+                result = _accept_receiver_counter_frame(
+                    runtime, label, token, now_monotonic, timeout)
+        else:
+            node = _fallback_frame_node(root_comp, state, label)
+            result = _accept_fallback_frame(
+                runtime, label, _operator_cook_token(node),
+                now_monotonic, timeout)
+        results[label] = result
+    source = results['source']
+    sensor = results['sensor']
+    sources_comp = root_comp.op('WORKING_PIPELINE/SOURCES')
+    sensor_comp = root_comp.op('WORKING_PIPELINE/SENSOR_INTERACTION')
+    temporal = root_comp.op('WORKING_PIPELINE/TEMPORAL_WORLD')
+    _set(sources_comp, 'Newframe', source['new_frame'])
+    _set(sources_comp, 'Sourcevalid', source['valid'])
+    _set(sources_comp, 'Frameid', source.get('frame_id', -1))
+    _set(sources_comp, 'Sourceagems', source.get('age_ms', -1.0))
+    timestamp_ns = source.get('timestamp_ns')
+    _set(sources_comp, 'Frametimestampseconds',
+         -1.0 if timestamp_ns is None else timestamp_ns / 1000000000.0)
+    previous_session = runtime.get('source_session_id')
+    session_id = source.get('session_id')
+    tracked_session = source.get('metadata_mode') in (
+        'explicit', 'transport_receive_counter')
+    if tracked_session and session_id and session_id != previous_session:
+        runtime['source_session_id'] = session_id
+        runtime['source_session_serial'] = int(
+            runtime.get('source_session_serial', -1)) + 1
+    if tracked_session:
+        _set(sources_comp, 'Sessionepoch', runtime.get('source_session_serial', 0))
+    _set(sensor_comp, 'Sensorframeid', sensor.get('frame_id', -1))
+    _set(sensor_comp, 'Sensoragems', sensor.get('age_ms', -1.0))
+    _set(temporal, 'Newframe', source['new_frame'])
+    _set(temporal, 'Sourcevalid', source['valid'])
+    bridge = root_comp.op('WORKING_PIPELINE/ROLE_BRIDGE')
+    _set(bridge, 'Framesessionid', source.get('session_id') or '')
+    _set(bridge, 'Frameid', source.get('frame_id', -1))
+    _set(bridge, 'Frametimestampns', str(source.get('timestamp_ns', -1)))
+    _set(bridge, 'Calibrationid', source.get(
+        'calibration_id', state.get('calibration_id', '')))
+    _set(bridge, 'Calibrationdigest', source.get(
+        'calibration_digest', state.get('calibration_digest', '')))
+    _set(bridge, 'Framevalid', source['valid'])
+    state['source_frame_decision'] = source['decision']
+    state['source_metadata_mode'] = source['metadata_mode']
+    state['sensor_frame_decision'] = sensor['decision']
+    state['sensor_metadata_mode'] = sensor['metadata_mode']
+    return results
 
 def _apply_working_pipeline(root_comp, state):
     pipeline = root_comp.op('WORKING_PIPELINE')
@@ -1093,6 +1733,8 @@ def _apply_working_pipeline(root_comp, state):
                  'WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER/REPLACE_WITH_CONFIDENCE',
                  'WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER/REPLACE_WITH_VALID_MASK',
                  'WORKING_PIPELINE/RECONSTRUCTION/CONFIDENCE_ALIGNED_RESIZE',
+                 'WORKING_PIPELINE/SENSOR_INTERACTION/SIMULATED_SENSOR_CONFIDENCE',
+                 'WORKING_PIPELINE/SENSOR_INTERACTION/REPLAY_SENSOR_CONFIDENCE',
                  'WORKING_PIPELINE/TEMPORAL_WORLD/STATE_SEED'):
         _set_resolution(root_comp.op(path), state['geometry_resolution'],
                         state['geometry_resolution'])
@@ -1124,14 +1766,15 @@ def _apply_working_pipeline(root_comp, state):
 
     width = state['installation_width']
     height = state['installation_height']
-    _set_resolution(root_comp.op('WORKING_PIPELINE/POINT_RENDER/RENDER_CENTER'), width, height)
+    _set_resolution(root_comp.op('WORKING_PIPELINE/POINT_RENDER/METRIC_RENDER_CENTER'), width, height)
+    _set_resolution(root_comp.op('WORKING_PIPELINE/POINT_RENDER/METRIC_MONO_FALLBACK'), width, height)
     _set_resolution(root_comp.op('WORKING_PIPELINE/INSTALLATION_OUTPUT/installation_grade'),
                     width, height)
     stereo_width = state['stereo_width']
     stereo_height = state['stereo_height']
     eye_width = max(64, stereo_width // 2)
-    for path in ('WORKING_PIPELINE/POINT_RENDER/RENDER_LEFT_EYE',
-                 'WORKING_PIPELINE/POINT_RENDER/RENDER_RIGHT_EYE'):
+    for path in ('WORKING_PIPELINE/POINT_RENDER/METRIC_RENDER_LEFT_EYE',
+                 'WORKING_PIPELINE/POINT_RENDER/METRIC_RENDER_RIGHT_EYE'):
         _set_resolution(root_comp.op(path), eye_width, stereo_height)
     _set_resolution(root_comp.op('WORKING_PIPELINE/STEREO_PREVIEW/STEREO_SIDE_BY_SIDE'),
                     stereo_width, stereo_height)
@@ -1144,7 +1787,7 @@ def _apply_working_pipeline(root_comp, state):
         owns_sensor = bool(state.get('world_active', True))
         if owns_sensor:
             active_sensor = (sensor_mode if sensor_mode in
-                             ('simulated', 'replay', 'depth_sensor')
+                             ('simulated', 'replay', 'depth_sensor', 'disabled')
                              else 'simulated')
             if (active_sensor == 'depth_sensor' and
                     not _configure_sensor_adapter(root_comp, state, sensor)):
@@ -1154,9 +1797,7 @@ def _apply_working_pipeline(root_comp, state):
             # sensor SDK/.tox or resolve its operators.
             active_sensor = 'inactive'
         _set(root_comp.op('WORKING_PIPELINE/SENSOR_INTERACTION'), 'Mode',
-             active_sensor if active_sensor != 'inactive' else 'simulated')
-        mask = root_comp.op('WORKING_PIPELINE/SENSOR_INTERACTION/SIMULATED_SENSOR_MASK')
-        _set(mask, 'radius', 0.0 if sensor_mode == 'disabled' or not owns_sensor else 0.16)
+             active_sensor if active_sensor != 'inactive' else 'disabled')
         state['sensor_mode_active'] = (
             'inactive' if not owns_sensor else
             'disabled' if sensor_mode == 'disabled' else active_sensor)
@@ -1201,6 +1842,8 @@ def _apply_working_pipeline(root_comp, state):
          'index', state['bridge_route_index'])
     _set(root_comp.op('WORKING_PIPELINE/ROLE_BRIDGE/CONFIDENCE_ROUTE'),
          'index', state['bridge_route_index'])
+    _set(root_comp.op('WORKING_PIPELINE/ROLE_BRIDGE/MASK_ROUTE'),
+         'index', state['bridge_route_index'])
     _set(root_comp.op('WORKING_PIPELINE/ROLE_BRIDGE/ATLAS_ROUTE'),
          'index', state['atlas_route_index'])
 
@@ -1225,9 +1868,9 @@ def _apply_working_pipeline(root_comp, state):
     for path in ('RECONSTRUCTION', 'SENSOR_INTERACTION', 'TEMPORAL_WORLD',
                  'COMPLETION', 'RENDER_CONTRACT', 'POINT_RENDER'):
         _allow(root_comp.op('WORKING_PIPELINE/' + path), state['world_active'])
-    _allow(root_comp.op('WORKING_PIPELINE/POINT_RENDER/RENDER_CENTER'),
+    _allow(root_comp.op('WORKING_PIPELINE/POINT_RENDER/METRIC_RENDER_CENTER'),
            state['installation_active'])
-    for path in ('RENDER_LEFT_EYE', 'RENDER_RIGHT_EYE'):
+    for path in ('METRIC_RENDER_LEFT_EYE', 'METRIC_RENDER_RIGHT_EYE'):
         _allow(root_comp.op('WORKING_PIPELINE/POINT_RENDER/' + path),
                state['vr_active'])
 
@@ -1271,6 +1914,9 @@ def _configure_adaptive(state):
         'telemetry_frame_max': 0.0,
         'temporal_signature': None, 'temporal_reset_count': 0,
         'temporal_last_reset_reason': '',
+        'frame_lifecycle': {}, 'source_session_id': None,
+        'source_session_serial': -1, 'heartbeat_last_write': None,
+        'heartbeat_application_state': None, 'readiness_progress': {},
     }
     if enabled:
         _apply_level(runtime)
@@ -1287,14 +1933,19 @@ def _apply_level(runtime):
         state[key] = _interpolate_quality(runtime['minimum'][key],
                                           runtime['maximum'][key],
                                           level, levels, key)
+    state['point_budget'] = min(
+        state['point_budget'], state['geometry_resolution'] ** 2)
     state['adaptive_level'] = level
 
-def apply(root_comp=None, overrides=None):
+def apply(root_comp=None, overrides=None, inherit_environment=True):
     root_comp = root_comp or op('/project1/flexgpu')
     if root_comp is None:
         return {}
     dashboard = root_comp.op('OPERATOR_DASHBOARD')
-    state = environment()
+    # Project construction must be deterministic and must never absorb the
+    # builder process's ambient FLEXGPU_CONFIG. Normal startup keeps the
+    # environment-aware behavior; bootstrap_project.build opts out explicitly.
+    state = environment() if inherit_environment else {}
     if overrides:
         state.update(overrides)
     _materialize(state)
@@ -1311,11 +1962,14 @@ def apply(root_comp=None, overrides=None):
     runtime = _configure_adaptive(state)
     if isinstance(previous_runtime, dict):
         for key in ('temporal_signature', 'temporal_reset_count',
-                    'temporal_last_reset_reason'):
+                    'temporal_last_reset_reason', 'frame_lifecycle',
+                    'source_session_id', 'source_session_serial',
+                    'heartbeat_last_write'):
             if key in previous_runtime:
                 runtime[key] = previous_runtime[key]
     try:
         root_comp.store('_flexgpu_runtime', runtime)
+        root_comp.storeStartupValue('_flexgpu_runtime', None)
     except Exception:
         pass
 
@@ -1349,10 +2003,17 @@ def apply(root_comp=None, overrides=None):
     _set(vr, 'Enabled', vr_on)
     _apply_working_pipeline(root_comp, state)
     _transport_tick(root_comp, runtime, True)
+    try:
+        initial_dt = 1.0 / max(1.0, float(project.cookRate))
+    except Exception:
+        initial_dt = 1.0 / 60.0
+    _set(root_comp.op('WORKING_PIPELINE/TEMPORAL_WORLD'),
+         'Deltaseconds', initial_dt)
     _write_state(root_comp, state)
     if dashboard is not None:
-        if state.get('transport_error'):
-            status = 'ERROR / transport / %s' % state['transport_error']
+        if state.get('runtime_error') or state.get('transport_error'):
+            status = 'ERROR / %s' % (state.get('runtime_error') or
+                                     state.get('transport_error'))
         elif state.get('source_fallback') or state.get('sensor_fallback'):
             status = 'WARNING / %s%s' % (
                 state.get('source_fallback', ''),
@@ -1365,16 +2026,22 @@ def apply(root_comp=None, overrides=None):
         _set(dashboard, 'Status', status)
     try:
         root_comp.store('runtime_state', dict(state))
+        root_comp.storeStartupValue('runtime_state', {})
     except Exception:
         pass
     if state.get('transport_error'):
         print('[FlexGPU] runtime transport ERROR (all heavy stages disabled): %s' %
               state['transport_error'])
+    if state.get('runtime_error'):
+        print('[FlexGPU] runtime override ERROR (all heavy stages disabled): %s' %
+              state['runtime_error'])
     if state.get('source_fallback'):
         print('[FlexGPU] source WARNING: configured adapter was rejected; demo remains active')
     if state.get('sensor_fallback'):
         print('[FlexGPU] sensor WARNING: configured adapter was rejected; simulation remains active')
-    print('[FlexGPU] runtime: %s' % state)
+    _write_heartbeat(root_comp, runtime, force=True)
+    print('[FlexGPU] runtime: %s' % json.dumps(
+        _public_state(state), sort_keys=True, separators=(',', ':')))
     return state
 
 def _runtime(root_comp):
@@ -1485,6 +2152,586 @@ def _transport_tick(root_comp, runtime, force=False):
         state['transport_last_send_frame'] = frame
     return cooked
 
+def _heartbeat_identity(state):
+    safe = dict((key, state.get(key)) for key in (
+        'role', 'topology', 'experience', 'completion', 'tier',
+        'diffusion_resolution', 'geometry_resolution', 'point_budget',
+        'calibration_id', 'calibration_digest', 'worldbus_version'))
+    encoded = json.dumps(safe, sort_keys=True, separators=(',', ':'),
+                         ensure_ascii=True, allow_nan=False).encode('utf-8')
+    return hashlib.sha256(encoded).hexdigest()
+
+def _heartbeat_config_identity(runtime):
+    cached = runtime.get('heartbeat_config_identity')
+    if isinstance(cached, str) and SHA256_PATTERN.fullmatch(cached):
+        return cached, runtime.get('heartbeat_config_identity_kind', 'runtime_state')
+    path = str(os.environ.get('FLEXGPU_CONFIG', '')).strip()
+    identity = None
+    kind = 'runtime_state'
+    if path:
+        expanded = os.path.abspath(os.path.normpath(
+            os.path.expandvars(os.path.expanduser(path))))
+        if os.path.isfile(expanded):
+            try:
+                if expanded.lower().endswith('.toml'):
+                    # Keep the heartbeat digest on the same parsed raw mapping
+                    # as the supervisor. stdlib tomllib is present in the
+                    # supported TouchDesigner Python; fail closed to the manual
+                    # runtime-state identity only when that module is absent.
+                    try:
+                        import tomllib
+                    except ImportError:
+                        runtime['heartbeat_config_error'] = 'tomllib_unavailable'
+                        raw = None
+                    else:
+                        with open(expanded, 'rb') as handle:
+                            raw = tomllib.load(handle)
+                else:
+                    with open(expanded, 'r', encoding='utf-8-sig') as handle:
+                        raw = json.load(handle, object_pairs_hook=_config_pairs,
+                                        parse_constant=_config_constant)
+                if not isinstance(raw, dict):
+                    raise ValueError('runtime config root must be an object')
+                encoded = json.dumps(
+                    raw, sort_keys=True, separators=(',', ':'),
+                    ensure_ascii=False, allow_nan=False).encode('utf-8')
+                identity = hashlib.sha256(encoded).hexdigest()
+                kind = 'canonical_config_raw'
+            except Exception:
+                identity = None
+                kind = 'runtime_state_config_unavailable'
+        else:
+            kind = 'runtime_state_config_unavailable'
+    if identity is None:
+        identity = _heartbeat_identity(runtime['state'])
+    runtime['heartbeat_config_identity'] = identity
+    runtime['heartbeat_config_identity_kind'] = kind
+    return identity, kind
+
+def _expected_heartbeat_identity(runtime):
+    file_config, file_config_kind = _heartbeat_config_identity(runtime)
+    expected_build = str(os.environ.get(
+        'FLEXGPU_EXPECTED_BUILD_VERSION', '')).strip()
+    expected_config = str(os.environ.get('FLEXGPU_CONFIG_ID', '')).strip()
+    build_matches = not expected_build or expected_build == RUNTIME_BUILD_VERSION
+    config_expected = bool(expected_config)
+    expected_config_valid = (
+        SHA256_PATTERN.fullmatch(expected_config) is not None)
+    # The supervisor hashes the validated effective config after CLI overrides.
+    # A TouchDesigner process cannot reproduce that identity from the unchanged
+    # source file, so a valid launcher-owned injection is the authoritative
+    # supervised identity. Keep the local file digest only as diagnostics.
+    if config_expected and expected_config_valid:
+        config_identity = expected_config
+        config_identity_kind = 'supervisor_effective_config'
+        config_matches = True
+    else:
+        config_identity = file_config
+        config_identity_kind = file_config_kind
+        config_matches = not config_expected
+    return {
+        'build_version':RUNTIME_BUILD_VERSION,
+        'build_expected':bool(expected_build),
+        'build_matches':build_matches,
+        'config_identity':config_identity,
+        'config_identity_kind':config_identity_kind,
+        'config_expected':config_expected,
+        'config_matches':config_matches,
+        'config_file_identity':file_config,
+        'config_file_identity_kind':file_config_kind,
+        'config_file_matches_effective':bool(
+            expected_config_valid and expected_config == file_config),
+    }
+
+def _readiness_text(value, limit=READINESS_MESSAGE_LIMIT):
+    text = ' '.join(str(value).replace('\x00', '').split())
+    if len(text) > limit:
+        text = text[:max(0, limit - 3)] + '...'
+    return text
+
+def _readiness_node_path(root_comp, node):
+    path = _readiness_text(getattr(node, 'path', ''), 192)
+    root_path = _readiness_text(getattr(root_comp, 'path', ''), 192).rstrip('/')
+    if root_path and path.startswith(root_path + '/'):
+        return path[len(root_path) + 1:]
+    return path or '<unknown>'
+
+def _readiness_messages(node, method_name):
+    method = getattr(node, method_name, None)
+    if not callable(method):
+        return [], None
+    try:
+        result = method()
+    except Exception as exc:
+        return [], _readiness_text('%s: %s' % (method_name, exc))
+    if not result:
+        return [], None
+    if isinstance(result, str):
+        values = result.splitlines()
+    else:
+        try:
+            values = list(result)
+        except Exception:
+            values = [result]
+    messages = []
+    for value in values:
+        message = _readiness_text(value)
+        if message:
+            messages.append(message)
+        if len(messages) >= READINESS_ISSUE_LIMIT:
+            break
+    return messages, None
+
+def _bounded_managed_nodes(root_comp, limit=READINESS_MANAGED_OPERATOR_LIMIT):
+    pending = [root_comp]
+    seen = set()
+    nodes = []
+    truncated = False
+    while pending and len(nodes) < limit:
+        node = pending.pop()
+        path = str(getattr(node, 'path', ''))
+        key = path or 'object:%d' % id(node)
+        if key in seen:
+            continue
+        seen.add(key)
+        nodes.append(node)
+        try:
+            iterator = iter(node.children)
+        except Exception:
+            continue
+        children = []
+        try:
+            for child in iterator:
+                if len(nodes) + len(pending) + len(children) >= limit:
+                    truncated = True
+                    break
+                children.append(child)
+        except Exception:
+            # A node can disappear during an interactive network edit. The
+            # next bounded scan retries; this observation fails closed.
+            truncated = True
+        pending.extend(reversed(children))
+    if pending:
+        truncated = True
+    return nodes, truncated
+
+def _required_readiness_outputs(root_comp, state):
+    required = []
+    if state.get('world_active'):
+        required.extend((
+            ('position', 'WORKING_PIPELINE/OUT_POSITION'),
+            ('color', 'WORKING_PIPELINE/OUT_COLOR'),
+            ('interaction', 'WORKING_PIPELINE/OUT_INTERACTION'),
+        ))
+        if state.get('installation_active'):
+            required.append(
+                ('installation', 'WORKING_PIPELINE/OUT_INSTALLATION'))
+        if state.get('vr_active'):
+            required.extend((
+                ('left_eye', 'WORKING_PIPELINE/OUT_LEFT_EYE'),
+                ('right_eye', 'WORKING_PIPELINE/OUT_RIGHT_EYE'),
+                ('stereo_preview', 'WORKING_PIPELINE/OUT_STEREO_PREVIEW'),
+            ))
+    elif state.get('ai_active'):
+        if state.get('transport_sender_active'):
+            required.append((
+                'transport_atlas',
+                'WORKING_PIPELINE/ROLE_BRIDGE/PACK_ATOMIC_ATLAS'))
+        else:
+            required.append(
+                ('source_rgb', 'WORKING_PIPELINE/SOURCES/RGB_SOURCE'))
+    resolved = []
+    for name, path in required:
+        try:
+            node = root_comp.op(path)
+        except Exception:
+            node = None
+        resolved.append((name, path, node))
+    return resolved
+
+def _readiness_dimensions(name, path, node):
+    width = None
+    height = None
+    if node is not None:
+        try:
+            width = int(node.width)
+        except Exception:
+            pass
+        try:
+            height = int(node.height)
+        except Exception:
+            pass
+    valid = (
+        width is not None and height is not None and
+        0 < width <= READINESS_MAX_OUTPUT_DIMENSION and
+        0 < height <= READINESS_MAX_OUTPUT_DIMENSION)
+    result = {'name':name, 'path':path, 'width':width, 'height':height,
+              'valid':valid}
+    if node is None:
+        result['problem'] = 'missing_operator'
+    elif width is None or height is None:
+        result['problem'] = 'dimensions_unavailable'
+    elif not valid:
+        result['problem'] = 'dimensions_out_of_range'
+    return result
+
+def _inspect_readiness_health(root_comp, runtime, now, force=False):
+    cached = runtime.get('readiness_managed_health')
+    checked_at = runtime.get('readiness_managed_health_checked_at')
+    if (not force and isinstance(cached, dict) and checked_at is not None and
+            now >= checked_at and
+            now - checked_at < READINESS_HEALTH_INTERVAL_SECONDS):
+        return cached
+
+    nodes, truncated = _bounded_managed_nodes(root_comp)
+    operator_errors = []
+    shader_compile_errors = []
+    inspection_failures = []
+    operator_error_count = 0
+    shader_compile_error_count = 0
+    for node in nodes:
+        path = _readiness_node_path(root_comp, node)
+        errors, error_failure = _readiness_messages(node, 'errors')
+        warnings, warning_failure = _readiness_messages(node, 'warnings')
+        if error_failure or warning_failure:
+            if len(inspection_failures) < READINESS_ISSUE_LIMIT:
+                inspection_failures.append({
+                    'path':path,
+                    'messages':[message for message in (
+                        error_failure, warning_failure) if message],
+                })
+        if errors:
+            operator_error_count += 1
+            if len(operator_errors) < READINESS_ISSUE_LIMIT:
+                operator_errors.append({'path':path, 'messages':errors})
+        compile_warnings = [
+            message for message in warnings
+            if 'compile error' in message.lower().replace('-', ' ')]
+        if compile_warnings:
+            shader_compile_error_count += 1
+            if len(shader_compile_errors) < READINESS_ISSUE_LIMIT:
+                shader_compile_errors.append({
+                    'path':path, 'messages':compile_warnings})
+
+    required_outputs = [
+        _readiness_dimensions(name, path, node)
+        for name, path, node in _required_readiness_outputs(
+            root_comp, runtime['state'])]
+    invalid_outputs = [
+        item for item in required_outputs if not item['valid']]
+    result = {
+        'interval_ms':int(READINESS_HEALTH_INTERVAL_SECONDS * 1000.0),
+        'operators_scanned':len(nodes),
+        'operator_limit':READINESS_MANAGED_OPERATOR_LIMIT,
+        'scan_complete':not truncated,
+        'operator_error_count':operator_error_count,
+        'operator_errors':operator_errors,
+        'shader_compile_error_count':shader_compile_error_count,
+        'shader_compile_errors':shader_compile_errors,
+        'inspection_failures':inspection_failures,
+        'required_outputs':required_outputs,
+        'invalid_outputs':invalid_outputs,
+    }
+    runtime['readiness_managed_health'] = result
+    runtime['readiness_managed_health_checked_at'] = now
+    return result
+
+def _readiness_output_node(root_comp, state):
+    if state.get('world_active'):
+        if state.get('installation_active'):
+            return root_comp.op('WORKING_PIPELINE/OUT_INSTALLATION'), 'installation'
+        if state.get('vr_active'):
+            return root_comp.op('WORKING_PIPELINE/OUT_LEFT_EYE'), 'left_eye'
+        return None, 'world_output_inactive'
+    if state.get('ai_active'):
+        if state.get('transport_sender_active'):
+            return root_comp.op(
+                'WORKING_PIPELINE/ROLE_BRIDGE/PACK_ATOMIC_ATLAS'), 'transport_atlas'
+        return root_comp.op('WORKING_PIPELINE/SOURCES/RGB_SOURCE'), 'source_rgb'
+    return None, 'no_active_role'
+
+def _update_readiness_progress(root_comp, runtime, now, previous_tick):
+    progress = runtime.setdefault('readiness_progress', {})
+    progress['tick_count'] = int(progress.get('tick_count', 0)) + 1
+    if previous_tick is not None and now > previous_tick:
+        progress['cook_advances'] = int(progress.get('cook_advances', 0)) + 1
+    primary_node, output_name = _readiness_output_node(
+        root_comp, runtime['state'])
+    progress['output_name'] = output_name
+    prior_slots = progress.get('required_output_slots', {})
+    slots = {}
+    required = _required_readiness_outputs(root_comp, runtime['state'])
+    for name, path, node in required:
+        slot = dict(prior_slots.get(name, {}))
+        slot.update({'name':name, 'path':path, 'configured':node is not None})
+        slot.pop('probe_error', None)
+        cook_frame_before = _operator_cook_token(node)
+        cooked = False
+        probe_count = int(slot.get('probe_count', 0))
+        if (node is not None and int(slot.get('advances', 0)) < 1 and
+                probe_count < 2):
+            try:
+                node.cook(force=True)
+                cooked = True
+            except TypeError:
+                try:
+                    node.cook()
+                    cooked = True
+                except Exception as exc:
+                    slot['probe_error'] = _readiness_text(exc)
+            except Exception as exc:
+                slot['probe_error'] = _readiness_text(exc)
+            slot['probe_count'] = probe_count + 1
+        cook_frame_after = _operator_cook_token(node)
+        cook_frame = (
+            cook_frame_after
+            if cook_frame_after is not None else cook_frame_before)
+        prior_cook_frame = slot.get('token')
+        if cook_frame is not None:
+            slot['observation'] = 'cook_frame'
+            if prior_cook_frame is not None and cook_frame > prior_cook_frame:
+                slot['advances'] = int(slot.get('advances', 0)) + 1
+            elif prior_cook_frame is not None and cook_frame < prior_cook_frame:
+                slot['regressed'] = True
+            slot['token'] = cook_frame
+        else:
+            # Minimal unit-test shells do not expose TouchDesigner cook tokens.
+            # They remain compatible only after two callback observations.
+            slot['observation'] = 'synthetic_unobservable'
+            slot['probe_called'] = cooked
+        slots[name] = slot
+    progress['required_output_slots'] = slots
+    output_progress = []
+    for name, path, node in required:
+        slot = slots[name]
+        item = {
+            'name':name,
+            'path':path,
+            'configured':bool(slot.get('configured', False)),
+            'observation':slot.get('observation', 'none'),
+            'advances':int(slot.get('advances', 0)),
+            'regressed':bool(slot.get('regressed', False)),
+        }
+        if slot.get('probe_error'):
+            item['probe_error'] = slot['probe_error']
+        output_progress.append(item)
+    progress['required_outputs'] = output_progress
+    progress['output_configured'] = bool(output_progress) and all(
+        item['configured'] for item in output_progress)
+    progress['output_regressed'] = any(
+        item['regressed'] for item in output_progress)
+    progress['outputs_not_advancing'] = [
+        item['name'] for item in output_progress
+        if (item['configured'] and item['observation'] == 'cook_frame' and
+            item['advances'] < 1)]
+    progress['outputs_not_observable'] = [
+        item['name'] for item in output_progress
+        if (item['configured'] and
+            item['observation'] == 'synthetic_unobservable' and
+            int(progress.get('tick_count', 0)) < 2)]
+    progress['output_probe_failures'] = [
+        item['name'] for item in output_progress if item.get('probe_error')]
+    primary = next((
+        item for item in output_progress if item['name'] == output_name), None)
+    if primary is None and primary_node is not None:
+        primary = {'observation':'none', 'advances':0}
+    progress['output_observation'] = (
+        primary.get('observation', 'none') if primary else 'none')
+    progress['output_advances'] = (
+        min(item['advances'] for item in output_progress)
+        if output_progress else 0)
+    return progress
+
+def _application_readiness(root_comp, runtime, managed_health=None):
+    state = runtime['state']
+    progress = runtime.get('readiness_progress', {})
+    source = runtime.get('frame_lifecycle', {}).get('source', {})
+    identity = _expected_heartbeat_identity(runtime)
+    if managed_health is None:
+        managed_health = runtime.get('readiness_managed_health')
+    if not isinstance(managed_health, dict):
+        managed_health = _inspect_readiness_health(
+            root_comp, runtime, runtime.get('last_tick') or 0.0, force=True)
+    reasons = []
+    hard_failure = False
+    if state.get('runtime_error'):
+        reasons.append('runtime_contract_error')
+        hard_failure = True
+    if state.get('transport_error'):
+        reasons.append('transport_contract_error')
+        hard_failure = True
+    if (state.get('source_contract_error') or
+            state.get('sensor_contract_error') or
+            state.get('calibration_error')):
+        reasons.append('source_contract_error')
+        hard_failure = True
+    if not identity['build_matches']:
+        reasons.append('build_identity_mismatch')
+        hard_failure = True
+    if not identity['config_matches']:
+        reasons.append('config_identity_mismatch')
+        hard_failure = True
+    if not managed_health.get('scan_complete', False):
+        reasons.append('managed_health_scan_incomplete')
+        hard_failure = True
+    if managed_health.get('inspection_failures'):
+        reasons.append('managed_health_inspection_failed')
+        hard_failure = True
+    if int(managed_health.get('operator_error_count', 0)) > 0:
+        reasons.append('managed_operator_errors')
+        hard_failure = True
+    if int(managed_health.get('shader_compile_error_count', 0)) > 0:
+        reasons.append('managed_shader_compile_errors')
+        hard_failure = True
+    if managed_health.get('invalid_outputs'):
+        reasons.append('required_output_dimensions_invalid')
+        hard_failure = True
+    if int(progress.get('tick_count', 0)) < 2 or int(
+            progress.get('cook_advances', 0)) < 1:
+        reasons.append('cook_not_advancing')
+    if int(source.get('accepted_count', 0)) < 1:
+        reasons.append('source_not_accepted')
+    elif not bool(source.get('valid', False)):
+        reasons.append('source_unhealthy')
+    if not progress.get('output_configured', False):
+        reasons.append('output_not_configured')
+    elif progress.get('output_probe_failures'):
+        reasons.append('output_probe_failed')
+        hard_failure = True
+    elif progress.get('output_regressed'):
+        reasons.append('output_cook_regressed')
+        hard_failure = True
+    elif progress.get('outputs_not_advancing'):
+        reasons.append('output_not_advancing')
+    elif progress.get('outputs_not_observable'):
+        reasons.append('output_not_observable')
+    ready = not reasons
+    return {
+        'ready':ready,
+        'state':'ready' if ready else 'degraded' if hard_failure else 'starting',
+        'reasons':reasons,
+        'identity':identity,
+        'tick_count':int(progress.get('tick_count', 0)),
+        'cook_advances':int(progress.get('cook_advances', 0)),
+        'source_accepted':int(source.get('accepted_count', 0)),
+        'output_name':progress.get('output_name', 'unknown'),
+        'output_observation':progress.get('output_observation', 'none'),
+        'output_advances':int(progress.get('output_advances', 0)),
+        'required_output_progress':list(progress.get('required_outputs', [])),
+        'managed_health':managed_health,
+    }
+
+def _heartbeat_settings():
+    session_id = str(os.environ.get('FLEXGPU_SESSION_ID', '')).strip()
+    path = str(os.environ.get('FLEXGPU_HEARTBEAT_PATH', '')).strip()
+    if (not session_id or len(session_id) > 128 or
+            IDENTIFIER_PATTERN.fullmatch(session_id) is None or not path):
+        return None
+    try:
+        timeout_ms = float(os.environ.get('FLEXGPU_HEARTBEAT_TIMEOUT_MS', '3000'))
+        if not math.isfinite(timeout_ms):
+            raise ValueError()
+    except Exception:
+        timeout_ms = 3000.0
+    timeout_ms = min(600000.0, max(250.0, timeout_ms))
+    expanded = os.path.abspath(os.path.normpath(
+        os.path.expandvars(os.path.expanduser(path))))
+    return session_id, expanded, timeout_ms
+
+def _write_heartbeat(root_comp, runtime, health=None, force=False):
+    settings = _heartbeat_settings()
+    if settings is None:
+        return False
+    session_id, path, timeout_ms = settings
+    now = time.perf_counter()
+    interval = min(1.0, max(0.10, timeout_ms / 3000.0))
+    state = runtime['state']
+    health = health or _health_snapshot(root_comp, runtime, 0.0)
+    source = runtime.get('frame_lifecycle', {}).get('source', {})
+    sensor = runtime.get('frame_lifecycle', {}).get('sensor', {})
+    managed_health = _inspect_readiness_health(
+        root_comp, runtime, now, force=force)
+    readiness = _application_readiness(
+        root_comp, runtime, managed_health=managed_health)
+    application_state = readiness['state']
+    previous = runtime.get('heartbeat_last_write')
+    if (not force and previous is not None and now - previous < interval and
+            runtime.get('heartbeat_application_state') == application_state):
+        return False
+    identity = readiness['identity']
+    payload = {
+        'version':HEARTBEAT_VERSION,
+        'session_id':session_id,
+        'role':state.get('role', 'standalone'),
+        'pid':os.getpid(),
+        'state':application_state,
+        'updated_at':datetime.datetime.now(
+            datetime.timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z'),
+        'build':{'version':RUNTIME_BUILD_VERSION,
+                 'expected':identity['build_expected'],
+                 'matches_expected':identity['build_matches']},
+        'config':{'identity':identity['config_identity'],
+                  'identity_kind':identity['config_identity_kind'],
+                  'expected':identity['config_expected'],
+                  'matches_expected':identity['config_matches'],
+                  'file_identity':identity['config_file_identity'],
+                  'file_identity_kind':identity['config_file_identity_kind'],
+                  'file_matches_effective':identity[
+                      'config_file_matches_effective']},
+        'cook':{'frame':int(runtime.get('frame', 0)),
+                'count':readiness['tick_count'],
+                'frame_time_ms':float(health.get('frame_time_ms', 0.0)),
+                'operator_cook_time_ms':float(
+                    health.get('operator_cook_time_ms', 0.0))},
+        'source':{'frame_id':source.get('frame_id', -1),
+                  'session_epoch':int(runtime.get('source_session_serial', 0)),
+                  'age_ms':source.get('age_ms', -1.0),
+                  'new_frame':bool(source.get('new_frame', False)),
+                  'valid':bool(source.get('valid', True)),
+                  'decision':source.get('decision', 'initializing')},
+        'sensor':{'frame_id':sensor.get('frame_id', -1),
+                  'age_ms':sensor.get('age_ms', -1.0),
+                  'valid':bool(sensor.get('valid', True)),
+                  'decision':sensor.get('decision', 'initializing')},
+        'transport':{'mode':state.get('bridge_mode', 'local'),
+                     'endpoint':state.get('transport_endpoint_active', ''),
+                     'last_send_frame':state.get('transport_last_send_frame', -1)},
+        'output':{'installation_active':bool(
+                      state.get('installation_active', False)),
+                  'vr_active':bool(state.get('vr_active', False)),
+                  'name':readiness['output_name'],
+                  'observation':readiness['output_observation'],
+                  'advances':readiness['output_advances'],
+                  'required':readiness['required_output_progress']},
+        'readiness':{'ready':readiness['ready'],
+                     'reasons':list(readiness['reasons']),
+                     'cook_advances':readiness['cook_advances'],
+                     'source_accepted':readiness['source_accepted'],
+                     'managed_health':readiness['managed_health']},
+    }
+    temporary = path + '.tmp.%d' % os.getpid()
+    try:
+        directory = os.path.dirname(path)
+        if directory and not os.path.isdir(directory):
+            os.makedirs(directory)
+        with open(temporary, 'w', encoding='utf-8') as handle:
+            json.dump(payload, handle, sort_keys=True, separators=(',', ':'),
+                      ensure_ascii=True, allow_nan=False)
+            handle.write('\n')
+            handle.flush()
+        os.replace(temporary, path)
+        runtime['heartbeat_last_write'] = now
+        runtime['heartbeat_application_state'] = application_state
+        return True
+    except Exception as exc:
+        try:
+            if os.path.isfile(temporary):
+                os.remove(temporary)
+        except Exception:
+            pass
+        print('[FlexGPU] heartbeat warning: %s' % exc)
+        return False
+
 def tick(root_comp=None):
     root_comp = root_comp or op('/project1/flexgpu')
     if root_comp is None:
@@ -1496,15 +2743,30 @@ def tick(root_comp=None):
     if runtime is None:
         return None
     _transport_tick(root_comp, runtime)
-    signature_changed = _check_temporal_signature(
-        root_comp, runtime['state'], 'manual source/calibration contract changed')
     now = time.perf_counter()
+    now_ns = time.time_ns()
     previous = runtime.get('last_tick')
     runtime['last_tick'] = now
     if previous is None:
-        _write_health(root_comp, _health_snapshot(root_comp, runtime, 0.0))
+        try:
+            delta_seconds = 1.0 / max(1.0, float(project.cookRate))
+        except Exception:
+            delta_seconds = 1.0 / 60.0
+        frame_ms = 0.0
+    else:
+        delta_seconds = min(0.25, max(0.0, now - previous))
+        frame_ms = delta_seconds * 1000.0
+    _set(root_comp.op('WORKING_PIPELINE/TEMPORAL_WORLD'),
+         'Deltaseconds', delta_seconds)
+    _sample_frame_lifecycle(root_comp, runtime, now_ns, now)
+    signature_changed = _check_temporal_signature(
+        root_comp, runtime['state'], 'manual source/session/calibration contract changed')
+    _update_readiness_progress(root_comp, runtime, now, previous)
+    if previous is None:
+        health = _health_snapshot(root_comp, runtime, 0.0)
+        _write_health(root_comp, health)
+        _write_heartbeat(root_comp, runtime, health)
         return None
-    frame_ms = max(0.0, (now - previous) * 1000.0)
     runtime['frame'] += 1
     changed = False
 
@@ -1547,6 +2809,7 @@ def tick(root_comp=None):
             _write_state(root_comp, runtime['state'])
             try:
                 root_comp.store('runtime_state', dict(runtime['state']))
+                root_comp.storeStartupValue('runtime_state', {})
             except Exception:
                 pass
         elif runtime['cooldown'] > 0:
@@ -1554,6 +2817,7 @@ def tick(root_comp=None):
 
     telemetry = _mapping(runtime['state'].get('telemetry'))
     health = _health_snapshot(root_comp, runtime, frame_ms)
+    _write_heartbeat(root_comp, runtime, health)
     if runtime['frame'] % 15 == 0:
         _write_health(root_comp, health)
     if bool(telemetry.get('enabled', False)):
@@ -1689,9 +2953,53 @@ def _child(parent, name):
         return None
 
 
+def _operator_type_name(node):
+    """Return TouchDesigner's canonical Python operator type when available."""
+
+    for attribute in ("opType", "OPType"):
+        try:
+            value = getattr(node, attribute)
+        except Exception:
+            continue
+        if value:
+            return str(value)
+    try:
+        value = node.__class__.__name__
+    except Exception:
+        value = ""
+    if any(str(value).lower().endswith(suffix) for suffix in
+           ("comp", "top", "chop", "sop", "dat", "mat", "pop")):
+        return str(value)
+    try:
+        operator_type = str(node.type)
+        family = str(node.family)
+    except Exception:
+        return ""
+    return operator_type + family
+
+
+def _operator_type_token(value):
+    return "".join(character for character in str(value).lower()
+                   if character.isalnum())
+
+
+def _operator_type_matches(node, expected):
+    actual = _operator_type_name(node)
+    return bool(actual and
+                _operator_type_token(actual) == _operator_type_token(expected))
+
+
 def _ensure(parent, type_name, name, report, optional=False):
     found = _child(parent, name)
     if found is not None:
+        if not _operator_type_matches(found, type_name):
+            actual = _operator_type_name(found) or "unverifiable operator type"
+            message = "%s already exists as %s; expected %s" % (
+                found.path, actual, type_name)
+            if optional:
+                report.warn(message)
+                return None
+            raise RuntimeError(message)
         report.reused.append(found.path)
         return found
     errors = []
@@ -1758,11 +3066,50 @@ def _set_par(node, names, value):
         p.val = value
         return True
     except Exception:
-        try:
-            p = value
-            return True
-        except Exception:
-            return False
+        return False
+
+
+def _set_par_expression(node, names, expression):
+    if node is None:
+        return False
+    if isinstance(names, str):
+        names = (names,)
+    p = _par(node, *names)
+    if p is None:
+        return False
+    try:
+        p.expr = expression
+        return True
+    except Exception:
+        return False
+
+
+def _configure_simulated_sensor_circle(pipeline, report):
+    """Apply the documented TouchDesigner Circle TOP parameter contract."""
+    try:
+        circle = pipeline.op('SENSOR_INTERACTION/SIMULATED_SENSOR_MASK')
+    except Exception:
+        circle = None
+    if circle is None:
+        return
+    required = (
+        _set_par(circle, 'radiusx', 0.16),
+        _set_par(circle, 'radiusy', 0.16),
+        _set_par_expression(
+            circle, 'centerx',
+            '0.24 * math.sin(absTime.seconds * 0.73)'),
+        _set_par_expression(
+            circle, 'centery',
+            '0.18 * math.cos(absTime.seconds * 0.91)'),
+    )
+    # Circle TOP defines (0, 0) as image center. Explicit fraction units make
+    # the intended radius and animated offsets independent of output size.
+    _set_par(circle, 'radiusunit', 'fraction')
+    _set_par(circle, 'centerunit', 'fraction')
+    if not all(required):
+        report.warn(
+            'SIMULATED_SENSOR_MASK is missing the Circle TOP '
+            'radiusx/radiusy/centerx/centery contract')
 
 
 def _connect(src, dst, dst_index=0, src_index=0, report=None):
@@ -1878,6 +3225,109 @@ def _lookup(data, key, default):
     return default
 
 
+def _safe_build_profile(config):
+    """Return only non-private values that are safe to persist in a .toe.
+
+    Adapter/operator paths, process commands, environment values, credentials,
+    telemetry paths, network peers and shared-memory names are runtime-only.
+    Unknown values are omitted rather than copied into CONFIG/profile_flat or
+    TouchDesigner storage.
+    """
+    if not isinstance(config, dict):
+        return {}
+    safe = {}
+    enums = {
+        "role": ("standalone", "world", "render", "ai"),
+        "topology": ("single", "dual_local", "dual_network"),
+        "experience": ("installation", "vr", "combined"),
+        "completion": ("fog", "procedural", "hybrid"),
+        "tier": ("3080ti_16gb", "4090", "5090", "custom"),
+        "node_role": ("ai", "render"),
+    }
+    for key, permitted in enums.items():
+        value = _lookup(config, key, None)
+        if isinstance(value, str) and value.lower() in permitted:
+            safe[key] = value.lower()
+
+    numeric_keys = (
+        "installation_fps", "vr_fps", "diffusion_fps",
+        "diffusion_resolution", "geometry_fps", "geometry_resolution",
+        "point_budget",
+    )
+    for key in numeric_keys:
+        value = _lookup(config, key, None)
+        if (not isinstance(value, bool) and isinstance(value, (int, float)) and
+                math.isfinite(float(value))):
+            safe[key] = value
+    for key in ("safe_mode", "ai_enabled", "sensor_enabled"):
+        value = _lookup(config, key, None)
+        if isinstance(value, bool):
+            safe[key] = value
+    worldbus = _lookup(config, "worldbus_version", None)
+    if (isinstance(worldbus, str) and
+            re.fullmatch(r"[0-9]+(?:\.[0-9]+){0,2}", worldbus)):
+        safe["worldbus_version"] = worldbus
+
+    def section(name, numeric=(), boolean=(), enum=None):
+        raw = _lookup(config, name, None)
+        if not isinstance(raw, dict):
+            return
+        result = {}
+        for key in numeric:
+            value = raw.get(key)
+            if (not isinstance(value, bool) and
+                    isinstance(value, (int, float)) and
+                    math.isfinite(float(value))):
+                result[key] = value
+        for key in boolean:
+            value = raw.get(key)
+            if isinstance(value, bool):
+                result[key] = value
+        if enum is not None:
+            key, permitted = enum
+            value = raw.get(key)
+            if isinstance(value, str) and value.lower() in permitted:
+                result[key] = value.lower()
+        if result:
+            safe[name] = result
+
+    section(
+        "adaptive",
+        numeric=("levels", "initial_level", "frame_budget_ms",
+                 "queue_budget_ms", "down_window", "up_window",
+                 "cooldown_samples"),
+        boolean=("enabled",),
+    )
+    raw_adaptive = _lookup(config, "adaptive", None)
+    if isinstance(raw_adaptive, dict) and isinstance(
+            raw_adaptive.get("thresholds"), dict):
+        thresholds = {}
+        for key in (
+                "frame_low", "frame_high", "vram_low", "vram_high",
+                "queue_low", "queue_high", "critical_frame",
+                "critical_vram", "critical_queue"):
+            value = raw_adaptive["thresholds"].get(key)
+            if (not isinstance(value, bool) and
+                    isinstance(value, (int, float)) and
+                    math.isfinite(float(value))):
+                thresholds[key] = value
+        if thresholds:
+            safe.setdefault("adaptive", {})["thresholds"] = thresholds
+    section(
+        "render",
+        numeric=("point_size_px", "point_budget", "installation_width",
+                 "installation_height", "installation_fps", "stereo_width",
+                 "stereo_height", "vr_fps", "fog_density",
+                 "procedural_mix"),
+    )
+    section(
+        "transport", numeric=("atlas_width", "atlas_height", "atlas_fps"),
+        boolean=("drop_stale_frames", "hold_last_complete_frame"),
+        enum=("type", ("local", "shared_memory", "touch_tcp")),
+    )
+    return safe
+
+
 def _load_config_pairs(pairs):
     result = {}
     for key, value in pairs:
@@ -1941,9 +3391,10 @@ def _build_shell(flexgpu, config, config_path, report):
         "completion": (0.55, 0.38, 0.18), "output": (0.42, 0.48, 0.18),
         "ui": (0.45, 0.24, 0.22), "startup": (0.30, 0.30, 0.30),
     }
+    embedded_profile = _safe_build_profile(config)
     defaults = dict(DEFAULTS)
     for key in defaults:
-        defaults[key] = _lookup(config, key, defaults[key])
+        defaults[key] = _lookup(embedded_profile, key, defaults[key])
 
     config_comp = _ensure(flexgpu, "baseCOMP", "CONFIG", report)
     _style(config_comp, -1150, 420, colors["config"], "JSON profile and runtime state")
@@ -1951,9 +3402,12 @@ def _build_shell(flexgpu, config, config_path, report):
     rows += [[key, defaults[key], "profile/default"] for key in sorted(defaults)]
     _table(config_comp, "settings", rows, report)
     _table(config_comp, "runtime_state", [["key", "value"], ["status", "not started"]], report)
-    _table(config_comp, "profile_flat", [["json_path", "value"]] +
-           [[key, value] for key, value in _flatten(config)], report)
-    _text(config_comp, "README", "Safe defaults plus optional JSON profile. Environment variables win at startup.", report)
+    profile_rows = [["json_path", "value"]] + [
+        [key, value] for key, value in _flatten(embedded_profile)]
+    if config:
+        profile_rows.append(["<runtime-only fields>", "not embedded"])
+    _table(config_comp, "profile_flat", profile_rows, report)
+    _text(config_comp, "README", "Only safe role/quality/render defaults are embedded. Private adapter, process, path, network and credential values are runtime-only; environment variables win at startup.", report)
 
     ai = _ensure(flexgpu, "baseCOMP", "AI_PIPELINE", report)
     _style(ai, -1120, 160, colors["ai"], "AI owner: standalone/ai, or world+single topology", 230, 110)
@@ -2081,7 +3535,9 @@ def _build_shell(flexgpu, config, config_path, report):
         _set_par(execute, ("create", "oncreate"), True)
         _set_par(execute, ("framestart", "onframestart"), True)
         _set_par(execute, ("exit", "onexit"), True)
-        _set_par(execute, "active", True)
+        # build() enables this only after its environment-isolated defaults
+        # have replaced any previously stored private runtime state.
+        _set_par(execute, "active", False)
     else:
         _text(startup, "startup_callbacks_SOURCE", STARTUP_CALLBACKS, report)
     _table(startup, "environment_contract", [["variable", "values", "meaning"],
@@ -2116,10 +3572,11 @@ def _build_shell(flexgpu, config, config_path, report):
     _connect(bus_out, install, 0, 0, report)
     _connect(bus_out, vr, 0, 0, report)
 
-    _text(flexgpu, "README_FIRST", "FLEXGPU REALTIME POINT WORLD\nOpen WORKING_PIPELINE/OUT_INSTALLATION for the built-in point-world demo and OUT_STEREO_PREVIEW for desktop stereo.\nLater replace only WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER with your StreamDiffusionTD.tox outputs.\nWORKING_PIPELINE/ROLE_BRIDGE now packs RGB/depth into one atomic RGBA16F preview atlas for Shared Mem or Touch TCP split roles; unassigned stages are cook-gated. This direct image path is not the full WorldBus v1 metadata/control protocol.", report)
+    _text(flexgpu, "README_FIRST", "FLEXGPU REALTIME POINT WORLD\nOpen WORKING_PIPELINE/OUT_INSTALLATION for the built-in point-world demo and OUT_STEREO_PREVIEW for desktop stereo.\nLater replace only WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER with your StreamDiffusionTD.tox outputs.\nWORKING_PIPELINE/ROLE_BRIDGE now packs RGB/depth into one atomic RGBA32F preview atlas for Shared Mem or Touch TCP split roles; unassigned stages are cook-gated. This direct image path is not the full WorldBus v1 metadata/control protocol.", report)
     _table(flexgpu, "bootstrap_manifest", [["field", "value"],
         ["build_version", BUILD_VERSION], ["root", ROOT_PATH],
-        ["config_path", config_path or "<defaults>"],
+        ["config_path", ("<explicit runtime profile; path omitted>"
+                         if config_path else "<defaults>")],
         ["managed_scope", ROOT_PATH + " only"],
         ["role_bridge", ROOT_PATH + "/WORKING_PIPELINE/ROLE_BRIDGE"],
         ["unknown_nodes", "preserved"]], report)
@@ -2160,6 +3617,7 @@ def _build_working_pipeline(flexgpu, report):
             raise RuntimeError("runtime_pipeline.py could not be loaded: %s / %s" %
                                (import_error, exc))
     pipeline = module.build(flexgpu)
+    _configure_simulated_sensor_circle(pipeline, report)
     pipeline_report = getattr(module, "LAST_REPORT", None)
     if pipeline_report is not None:
         report.created.extend(getattr(pipeline_report, "created", ()))
@@ -2210,12 +3668,18 @@ def build(output_path, config_path=None, save=True):
     flexgpu = _child(project1, "flexgpu")
     if flexgpu is None:
         flexgpu = _ensure(project1, "baseCOMP", "flexgpu", report)
+    # An existing project's Execute DAT may be active while rebuilding. Disable
+    # it before creating/updating managed nodes so an onCreate callback cannot
+    # import the builder process's ambient FLEXGPU_CONFIG into persistent state.
+    existing_startup = _child(_child(flexgpu, "STARTUP"), "startup_callbacks")
+    _set_par(existing_startup, "active", False)
     try:
         _style(flexgpu, flexgpu.nodeX, flexgpu.nodeY, (0.22, 0.36, 0.33),
                "FlexGPU modular realtime 2D-to-3D show shell", 260, 150)
     except Exception:
         pass
     config = _load_config(config_path, report)
+    embedded_profile = _safe_build_profile(config)
     _build_shell(flexgpu, config, config_path, report)
     _build_working_pipeline(flexgpu, report)
 
@@ -2223,33 +3687,42 @@ def build(output_path, config_path=None, save=True):
     runtime_dat = _child(_child(flexgpu, "STARTUP"), "runtime_helpers")
     if runtime_dat is not None:
         try:
-            role_default = _lookup(config, "role", None)
+            role_default = _lookup(embedded_profile, "role", None)
             if role_default is None:
-                node_role = str(config.get("node_role", "")).lower()
+                node_role = str(embedded_profile.get("node_role", "")).lower()
                 role_default = {"ai":"ai", "render":"world"}.get(
                     node_role, DEFAULTS["role"])
             runtime_overrides = {
                 "role": role_default,
-                "topology": _lookup(config, "topology", DEFAULTS["topology"]),
-                "experience": _lookup(config, "experience", DEFAULTS["experience"]),
-                "completion": _lookup(config, "completion", DEFAULTS["completion"]),
-                "tier": _lookup(config, "tier", DEFAULTS["tier"]),
-                "config_path": config_path or "",
+                "topology": _lookup(
+                    embedded_profile, "topology", DEFAULTS["topology"]),
+                "experience": _lookup(
+                    embedded_profile, "experience", DEFAULTS["experience"]),
+                "completion": _lookup(
+                    embedded_profile, "completion", DEFAULTS["completion"]),
+                "tier": _lookup(
+                    embedded_profile, "tier", DEFAULTS["tier"]),
+                # The build path is deliberately not persisted. Runtime startup
+                # may load private configuration through FLEXGPU_CONFIG.
+                "config_path": "",
             }
             for section in ("adaptive", "telemetry", "source", "sensor",
                             "render", "transport"):
-                value = config.get(section)
+                value = embedded_profile.get(section)
                 if isinstance(value, dict):
                     runtime_overrides[section] = dict(value)
             for key in ("diffusion_resolution", "diffusion_fps",
                         "geometry_resolution", "geometry_fps",
                         "point_budget", "vr_fps"):
-                value = _lookup(config, key, None)
+                value = _lookup(embedded_profile, key, None)
                 if value not in (None, ""):
                     runtime_overrides[key] = value
-            runtime_dat.module.apply(flexgpu, runtime_overrides)
+            runtime_dat.module.apply(
+                flexgpu, runtime_overrides, inherit_environment=False)
         except Exception as exc:
             report.warn("Runtime defaults were not applied during build: %s" % exc)
+    startup_callbacks = _child(_child(flexgpu, "STARTUP"), "startup_callbacks")
+    _set_par(startup_callbacks, "active", True)
     if save:
         _save(output_path, report)
     try:

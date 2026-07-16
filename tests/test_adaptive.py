@@ -30,7 +30,7 @@ class AdaptiveQualityTests(unittest.TestCase):
         expected_points = {
             "3080ti_16gb": (60_000, 120_000),
             "4090": (100_000, 250_000),
-            "5090": (150_000, 400_000),
+            "5090": (150_000, 262_144),
         }
         for tier, point_bounds in expected_points.items():
             with self.subTest(tier=tier):

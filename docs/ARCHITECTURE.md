@@ -4,13 +4,12 @@ FlexGPU keeps the artistic network independent from the number and model of
 GPUs. Configuration decides where a role runs; every deployment preserves the
 same internal texture contracts. A synthetic source and sensor make
 the TouchDesigner builder pipeline testable before site-specific adapters
-arrive. The v1.2 source/configuration foundation is present in this repository,
-but the tracked `projects/FlexShow.toe` was not rebuilt or visually validated
-for this update.
+arrive. The v1.2.1 source/configuration foundation and rebuilt public synthetic
+`projects/FlexShow.toe` are present in this repository.
 
 ## Roles
 
-The table below is the production target defined by the v1.2 builder sources.
+The table below is the production target defined by the v1.2.1 builder sources.
 It does not include a real StreamDiffusion component, sensor SDK, projection
 mapping, controller input, or headset compositor.
 
@@ -33,15 +32,15 @@ camera / prompt
        |
        v
 demo OR private StreamDiffusionTD adapter
- RGB + depth + optional mask/confidence/frame state
+ RGB + raw depth + mask/confidence + optional strict frame state
                     |
- local TOP (all fields) OR atomic preview atlas (RGB/depth only)
+ local TOPs OR atomic RGBA32F image atlas (all four image planes)
                     |
  calibration ------>+------> depth-to-position GLSL
  intrinsics/depth/  |          + valid confidence
  camera transform  |
                     |
- simulated/adapter-replay/private sensor --> calibrated interaction field
+ simulated/adapter-replay/private sensor --> bounded world-space interaction
                     |
                     v
  temporal position/color/confidence/age feedback
@@ -56,8 +55,14 @@ demo OR private StreamDiffusionTD adapter
  installation texture     stereo development textures
 ```
 
-The world continues to simulate when an AI frame is late. New target geometry
-is cross-faded in; it is never awaited by the render callback. A material
+The world continues to simulate when an AI frame is late. Strict metadata turns
+each advancing producer frame into a one-cook pulse; held textures age/decay
+instead of being reabsorbed every render cook. For local source adapters, an
+operator cook token provides the fallback boundary, while `legacy_each_cook`
+preserves metadata-less adapters without claiming producer freshness. Split
+receivers use the stricter transport-specific behavior described below. New
+target geometry is cross-faded in; it
+is never awaited by the render callback. A material
 contract change—resolution, source session/calibration epoch, calibration
 values, depth convention, transform, or adapter identity—resets temporal
 history. Reapplying the same contract does not.
@@ -70,11 +75,12 @@ stock TouchDesigner 2025 operators for animated demo color/depth,
 calibrated depth-to-position, simulated audience forces, position/color plus
 confidence/age feedback, disocclusion fog, hole-only procedural backfill,
 hybrid selection, and output previews.
-Its role bridge packs RGB/depth into one RGBA16F atlas for Shared Mem or Touch
-TCP split-role previews; single topology bypasses that pack/unpack path.
-The point-render branch uses TouchDesigner's TOP-to-POP/Render Simple operators
-when available and retains an inspectable color fallback if an operator cannot
-be created.
+Its role bridge packs RGB plus raw depth/mask/confidence into one RGBA32F atlas
+for Shared Mem or Touch TCP split roles; single topology bypasses that
+pack/unpack path. The point-render branch preserves world metres through a
+Geometry/Camera/Render path and uses parallel eye cameras shifted by half-IPD.
+If those operators are unavailable it uses an honest non-normalizing mono
+fallback instead of fake toe-in stereo.
 
 Stable outputs are `OUT_POSITION`, `OUT_COLOR`, `OUT_INTERACTION`,
 `OUT_INSTALLATION`, `OUT_LEFT_EYE`, `OUT_RIGHT_EYE`, and
@@ -123,22 +129,38 @@ missing; hybrid blends procedural volume with fog in those holes. Fog can hide
 seams and backfill can invent plausible shape, but neither recovers ground
 truth.
 
+Sensor mask/confidence are applied once after rigid sensor-to-world calibration.
+Each generated point samples a bounded 8x8 set of sensor occupancy primitives
+in shared-world metres, and force in metres/second is integrated with a clamped
+render delta. This is a low-resolution occupancy/SDF approximation, not a full
+volume, skeleton tracker, controller collider, or general physics solver.
+
+The parallel-eye textures are headset-independent development views. They do
+not consume runtime head pose, asymmetric per-eye projection, predicted display
+time, hidden-area mesh, controller state, late-latching, or compositor textures.
+
 ## Deployment matrix
 
 | Topology | AI placement | Show placement | Transport |
 | --- | --- | --- | --- |
 | `single` | selected render GPU | same process/GPU | internal TOP/CHOP |
-| `dual_local` | selected AI GPU | selected render GPU | one atomic RGBA16F atlas over Global Shared Memory by default, or loopback Touch TCP fallback |
-| `dual_network`, `node_role=ai` | this computer | remote show computer | one atomic RGBA16F atlas over Touch Out TOP |
-| `dual_network`, `node_role=render` | remote AI computer | this computer | one atomic RGBA16F atlas over Touch In TOP |
+| `dual_local` | selected AI GPU | selected render GPU | one atomic RGBA32F atlas over loopback Touch TCP by default; Shared Mem is an explicit-metadata advanced path |
+| `dual_network`, `node_role=ai` | this computer | remote show computer | one atomic RGBA32F atlas over Touch Out TOP |
+| `dual_network`, `node_role=render` | remote AI computer | this computer | one atomic RGBA32F atlas over Touch In TOP |
 
 TouchDesigner GPU affinity is process-level.  The launcher therefore starts
 one process per assigned GPU using PCI bus IDs rather than assuming Windows GPU
 indices are stable.  CUDA selection uses the matching UUID/index before the AI
 runtime imports CUDA.
 
-The built-in atlas is a direct RGB/depth preview bridge, not WorldBus v1. It
-does not carry frame metadata, camera transforms, heartbeats or controls. See
+The built-in atlas is a direct image bridge, not WorldBus v1. Its right half
+stores raw depth, confidence, and mask in R/G/B without clamping calibrated
+values. Local adapters may publish strict frame state, but producer IDs/clocks,
+camera transforms, network heartbeats, and controls do not cross in the image
+atlas. Touch TCP uses Touch In's `num_received_frames` for transport-arrival
+preview pacing and a local timeout; this does not identify the producer
+generation. Shared Mem has no corresponding receive counter, so it fails closed
+without a producer-backed frame-state sidecar that resolves in both roles. See
 [`DUAL_GPU_RUNTIME.md`](DUAL_GPU_RUNTIME.md) for runtime details and
 [`WORLDBUS.md`](WORLDBUS.md) for the production full-contract boundary.
 
@@ -147,8 +169,10 @@ does not carry frame metadata, camera transforms, heartbeats or controls. See
 Commissioning data is separate from the show transport. The deterministic
 generator writes synchronized RGB, depth, mask, confidence, calibration, and
 per-frame state plus a SHA-256 manifest. Inspection validates safe relative
-paths, media shape/format, monotonic frame/session state, matching calibration
-identity, and hashes by default:
+paths, exact media layout and scalar samples, monotonic frame/session state,
+matching calibration ID plus canonical content digest, recomputed validity and
+confidence metrics, and hashes by default. Generation occurs in a private
+staging directory and is atomically published only after deep validation:
 
 ```powershell
 python tools/commission_flexshow.py demo --output commissioning/demo --frames 8
@@ -159,7 +183,11 @@ python tools/commission_flexshow.py calibration config/calibration.example.json
 The public example and generated bundle prove parser/adapter contracts only.
 A production profile must be measured for the actual camera, depth convention,
 intrinsics, depth range/scale, camera-to-world transform, and sensor-to-world
-transform. Physical camera/sensor alignment and projector/LED mapping were not
+transform. The two transforms must be rigid, orthonormal and right-handed;
+metric scale is represented in depth conversion. A canonical
+`calibration_digest` binds semantic calibration content independently of its
+filename and human-readable ID. Physical camera/sensor alignment and
+projector/LED mapping were not
 validated in this update. The builder does not automatically play a generated
 commissioning bundle; a source/sensor replay adapter must be wired before those
 fixtures can drive the world.
@@ -168,6 +196,10 @@ Real calibration, audience RGB/depth/mask/confidence, commissioning bundles,
 and recordings stay in ignored machine-local paths. Capture requires a
 site-appropriate consent, access, retention, and deletion policy. A publication
 guard is defense in depth, not a privacy or legal determination.
+It also blocks recognized machine-local calibration, frame-state,
+commissioning, hardware, runtime, telemetry, validation, support, and capture
+JSON/JSONL by content after a rename. The sole calibration exception is the
+exact synthetic public fixture at `config/calibration.example.json`.
 
 ## Placement and supervisor plane
 
@@ -198,9 +230,24 @@ Status is read-only and reports session/manifest/process ownership states.
 Recovery is a dry-run until `-Recover`, is limited to one through three attempts,
 and can act only on the separate AI role after world dependencies and preflight
 pass. It never implicitly restarts world/render; `-RestartRunning` is the
-explicit option for replacing a healthy AI process. This is bounded
-operator-authorized recovery, not an autonomous service, a TouchDesigner cook
-heartbeat, or the future WorldBus heartbeat policy.
+explicit option for replacing a healthy AI process.
+
+The launcher gives each child a session-bound heartbeat path in the ignored
+runtime directory. TouchDesigner atomically publishes role/PID, build/config
+identity, cook count/timing, source/sensor age, transport state, and active
+outputs. Read-only status classifies an identity-matched child as `alive`,
+`ready`, or `stale`; `supervisor` configuration or `-WaitReadyMs` can require a
+bounded ready state during Start/recovery. A readiness failure stops the newly
+launched child. This remains operator-authorized supervision, not an autonomous
+service, and application readiness is separate from WorldBus network heartbeat.
+Required readiness applies to a v1.2.1 project. The tracked synthetic canonical
+`.toe` publishes this heartbeat; older or privately modified projects must be
+rebuilt before readiness is required.
+
+Config cannot override launcher-owned `CUDA_*`/`FLEXGPU_*` values. Secret-like
+environment and command values are redacted from public plans, diagnostics,
+manifests, and errors, though credentials must still remain outside Git and
+private `.tox`/paid components remain outside the repository.
 
 ## Quality policy
 
@@ -214,11 +261,13 @@ both processes.
 | --- | --- | --- | --- |
 | `3080ti_16gb` | 384-512 diffusion budget, 5-10 Hz target state | 256-384 geometry, 60k-120k points | installation, desktop-stereo (`vr`), combined-lite |
 | `4090` | 384-512 diffusion budget, 8-15 Hz target state | 256-512 geometry, 100k-250k points | installation, desktop-stereo (`vr`), combined |
-| `5090` | 384-512 diffusion budget, 10-20 Hz target state | 256-512 geometry, 150k-400k points | installation, desktop-stereo (`vr`), combined |
+| `5090` | 384-512 diffusion budget, 10-20 Hz target state | 256-512 geometry, up to 262,144 points by default | installation, desktop-stereo (`vr`), combined |
 
 Budgets are conservative starting points, not benchmark promises.  The
 operator should lower AI resolution/rate before lowering installation or VR
-render cadence.
+render cadence. The 5090 default matches the physical sample count of a
+512-square position texture; a larger point budget requires an explicit larger
+geometry resolution.
 
 ## Adaptive quality and telemetry
 
@@ -260,10 +309,14 @@ policy without pretending a synthetic run measures a particular GPU.
 
 ## Failure behavior
 
-The built-in direct role bridge keeps RGB/depth atomic and never enables the
-local generator in a split world process. It does not implement frame IDs,
-heartbeats, newest-frame rejection, or an explicit stale/drop/hold policy; a
-transport interruption therefore remains visible as receiver state rather than
+The built-in direct role bridge keeps RGB/raw-depth/mask/confidence atomic and
+never enables the local generator in a split world process. Local strict frame
+state rejects regressions and produces one-cook pulses. Because producer
+metadata is not serialized into the atlas, Touch TCP's
+`num_received_frames` counter provides transport-arrival preview semantics only;
+it is not producer-exact newest-frame rejection. Shared Mem without explicit
+producer metadata fails closed rather than treating receiver cooks as new
+frames. A transport interruption remains visible as receiver state rather than
 silently moving AI work onto the render GPU.
 
 The full WorldBus v1 Python reference provides the richer behavior:
@@ -277,8 +330,8 @@ The full WorldBus v1 Python reference provides the richer behavior:
 
 That reference uses bounded TCP frames, UDP JSON metadata/control/heartbeats,
 and `.wbr` replay. Adapting its full contract into TouchDesigner remains a
-production integration step; the already implemented Shared Mem/Touch bridge
-is intentionally the smaller direct preview path. See
+production integration step; the already implemented Touch bridge and advanced
+sidecar-backed Shared Mem path are intentionally smaller direct-preview paths. See
 [WORLDBUS_REFERENCE.md](WORLDBUS_REFERENCE.md).
 
 ## Deliberate boundaries
@@ -292,10 +345,19 @@ frame-by-frame live reconstructors in the 3080 preset. They can be evaluated
 later as asynchronous external workers without changing the point-world or
 WorldBus contracts.
 
-The v1.2 builder/configuration foundation has not been rebuilt into the tracked
-canonical `.toe` for this update. No result here demonstrates a private
-StreamDiffusionTD model running at its configured cadence, physically measured
-sensor calibration, audience tracking, projector/LED mapping, headset pose or
-controller input, compositor submission, stereo comfort, or sustained
+The rebuilt v1.2.1 canonical synthetic project passed strict combined-mode
+operator, shader, resolution, signal, and capture checks in TouchDesigner
+2025.32820 on an RTX 3080 Ti Laptop 16 GB GPU. No result here demonstrates a
+private StreamDiffusionTD model running at its configured cadence, physically
+measured sensor calibration, audience tracking, projector/LED mapping, headset
+pose or controller input, compositor submission, stereo comfort, or sustained
 single-/dual-GPU show performance. Each remains an explicit commissioning and
 acceptance test on the target hardware and venue.
+
+After rebuilding an ignored `projects/FlexShow-local.toe` inside TouchDesigner,
+`touchdesigner/validate_project.py` can force-cook managed shaders and active
+outputs, enforce exact dimensions/types, inspect errors and signal health,
+check metric-render regressions, and verify optional synthetic captures. Its
+report, captures, and local `.toe` stay ignored and are blocked from public
+sync. This source/operator validation is not a substitute for visual, physical,
+thermal, latency, headset, or venue acceptance.

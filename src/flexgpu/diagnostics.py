@@ -73,8 +73,13 @@ def _runtime_adapter_diagnostics(
     config: FlexConfig, checks: list[Diagnostic]
 ) -> None:
     source_calibration_id: str | None = None
+    source_calibration_digest: str | None = None
     sensor_calibration_id: str | None = None
+    sensor_calibration_digest: str | None = None
     replay_calibration_id: str | None = None
+    replay_calibration_digest: str | None = None
+    sensor_replay_calibration_id: str | None = None
+    sensor_replay_calibration_digest: str | None = None
     source = config.raw.get("source")
     if isinstance(source, dict):
         mode = str(source.get("mode", "demo"))
@@ -97,6 +102,7 @@ def _runtime_adapter_diagnostics(
                     )
                 else:
                     replay_calibration_id = str(summary["calibration_id"])
+                    replay_calibration_digest = str(summary["calibration_digest"])
                     checks.append(
                         Diagnostic(
                             "pass",
@@ -136,6 +142,7 @@ def _runtime_adapter_diagnostics(
                 )
             else:
                 source_calibration_id = profile.calibration_id
+                source_calibration_digest = profile.calibration_digest
                 checks.append(
                     Diagnostic(
                         "pass",
@@ -143,6 +150,7 @@ def _runtime_adapter_diagnostics(
                         "Source calibration is valid",
                         {
                             "calibration_id": profile.calibration_id,
+                            "calibration_digest": profile.calibration_digest,
                             "width": profile.width,
                             "height": profile.height,
                             "depth_encoding": profile.depth_encoding,
@@ -156,7 +164,31 @@ def _runtime_adapter_diagnostics(
         if mode == "depth_sensor" and sensor.get("auto_load_tox"):
             _adapter_file_check(checks, config, "sensor", "adapter_tox", suffix=".tox")
         if mode == "replay":
-            _adapter_file_check(checks, config, "sensor", "replay_path")
+            replay = _adapter_file_check(checks, config, "sensor", "replay_path")
+            if replay and os.path.isfile(replay):
+                try:
+                    summary = validate_bundle(replay)
+                except CommissioningError as exc:
+                    checks.append(
+                        Diagnostic(
+                            "fail",
+                            "sensor.replay.contract",
+                            "Sensor replay bundle is invalid: %s" % exc,
+                        )
+                    )
+                else:
+                    sensor_replay_calibration_id = str(summary["calibration_id"])
+                    sensor_replay_calibration_digest = str(
+                        summary["calibration_digest"]
+                    )
+                    checks.append(
+                        Diagnostic(
+                            "pass",
+                            "sensor.replay.contract",
+                            "Sensor replay bundle passed synchronized contract validation",
+                            summary,
+                        )
+                    )
             checks.append(
                 Diagnostic(
                     "warn",
@@ -180,19 +212,26 @@ def _runtime_adapter_diagnostics(
                 )
             else:
                 sensor_calibration_id = profile.calibration_id
+                sensor_calibration_digest = profile.calibration_digest
                 checks.append(
                     Diagnostic(
                         "pass",
                         "sensor.calibration.contract",
                         "Sensor calibration is valid",
-                        {"calibration_id": profile.calibration_id},
+                        {
+                            "calibration_id": profile.calibration_id,
+                            "calibration_digest": profile.calibration_digest,
+                        },
                     )
                 )
 
     if (
         source_calibration_id
         and replay_calibration_id
-        and source_calibration_id != replay_calibration_id
+        and (
+            source_calibration_id != replay_calibration_id
+            or source_calibration_digest != replay_calibration_digest
+        )
     ):
         checks.append(
             Diagnostic(
@@ -201,23 +240,62 @@ def _runtime_adapter_diagnostics(
                 "Configured source calibration does not match the replay bundle",
                 {
                     "source_calibration_id": source_calibration_id,
+                    "source_calibration_digest": source_calibration_digest,
                     "replay_calibration_id": replay_calibration_id,
+                    "replay_calibration_digest": replay_calibration_digest,
                 },
             )
         )
     if (
-        source_calibration_id
-        and sensor_calibration_id
-        and source_calibration_id != sensor_calibration_id
+        sensor_calibration_id
+        and sensor_replay_calibration_id
+        and (
+            sensor_calibration_id != sensor_replay_calibration_id
+            or sensor_calibration_digest != sensor_replay_calibration_digest
+        )
     ):
         checks.append(
             Diagnostic(
                 "fail",
-                "calibration.shared_world",
-                "Source and sensor calibration IDs do not describe the same shared-world epoch",
+                "sensor.calibration.consistency",
+                "Configured sensor calibration does not match the replay bundle",
                 {
-                    "source_calibration_id": source_calibration_id,
                     "sensor_calibration_id": sensor_calibration_id,
+                    "sensor_calibration_digest": sensor_calibration_digest,
+                    "replay_calibration_id": sensor_replay_calibration_id,
+                    "replay_calibration_digest": sensor_replay_calibration_digest,
+                },
+            )
+        )
+
+    identities = {
+        name: (calibration_id, digest)
+        for name, calibration_id, digest in (
+            ("source", source_calibration_id, source_calibration_digest),
+            ("source_replay", replay_calibration_id, replay_calibration_digest),
+            ("sensor", sensor_calibration_id, sensor_calibration_digest),
+            (
+                "sensor_replay",
+                sensor_replay_calibration_id,
+                sensor_replay_calibration_digest,
+            ),
+        )
+        if calibration_id and digest
+    }
+    if len(set(identities.values())) > 1:
+        checks.append(
+            Diagnostic(
+                "fail",
+                "calibration.shared_world",
+                "Configured adapters do not share the same calibration ID and content digest",
+                {
+                    "identities": {
+                        name: {
+                            "calibration_id": identity[0],
+                            "calibration_digest": identity[1],
+                        }
+                        for name, identity in identities.items()
+                    }
                 },
             )
         )

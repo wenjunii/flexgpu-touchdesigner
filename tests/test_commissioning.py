@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
+import struct
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+
+import flexgpu.commissioning as commissioning  # noqa: E402
 
 from flexgpu.commissioning import (  # noqa: E402
     FRAME_STATE_VERSION,
@@ -41,6 +46,25 @@ class CommissioningContractTests(unittest.TestCase):
         self.assertEqual(restored.depth_encoding, "normalized")
         self.assertGreater(restored.fx, 0)
         self.assertEqual(restored.camera_to_world[12:], (0.0, 0.0, 0.0, 1.0))
+        self.assertRegex(restored.calibration_digest, r"^[0-9a-f]{64}$")
+
+    def test_calibration_digest_is_canonical_and_detects_content_change(self) -> None:
+        profile = demo_calibration(64, 36)
+        mapping = profile.to_dict()
+        reordered = {key: mapping[key] for key in reversed(tuple(mapping))}
+        self.assertEqual(
+            CalibrationProfile.from_mapping(reordered).calibration_digest,
+            profile.calibration_digest,
+        )
+
+        changed = json.loads(json.dumps(mapping))
+        changed["camera_to_world"][3] = 0.125
+        with self.assertRaisesRegex(CommissioningError, "calibration_digest"):
+            CalibrationProfile.from_mapping(changed)
+        changed.pop("calibration_digest")
+        alternate = CalibrationProfile.from_mapping(changed)
+        self.assertEqual(alternate.calibration_id, profile.calibration_id)
+        self.assertNotEqual(alternate.calibration_digest, profile.calibration_digest)
 
     def test_calibration_rejects_unknown_nonfinite_and_nonhomogeneous_values(self) -> None:
         base = demo_calibration(64, 36).to_dict()
@@ -61,6 +85,16 @@ class CommissioningContractTests(unittest.TestCase):
         singular = json.loads(json.dumps(base))
         singular["sensor_to_world"][:12] = [0.0] * 12
         cases.append(singular)
+
+        scaled = json.loads(json.dumps(base))
+        scaled.pop("calibration_digest")
+        scaled["camera_to_world"][0] = 1.01
+        cases.append(scaled)
+
+        sheared = json.loads(json.dumps(base))
+        sheared.pop("calibration_digest")
+        sheared["sensor_to_world"][1] = 0.01
+        cases.append(sheared)
 
         overflow = json.loads(json.dumps(base))
         overflow["intrinsics"]["fx"] = 10**4000
@@ -101,6 +135,7 @@ class CommissioningContractTests(unittest.TestCase):
             width=64,
             height=36,
             calibration_id="demo-camera-v1",
+            calibration_digest=demo_calibration(64, 36).calibration_digest,
             valid_fraction=0.75,
             confidence_mean=0.8,
         )
@@ -118,6 +153,7 @@ class CommissioningContractTests(unittest.TestCase):
             "width": 1,
             "height": 1,
             "calibration_id": "demo",
+            "calibration_digest": "a" * 64,
             "valid_fraction": 1.2,
             "confidence_mean": 0.5,
         }
@@ -125,7 +161,12 @@ class CommissioningContractTests(unittest.TestCase):
             AdapterFrameState.from_mapping(mapping)
 
     def test_frame_sequence_accepts_session_restart_but_rejects_rollback(self) -> None:
-        def state(session: str, frame: int, timestamp: int) -> AdapterFrameState:
+        def state(
+            session: str,
+            frame: int,
+            timestamp: int,
+            digest: str = "a" * 64,
+        ) -> AdapterFrameState:
             return AdapterFrameState(
                 session_id=session,
                 frame_id=frame,
@@ -133,6 +174,7 @@ class CommissioningContractTests(unittest.TestCase):
                 width=8,
                 height=8,
                 calibration_id="demo",
+                calibration_digest=digest,
                 valid_fraction=1.0,
                 confidence_mean=1.0,
             )
@@ -140,9 +182,21 @@ class CommissioningContractTests(unittest.TestCase):
         summary = validate_frame_sequence(
             (state("first", 8, 100), state("first", 9, 200), state("second", 0, 300))
         )
-        self.assertEqual(summary, {"frames": 3, "sessions": 2, "calibration_id": "demo"})
+        self.assertEqual(
+            summary,
+            {
+                "frames": 3,
+                "sessions": 2,
+                "calibration_id": "demo",
+                "calibration_digest": "a" * 64,
+            },
+        )
         with self.assertRaises(CommissioningError):
             validate_frame_sequence((state("first", 8, 100), state("first", 7, 200)))
+        with self.assertRaisesRegex(CommissioningError, "calibration changed"):
+            validate_frame_sequence(
+                (state("first", 8, 100), state("first", 9, 200, "b" * 64))
+            )
 
     def test_generated_bundle_is_synchronized_and_hash_verified(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -159,8 +213,88 @@ class CommissioningContractTests(unittest.TestCase):
             manifest = load_strict_json(output / "manifest.json")
             first = manifest["frames"][0]
             self.assertEqual(first["state"]["frame_id"], 0)
+            self.assertEqual(
+                first["state"]["calibration_digest"],
+                manifest["calibration"]["calibration_digest"],
+            )
             self.assertEqual(set(first).intersection({"rgb", "depth", "mask", "confidence"}),
                              {"rgb", "depth", "mask", "confidence"})
+
+    def test_bundle_recomputes_coverage_and_confidence_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "demo"
+            generate_demo_bundle(output, frames=1, width=8, height=8)
+            manifest_path = output / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["frames"][0]["state"]["valid_fraction"] = 0.123
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(CommissioningError, "valid_fraction"):
+                validate_bundle(manifest_path, verify_hashes=False)
+
+            # Reload a clean bundle for an independent confidence mismatch.
+            replacement = Path(directory) / "confidence"
+            generate_demo_bundle(replacement, frames=1, width=8, height=8)
+            replacement_manifest = replacement / "manifest.json"
+            payload = json.loads(replacement_manifest.read_text(encoding="utf-8"))
+            payload["frames"][0]["state"]["confidence_mean"] = 0.999
+            replacement_manifest.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(CommissioningError, "confidence_mean"):
+                validate_bundle(replacement_manifest, verify_hashes=False)
+
+    def test_bundle_rejects_calibration_digest_mismatch_at_each_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            reference = Path(directory) / "reference"
+            generate_demo_bundle(reference, frames=1, width=8, height=8)
+            manifest_path = reference / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["calibration"]["calibration_digest"] = "b" * 64
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(CommissioningError, "calibration_digest"):
+                validate_bundle(manifest_path, verify_hashes=False)
+
+            frame = Path(directory) / "frame"
+            generate_demo_bundle(frame, frames=1, width=8, height=8)
+            frame_manifest_path = frame / "manifest.json"
+            payload = json.loads(frame_manifest_path.read_text(encoding="utf-8"))
+            payload["frames"][0]["state"]["calibration_digest"] = "b" * 64
+            frame_manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(CommissioningError, "calibration_digest"):
+                validate_bundle(frame_manifest_path, verify_hashes=False)
+
+    def test_bundle_rejects_nonfinite_raw_depth(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "demo"
+            generate_demo_bundle(output, frames=1, width=2, height=2)
+            manifest_path = output / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            depth = manifest["frames"][0]["depth"]
+            depth_path = output / depth["path"]
+            raw = struct.pack("<ffff", 0.5, float("nan"), 0.5, 0.5)
+            depth_path.write_bytes(raw)
+            depth["format"] = "raw-r32f-le"
+            depth["sha256"] = hashlib.sha256(raw).hexdigest()
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(CommissioningError, "non-finite raw"):
+                validate_bundle(manifest_path)
+
+    def test_demo_generation_is_transactional_on_write_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "demo"
+            original = commissioning._atomic_write
+            calls = 0
+
+            def fail_after_first(path: Path, payload: bytes) -> None:
+                nonlocal calls
+                calls += 1
+                if calls == 3:
+                    raise OSError("synthetic write failure")
+                original(path, payload)
+
+            with mock.patch.object(commissioning, "_atomic_write", fail_after_first):
+                with self.assertRaises(CommissioningError):
+                    generate_demo_bundle(output, frames=2, width=8, height=8)
+            self.assertFalse(output.exists())
+            self.assertEqual(list(Path(directory).glob(".demo.commissioning-*")), [])
 
     def test_bundle_detects_tampering_and_missing_payload(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -143,7 +143,7 @@ function Invoke-FlexShowCli {
         [ValidateSet('', 'fog', 'procedural', 'hybrid')]
         [string]$Completion = '',
 
-        [ValidateSet('', 'auto', '3080ti_16gb', '4090', '5090')]
+        [ValidateSet('', 'auto', '3080ti_16gb', '4090', '5090', 'custom')]
         [string]$Tier = '',
 
         [AllowEmptyString()]
@@ -151,6 +151,9 @@ function Invoke-FlexShowCli {
 
         [ValidateRange(1, 3)]
         [int]$RecoveryAttempts = 1,
+
+        [ValidateRange(0, 600000)]
+        [Nullable[int]]$WaitReadyMs = $null,
 
         [switch]$RestartRunning,
 
@@ -202,6 +205,10 @@ function Invoke-FlexShowCli {
         if ($RestartRunning) {
             $arguments.Add('--restart-running')
         }
+    }
+    if ($null -ne $WaitReadyMs -and $Command -in @('start', 'recover')) {
+        $arguments.Add('--wait-ready-ms')
+        $arguments.Add([string]$WaitReadyMs.Value)
     }
 
     switch ($ActionMode) {

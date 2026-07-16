@@ -52,7 +52,10 @@ TIER_PRESETS: dict[str, TierPreset] = {
             "diffusion_hz": 20,
             "geometry_resolution": 512,
             "geometry_hz": 15,
-            "max_points": 400_000,
+            # A 512-square position texture contains at most 262,144 samples.
+            # Keep the advertised point budget physically reachable; profiles
+            # that intentionally raise geometry resolution may override it.
+            "max_points": 262_144,
             "vr_refresh_hz": 90,
         },
     ),

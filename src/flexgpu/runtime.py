@@ -14,17 +14,66 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Sequence
 
-from .models import FlexConfig, ProcessPlan, ProcessSpec, RuntimeControlError
+from .models import (
+    FlexConfig,
+    ProcessPlan,
+    ProcessSpec,
+    RuntimeControlError,
+    redact_command,
+    redact_text,
+    sensitive_environment_values,
+)
 
 
 MANIFEST_NAME = "flexgpu-manifest.json"
 LOCK_NAME = "flexgpu-runtime.lock"
-MANIFEST_VERSION = 3
+MANIFEST_VERSION = 6
+# Version 3 is the only released legacy manifest format. It may be inspected
+# read-only and may be removed by the explicit identity-verified stop path, but
+# it is never upgraded in place or reused to launch/recover processes.
+LEGACY_READ_ONLY_MANIFEST_VERSIONS = frozenset({3})
+SUPPORTED_MANIFEST_VERSIONS = frozenset(
+    {MANIFEST_VERSION, *LEGACY_READ_ONLY_MANIFEST_VERSIONS}
+)
+HEARTBEAT_VERSION = 1
+TOUCHDESIGNER_BUILD_VERSION = "1.2.1"
+DEFAULT_HEARTBEAT_TIMEOUT_MS = 5000
 MAX_RECOVERY_ATTEMPTS = 3
 GRACEFUL_STOP_SECONDS = 8.0
 FORCED_STOP_SECONDS = 4.0
 _UNWRITTEN_LOCK_GRACE_SECONDS = 30.0
 _LOCAL_CHILDREN: dict[int, subprocess.Popen[Any]] = {}
+_RUNTIME_ENV_KEYS = {
+    "CUDA_DEVICE_ORDER",
+    "CUDA_VISIBLE_DEVICES",
+    "FLEXGPU_CONFIG",
+    "FLEXGPU_ROLE",
+    "FLEXGPU_TOPOLOGY",
+    "FLEXGPU_EXPERIENCE",
+    "FLEXGPU_COMPLETION",
+    "FLEXGPU_TIER",
+    "FLEXGPU_GPU_INDEX",
+    "FLEXGPU_GPU_UUID",
+    "FLEXGPU_GPU_BUS_ID",
+    "FLEXGPU_TD_BUS_ID",
+    "FLEXGPU_DIFFUSION_RESOLUTION",
+    "FLEXGPU_DIFFUSION_HZ",
+    "FLEXGPU_GEOMETRY_RESOLUTION",
+    "FLEXGPU_GEOMETRY_HZ",
+    "FLEXGPU_MAX_POINTS",
+    "FLEXGPU_VR_REFRESH_HZ",
+}
+_EPHEMERAL_RUNTIME_ENV_KEYS = {
+    "FLEXGPU_SESSION_ID",
+    "FLEXGPU_HEARTBEAT_PATH",
+    "FLEXGPU_HEARTBEAT_TIMEOUT_MS",
+    "FLEXGPU_EXPECTED_BUILD_VERSION",
+    "FLEXGPU_CONFIG_ID",
+}
+
+
+def _process_sensitive_values(process: ProcessSpec) -> tuple[str, ...]:
+    return sensitive_environment_values(process.env) + sensitive_environment_values(os.environ)
 
 
 def _environment_fingerprint(environment: Mapping[str, str]) -> str:
@@ -36,6 +85,97 @@ def _environment_fingerprint(environment: Mapping[str, str]) -> str:
         separators=(",", ":"),
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _effective_launch_environment(process: ProcessSpec) -> dict[str, str]:
+    """Return inherited plus planned env, excluding per-session launcher values."""
+
+    environment = {str(key): str(value) for key, value in os.environ.items()}
+    environment.update({str(key): str(value) for key, value in process.env.items()})
+    for key in _EPHEMERAL_RUNTIME_ENV_KEYS:
+        environment.pop(key, None)
+    return environment
+
+
+def _effective_environment_fingerprint(process: ProcessSpec) -> str:
+    """Fingerprint the environment the child would really inherit."""
+
+    return _environment_fingerprint(_effective_launch_environment(process))
+
+
+def _config_identity(config: FlexConfig) -> str:
+    """Hash the validated semantic config without persisting its contents."""
+
+    payload = json.dumps(
+        config.raw,
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _valid_config_identity(value: object) -> bool:
+    return bool(
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _assert_manifest_config_identity_for_reuse(
+    manifest: Mapping[str, Any], config: FlexConfig
+) -> None:
+    """Fail closed unless an active manifest proves the same semantic config."""
+
+    recorded = manifest.get("config_sha256")
+    if not _valid_config_identity(recorded):
+        raise RuntimeControlError(
+            "active runtime manifest has no valid semantic config identity; "
+            "stop it before upgrading or reusing its processes"
+        )
+    if recorded != _config_identity(config):
+        raise RuntimeControlError(
+            "active runtime manifest semantic config differs from the current config; "
+            "stop it before applying config changes"
+        )
+
+
+def _command_fingerprint(command: Sequence[str]) -> str:
+    payload = json.dumps([str(item) for item in command], ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _path_fingerprint(path: str) -> str:
+    return hashlib.sha256(os.path.normcase(os.path.abspath(path)).encode("utf-8")).hexdigest()
+
+
+def _supervisor_settings(config: FlexConfig) -> tuple[int, int, bool]:
+    settings = config.supervisor if isinstance(config.supervisor, Mapping) else {}
+    heartbeat_timeout = settings.get("heartbeat_timeout_ms", DEFAULT_HEARTBEAT_TIMEOUT_MS)
+    readiness_timeout = settings.get("readiness_timeout_ms", 0)
+    require_ready = settings.get("require_ready", False)
+    if type(heartbeat_timeout) is not int or not 250 <= heartbeat_timeout <= 600000:
+        heartbeat_timeout = DEFAULT_HEARTBEAT_TIMEOUT_MS
+    if type(readiness_timeout) is not int or not 0 <= readiness_timeout <= 600000:
+        readiness_timeout = 0
+    if not isinstance(require_ready, bool):
+        require_ready = False
+    if require_ready and readiness_timeout == 0:
+        readiness_timeout = heartbeat_timeout
+    return heartbeat_timeout, readiness_timeout, require_ready
+
+
+def _readiness_wait_ms(config: FlexConfig, override: int | None) -> int:
+    _heartbeat_timeout, configured, required = _supervisor_settings(config)
+    if override is None:
+        return configured
+    if isinstance(override, bool) or not isinstance(override, int) or not 0 <= override <= 600000:
+        raise RuntimeControlError("readiness wait must be between 0 and 600000 milliseconds")
+    if required and override == 0:
+        raise RuntimeControlError("readiness wait cannot be zero when supervisor.require_ready is true")
+    return override
 
 
 def _windows_kernel32():
@@ -282,11 +422,93 @@ def _inspect_process(pid: int) -> dict[str, str] | None:
     }
 
 
+def _is_network_runtime_path(path: str) -> bool:
+    """Return true for UNC paths and Windows drives mapped to remote storage."""
+
+    normalized = os.path.normpath(str(path)).replace("/", "\\")
+    if normalized.startswith("\\\\"):
+        return True
+    if os.name != "nt":
+        return False
+    absolute = os.path.abspath(path)
+    drive = os.path.splitdrive(absolute)[0]
+    if not drive:
+        return False
+    root = drive if drive.endswith(("\\", "/")) else drive + "\\"
+    try:
+        get_drive_type = ctypes.windll.kernel32.GetDriveTypeW
+        get_drive_type.argtypes = [ctypes.c_wchar_p]
+        get_drive_type.restype = ctypes.c_uint
+        return int(get_drive_type(root)) == 4  # DRIVE_REMOTE
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
 def runtime_directory(config: FlexConfig) -> str:
     path = os.path.expandvars(os.path.expanduser(config.runtime_dir))
+    if _is_network_runtime_path(path):
+        raise RuntimeControlError(
+            "runtime_dir must use local storage; network and UNC paths are unsafe"
+        )
     if not os.path.isabs(path):
         path = os.path.join(config.base_dir, path)
-    return os.path.abspath(path)
+    path = os.path.abspath(path)
+    if _is_network_runtime_path(path):
+        raise RuntimeControlError(
+            "runtime_dir must use local storage; network and UNC paths are unsafe"
+        )
+    drive, tail = os.path.splitdrive(path)
+    if path == os.path.abspath(os.path.sep) or (drive and tail in {"\\", "/"}):
+        raise RuntimeControlError("runtime_dir must not be a filesystem root")
+    if os.path.lexists(path):
+        if _is_link_or_reparse(path):
+            raise RuntimeControlError("runtime_dir must not be a symlink or reparse point")
+        if not os.path.isdir(path):
+            raise RuntimeControlError("runtime_dir exists but is not a directory")
+        if not os.access(path, os.R_OK | os.W_OK | os.X_OK):
+            raise RuntimeControlError("runtime_dir is not accessible to the current user")
+    return path
+
+
+def _is_link_or_reparse(path: str) -> bool:
+    if os.path.islink(path):
+        return True
+    try:
+        attributes = getattr(os.stat(path, follow_symlinks=False), "st_file_attributes", 0)
+    except OSError:
+        return False
+    return bool(attributes & getattr(os, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+
+
+def _ensure_runtime_directory(config: FlexConfig) -> str:
+    path = runtime_directory(config)
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    # Recheck after creation to catch a concurrently substituted junction.
+    if _is_link_or_reparse(path) or not os.path.isdir(path):
+        raise RuntimeControlError("runtime_dir changed during creation")
+    if os.name != "nt":
+        try:
+            os.chmod(path, 0o700)
+        except OSError as exc:
+            raise RuntimeControlError("unable to secure runtime_dir: %s" % exc) from exc
+    return path
+
+
+def _assert_safe_runtime_file(path: str, runtime_dir: str) -> None:
+    if os.path.normcase(os.path.dirname(os.path.abspath(path))) != os.path.normcase(
+        os.path.abspath(runtime_dir)
+    ):
+        raise RuntimeControlError("runtime file escapes runtime_dir")
+    if os.path.lexists(path) and _is_link_or_reparse(path):
+        raise RuntimeControlError("runtime file must not be a symlink or reparse point")
+
+
+def _open_runtime_text(path: str, mode: str, runtime_dir: str):
+    _assert_safe_runtime_file(path, runtime_dir)
+    flags = os.O_RDONLY if mode == "r" else os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    return os.fdopen(descriptor, mode, encoding="utf-8", buffering=1)
 
 
 def manifest_path(config: FlexConfig) -> str:
@@ -303,7 +525,7 @@ def _utc_now() -> str:
 
 def _read_lock_record(path: str) -> dict[str, Any] | None:
     try:
-        with open(path, "r", encoding="utf-8") as handle:
+        with _open_runtime_text(path, "r", os.path.dirname(path)) as handle:
             value = json.load(handle)
     except FileNotFoundError:
         return None
@@ -340,6 +562,7 @@ class _RuntimeMutationLock:
     """
 
     def __init__(self, config: FlexConfig) -> None:
+        self.config = config
         self.path = lock_path(config)
         self.nonce = uuid.uuid4().hex
         self.acquired = False
@@ -358,7 +581,8 @@ class _RuntimeMutationLock:
         return age >= _UNWRITTEN_LOCK_GRACE_SECONDS
 
     def __enter__(self) -> "_RuntimeMutationLock":
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        _ensure_runtime_directory(self.config)
+        _assert_safe_runtime_file(self.path, os.path.dirname(self.path))
         for _attempt in range(3):
             try:
                 descriptor = os.open(
@@ -442,12 +666,37 @@ def _read_manifest(path: str) -> dict[str, Any] | None:
     if not os.path.isfile(path):
         return None
     try:
-        with open(path, "r", encoding="utf-8") as handle:
+        with _open_runtime_text(path, "r", os.path.dirname(path)) as handle:
             data = json.load(handle)
     except (OSError, ValueError) as exc:
         raise RuntimeControlError("unable to read runtime manifest %s: %s" % (path, exc)) from exc
-    if not isinstance(data, dict) or not isinstance(data.get("processes", []), list):
+    if not isinstance(data, dict) or not isinstance(data.get("processes"), list):
         raise RuntimeControlError("runtime manifest is malformed: %s" % path)
+    version = data.get("version")
+    if type(version) is not int:
+        raise RuntimeControlError(
+            "runtime manifest version is missing or not an integer: %s" % path
+        )
+    if version > MANIFEST_VERSION:
+        raise RuntimeControlError(
+            "runtime manifest version %d is newer than supported version %d: %s"
+            % (version, MANIFEST_VERSION, path)
+        )
+    if version not in SUPPORTED_MANIFEST_VERSIONS:
+        raise RuntimeControlError(
+            "runtime manifest version %d is unsupported; supported versions are %s: %s"
+            % (
+                version,
+                ", ".join(str(item) for item in sorted(SUPPORTED_MANIFEST_VERSIONS)),
+                path,
+            )
+        )
+    if "config_sha256" in data and not _valid_config_identity(
+        data.get("config_sha256")
+    ):
+        raise RuntimeControlError(
+            "runtime manifest has an invalid semantic config identity: %s" % path
+        )
     seen_roles: set[str] = set()
     seen_pids: set[int] = set()
     for index, item in enumerate(data.get("processes", [])):
@@ -502,11 +751,20 @@ def _compare_recorded_identity(
     required = ("creation_token", "executable", "command_line_sha256")
     if any(not isinstance(recorded.get(key), str) or not recorded.get(key) for key in required):
         return "refuse", "manifest process identity is incomplete"
+    recorded_executable = recorded["executable"]
+    if (
+        len(recorded_executable) > 32768
+        or any(ord(character) < 32 or ord(character) == 127 for character in recorded_executable)
+    ):
+        return "refuse", "manifest process executable path is invalid"
     if recorded["creation_token"] != current["creation_token"]:
         return "refuse", "PID creation time no longer matches"
-    if os.path.normcase(os.path.realpath(recorded["executable"])) != os.path.normcase(
-        os.path.realpath(current["executable"])
-    ):
+    try:
+        recorded_path = os.path.normcase(os.path.realpath(recorded_executable))
+        current_path = os.path.normcase(os.path.realpath(current["executable"]))
+    except (OSError, TypeError, ValueError):
+        return "refuse", "manifest process executable path is invalid"
+    if recorded_path != current_path:
         return "refuse", "process executable no longer matches"
     if recorded["command_line_sha256"] != current["command_line_sha256"]:
         return "refuse", "process command line no longer matches"
@@ -515,13 +773,17 @@ def _compare_recorded_identity(
 
 def _atomic_manifest_write(path: str, data: Mapping[str, Any]) -> None:
     directory = os.path.dirname(path)
-    os.makedirs(directory, exist_ok=True)
+    if not os.path.isdir(directory) or _is_link_or_reparse(directory):
+        raise RuntimeControlError("runtime directory is missing or unsafe")
+    _assert_safe_runtime_file(path, directory)
     temporary = ""
     try:
         with tempfile.NamedTemporaryFile(
             "w", encoding="utf-8", dir=directory, delete=False, suffix=".tmp"
         ) as handle:
             temporary = handle.name
+            if os.name != "nt":
+                os.chmod(temporary, 0o600)
             json.dump(data, handle, indent=2, sort_keys=True)
             handle.write("\n")
         os.replace(temporary, path)
@@ -530,18 +792,92 @@ def _atomic_manifest_write(path: str, data: Mapping[str, Any]) -> None:
             os.unlink(temporary)
 
 
-def _manifest_for_config(config: FlexConfig) -> dict[str, Any] | None:
+def _assert_manifest_owner_path(
+    manifest: Mapping[str, Any], config: FlexConfig
+) -> None:
+    recorded_config = manifest.get("config")
+    source_path = config.source_path
+    if (
+        not isinstance(recorded_config, str)
+        or not recorded_config
+        or recorded_config != recorded_config.strip()
+    ):
+        raise RuntimeControlError(
+            "runtime manifest has no valid config owner path"
+        )
+    if not isinstance(source_path, str) or not source_path:
+        raise RuntimeControlError("current config has no valid source path")
+    if os.path.normcase(os.path.abspath(recorded_config)) != os.path.normcase(
+        os.path.abspath(source_path)
+    ):
+        raise RuntimeControlError(
+            "runtime manifest belongs to a different config: %s" % recorded_config
+        )
+
+
+def _assert_manifest_access(
+    manifest: Mapping[str, Any], config: FlexConfig, access: str
+) -> None:
+    """Validate trust required for read, mutation/reuse, or explicit stop."""
+
+    _assert_manifest_owner_path(manifest, config)
+    version = manifest["version"]
+    recorded_identity = manifest.get("config_sha256")
+    if access == "read":
+        # Released v3 documents predate the required semantic digest and are
+        # intentionally inspectable only. Current documents must always carry
+        # the identity that all current writers emit.
+        if version == MANIFEST_VERSION and not _valid_config_identity(
+            recorded_identity
+        ):
+            raise RuntimeControlError(
+                "current runtime manifest has no valid semantic config identity"
+            )
+        return
+    if access == "mutate":
+        if version != MANIFEST_VERSION:
+            raise RuntimeControlError(
+                "legacy runtime manifest version %d is read-only; stop it with "
+                "the explicit legacy stop policy before starting or recovering"
+                % version
+            )
+        if not _valid_config_identity(recorded_identity):
+            raise RuntimeControlError(
+                "runtime manifest has no valid semantic config identity"
+            )
+        if recorded_identity != _config_identity(config):
+            raise RuntimeControlError(
+                "runtime manifest semantic config differs from the current config; "
+                "stop it before applying config changes"
+            )
+        return
+    if access == "stop":
+        if version not in SUPPORTED_MANIFEST_VERSIONS:
+            raise RuntimeControlError(
+                "runtime manifest version %s cannot be stopped safely" % version
+            )
+        if version == MANIFEST_VERSION and not _valid_config_identity(
+            recorded_identity
+        ):
+            raise RuntimeControlError(
+                "runtime manifest has no valid semantic config identity; "
+                "refusing to signal any recorded process"
+            )
+        # Released v3 documents did not contain config_sha256. Their exact
+        # owner path plus the retained per-process kernel identity is the
+        # explicit legacy stop authority. The stop path below never rewrites
+        # or upgrades the v3 document.
+        return
+    raise RuntimeControlError("unknown runtime manifest access policy: %s" % access)
+
+
+def _manifest_for_config(
+    config: FlexConfig, *, access: str = "read"
+) -> dict[str, Any] | None:
     path = manifest_path(config)
     manifest = _read_manifest(path)
-    if manifest:
-        recorded_config = manifest.get("config")
-        if isinstance(recorded_config, str) and recorded_config and config.source_path:
-            if os.path.normcase(os.path.abspath(recorded_config)) != os.path.normcase(
-                os.path.abspath(config.source_path)
-            ):
-                raise RuntimeControlError(
-                    "runtime manifest belongs to a different config: %s" % recorded_config
-                )
+    if manifest is not None:
+        _assert_manifest_access(manifest, config, access)
     return manifest
 
 
@@ -558,13 +894,33 @@ def _manifest_document(
     recovery: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     prior = previous or {}
+    owner_path = config.source_path
+    if (
+        not isinstance(owner_path, str)
+        or not owner_path
+        or owner_path != owner_path.strip()
+    ):
+        raise RuntimeControlError(
+            "refusing to write a runtime manifest without a valid config owner path"
+        )
+    # A start/recovery plan establishes the effective semantic identity. During
+    # stop, preserve the identity already bound to surviving processes instead
+    # of relabeling them with a config file that may have changed in place.
+    config_sha256 = (
+        _config_identity(config) if plan is not None else prior.get("config_sha256")
+    )
+    if not _valid_config_identity(config_sha256):
+        raise RuntimeControlError(
+            "refusing to write a runtime manifest without a valid semantic config identity"
+        )
     document: dict[str, Any] = {
         "version": MANIFEST_VERSION,
         "session_id": session_id,
         "state": state,
         "started_at": started_at,
         "updated_at": _utc_now(),
-        "config": config.source_path,
+        "config": owner_path,
+        "config_sha256": config_sha256,
         "topology": plan.topology if plan else prior.get("topology", config.topology),
         "experience": plan.experience if plan else prior.get("experience", config.experience),
         "completion": plan.completion if plan else prior.get("completion", config.completion),
@@ -590,6 +946,32 @@ def _replace_role_record(records: list[dict[str, Any]], record: Mapping[str, Any
 
 def _remove_role_record(records: list[dict[str, Any]], role: str) -> None:
     records[:] = [item for item in records if item.get("role") != role]
+
+
+def _sanitize_process_record(
+    record: Mapping[str, Any], process: ProcessSpec
+) -> dict[str, Any]:
+    """Drop unknown legacy fields and ensure no real launch values are emitted."""
+
+    allowed = {
+        "role",
+        "pid",
+        "log",
+        "gpu_uuid",
+        "environment_sha256",
+        "launch_state",
+        "started_at",
+        "identity",
+        "heartbeat",
+    }
+    result = {key: value for key, value in record.items() if key in allowed}
+    secrets = _process_sensitive_values(process)
+    result["command"] = redact_command(process.command, secrets)
+    result["command_sha256"] = _command_fingerprint(process.command)
+    result["cwd"] = redact_text(process.cwd, secrets)
+    result["cwd_sha256"] = _path_fingerprint(process.cwd)
+    result["environment_sha256"] = _effective_environment_fingerprint(process)
+    return result
 
 
 def _write_runtime_manifest(
@@ -645,16 +1027,238 @@ def _terminate_owned_child(child: subprocess.Popen[Any]) -> bool:
     return stopped
 
 
+def _heartbeat_path(config: FlexConfig, role: str, session_id: str) -> str:
+    safe_role = "".join(character for character in role if character.isalnum() or character in "_-")
+    if safe_role != role or not safe_role:
+        raise RuntimeControlError("process role is unsafe for heartbeat naming")
+    return os.path.join(
+        runtime_directory(config),
+        "flexgpu-heartbeat-%s-%s.json" % (safe_role, session_id[:16]),
+    )
+
+
+def _launch_environment(
+    process: ProcessSpec,
+    config: FlexConfig,
+    session_id: str,
+    heartbeat_path: str,
+    heartbeat_timeout_ms: int,
+) -> dict[str, str]:
+    """Build the real child environment after verifying launcher-owned values."""
+
+    for key in process.env:
+        upper = str(key).upper()
+        if upper.startswith(("CUDA_", "FLEXGPU_")) and (
+            str(key) != upper or upper not in _RUNTIME_ENV_KEYS
+        ):
+            raise RuntimeControlError(
+                "process environment contains a non-launcher runtime variable: %s" % key
+            )
+    gpu = process.gpu
+    expected = {
+        "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
+        "CUDA_VISIBLE_DEVICES": (gpu.uuid or str(gpu.index)) if gpu else "",
+        "FLEXGPU_CONFIG": config.source_path,
+        "FLEXGPU_ROLE": process.role,
+        "FLEXGPU_TOPOLOGY": config.topology,
+        "FLEXGPU_GPU_INDEX": str(gpu.index) if gpu else "",
+        "FLEXGPU_GPU_UUID": gpu.uuid if gpu else "",
+        "FLEXGPU_GPU_BUS_ID": gpu.bus_id if gpu else "",
+        "FLEXGPU_TD_BUS_ID": gpu.td_bus_id if gpu else "",
+    }
+    for key, expected_value in expected.items():
+        if process.env.get(key) != expected_value:
+            raise RuntimeControlError(
+                "launcher-owned %s does not match the resolved process identity" % key
+            )
+    environment = _effective_launch_environment(process)
+    environment.update(
+        {
+            "FLEXGPU_SESSION_ID": session_id,
+            "FLEXGPU_HEARTBEAT_PATH": heartbeat_path,
+            "FLEXGPU_HEARTBEAT_TIMEOUT_MS": str(heartbeat_timeout_ms),
+        }
+    )
+    if process.project_path:
+        environment.update(
+            {
+                "FLEXGPU_EXPECTED_BUILD_VERSION": TOUCHDESIGNER_BUILD_VERSION,
+                "FLEXGPU_CONFIG_ID": _config_identity(config),
+            }
+        )
+    return environment
+
+
+def _read_heartbeat(path: str, runtime_dir: str) -> dict[str, Any] | None:
+    _assert_safe_runtime_file(path, runtime_dir)
+    if not os.path.exists(path):
+        return None
+    try:
+        if os.path.getsize(path) > 65536:
+            raise ValueError("heartbeat exceeds 64 KiB")
+        with _open_runtime_text(path, "r", runtime_dir) as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError, RuntimeControlError) as exc:
+        raise RuntimeControlError("application heartbeat is malformed") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeControlError("application heartbeat is malformed")
+    return payload
+
+
+def _parse_heartbeat_time(value: object) -> datetime:
+    if not isinstance(value, str) or not value:
+        raise ValueError("missing updated_at")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("updated_at must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def _heartbeat_status(
+    item: Mapping[str, Any], manifest_session_id: str
+) -> tuple[str, str, dict[str, Any]]:
+    """Return alive, ready, or stale for an identity-matched process."""
+
+    metadata = item.get("heartbeat")
+    if not isinstance(metadata, Mapping):
+        return "alive", "application heartbeat is not enabled for this record", {}
+    path = metadata.get("path")
+    timeout_ms = metadata.get("timeout_ms", DEFAULT_HEARTBEAT_TIMEOUT_MS)
+    required = bool(metadata.get("required", False))
+    expected_build = metadata.get("expected_build_version", "")
+    expected_config_id = metadata.get("expected_config_id", "")
+    log_path = item.get("log")
+    expected_name = "flexgpu-heartbeat-%s-%s.json" % (
+        str(item.get("role", "")),
+        manifest_session_id[:16],
+    )
+    if (
+        not isinstance(path, str)
+        or not path
+        or not isinstance(log_path, str)
+        or os.path.normcase(os.path.dirname(os.path.abspath(path)))
+        != os.path.normcase(os.path.dirname(os.path.abspath(log_path)))
+        or os.path.basename(path) != expected_name
+        or type(timeout_ms) is not int
+        or not 250 <= timeout_ms <= 600000
+        or not isinstance(expected_build, str)
+        or len(expected_build) > 64
+        or not isinstance(expected_config_id, str)
+        or (
+            expected_config_id
+            and (
+                len(expected_config_id) != 64
+                or any(character not in "0123456789abcdef" for character in expected_config_id)
+            )
+        )
+    ):
+        return "stale", "heartbeat metadata is malformed", {}
+    runtime_dir = os.path.dirname(path)
+    try:
+        payload = _read_heartbeat(path, runtime_dir)
+    except RuntimeControlError:
+        return "stale", "application heartbeat is malformed", {}
+    if payload is None:
+        if required:
+            return "stale", "application heartbeat has not been published", {}
+        try:
+            started = _parse_heartbeat_time(item.get("started_at"))
+            startup_age_ms = (
+                datetime.now(timezone.utc) - started
+            ).total_seconds() * 1000.0
+        except (TypeError, ValueError, OverflowError):
+            return "stale", "application heartbeat has not been published", {}
+        details = {"startup_age_ms": round(max(0.0, startup_age_ms), 1)}
+        if startup_age_ms > timeout_ms:
+            return "stale", "application heartbeat was not published before timeout", details
+        return "alive", "application heartbeat has not been published", details
+    try:
+        if payload.get("version") != HEARTBEAT_VERSION:
+            raise ValueError("version")
+        if payload.get("session_id") != manifest_session_id:
+            raise ValueError("session")
+        if payload.get("role") != item.get("role"):
+            raise ValueError("role")
+        if payload.get("pid") != item.get("pid"):
+            raise ValueError("pid")
+        updated = _parse_heartbeat_time(payload.get("updated_at"))
+        age_ms = (datetime.now(timezone.utc) - updated).total_seconds() * 1000.0
+        if age_ms < -30000:
+            raise ValueError("future timestamp")
+    except (TypeError, ValueError, OverflowError):
+        return "stale", "application heartbeat identity is malformed", {}
+    details = {
+        "heartbeat_age_ms": round(max(0.0, age_ms), 1),
+        "application_state": payload.get("state"),
+    }
+    if age_ms > timeout_ms:
+        return "stale", "application heartbeat is stale", details
+    if expected_build:
+        build = payload.get("build")
+        actual_build = build.get("version") if isinstance(build, Mapping) else None
+        if actual_build != expected_build:
+            details["expected_build_version"] = expected_build
+            details["actual_build_version"] = actual_build
+            return "stale", "application build identity does not match the launch plan", details
+    if expected_config_id:
+        config_identity = payload.get("config")
+        actual_config_id = (
+            config_identity.get("identity")
+            if isinstance(config_identity, Mapping)
+            else None
+        )
+        if actual_config_id != expected_config_id:
+            return "stale", "application config identity does not match the launch plan", details
+    if payload.get("state") == "ready":
+        return "ready", "", details
+    return "alive", "application has not reported ready", details
+
+
+def _wait_for_ready(
+    item: Mapping[str, Any], session_id: str, timeout_ms: int
+) -> None:
+    if timeout_ms <= 0:
+        return
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    last_reason = "application heartbeat has not been published"
+    while True:
+        process_state, process_reason = _record_process_status(item)
+        if process_state != "match":
+            raise RuntimeControlError(
+                "process exited or changed identity before readiness: %s" % process_reason
+            )
+        heartbeat_state, heartbeat_reason, _details = _heartbeat_status(item, session_id)
+        if heartbeat_state == "ready":
+            return
+        last_reason = heartbeat_reason or heartbeat_state
+        if time.monotonic() >= deadline:
+            raise RuntimeControlError(
+                "application readiness timed out after %d ms: %s" % (timeout_ms, last_reason)
+            )
+        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+
+
 def _launch_process(
     process: ProcessSpec,
     config: FlexConfig,
     persist: Callable[[Mapping[str, Any]], None],
+    *,
+    session_id: str,
+    wait_ready_ms: int = 0,
 ) -> tuple[subprocess.Popen[Any], dict[str, Any]]:
-    runtime_dir = runtime_directory(config)
+    runtime_dir = _ensure_runtime_directory(config)
     log_path = os.path.join(runtime_dir, "%s.log" % process.role)
-    log_handle = open(log_path, "a", encoding="utf-8", buffering=1)
-    env = os.environ.copy()
-    env.update(process.env)
+    log_handle = _open_runtime_text(log_path, "a", runtime_dir)
+    heartbeat_timeout_ms, _configured_wait, config_requires_ready = _supervisor_settings(config)
+    heartbeat_path = _heartbeat_path(config, process.role, session_id)
+    _assert_safe_runtime_file(heartbeat_path, runtime_dir)
+    try:
+        os.unlink(heartbeat_path)
+    except FileNotFoundError:
+        pass
+    env = _launch_environment(
+        process, config, session_id, heartbeat_path, heartbeat_timeout_ms
+    )
     kwargs: dict[str, Any] = {
         "cwd": process.cwd,
         "env": env,
@@ -669,20 +1273,39 @@ def _launch_process(
         kwargs["start_new_session"] = True
     try:
         child = subprocess.Popen(list(process.command), **kwargs)
-    except OSError:
+    except OSError as exc:
         log_handle.close()
-        raise
+        secrets = _process_sensitive_values(process)
+        raise RuntimeControlError(
+            "unable to launch %s process: %s"
+            % (process.role, redact_text(exc, secrets))
+        ) from exc
 
+    secrets = _process_sensitive_values(process)
     record: dict[str, Any] = {
         "role": process.role,
         "pid": child.pid,
-        "command": list(process.command),
-        "cwd": process.cwd,
+        "command": redact_command(process.command, secrets),
+        "command_sha256": _command_fingerprint(process.command),
+        "cwd": redact_text(process.cwd, secrets),
+        "cwd_sha256": _path_fingerprint(process.cwd),
         "log": log_path,
         "gpu_uuid": process.gpu.uuid if process.gpu else "",
-        "environment_sha256": _environment_fingerprint(process.env),
+        "environment_sha256": _effective_environment_fingerprint(process),
         "launch_state": "identity_pending",
         "started_at": _utc_now(),
+        "heartbeat": {
+            "version": HEARTBEAT_VERSION,
+            "path": heartbeat_path,
+            "timeout_ms": heartbeat_timeout_ms,
+            "required": bool(config_requires_ready or wait_ready_ms > 0),
+            "expected_build_version": (
+                TOUCHDESIGNER_BUILD_VERSION if process.project_path else ""
+            ),
+            "expected_config_id": (
+                _config_identity(config) if process.project_path else ""
+            ),
+        },
     }
     try:
         # Persist the PID immediately. If the controller itself crashes during
@@ -704,6 +1327,7 @@ def _launch_process(
         record["identity"] = identity
         record["launch_state"] = "running"
         persist(record)
+        _wait_for_ready(record, session_id, wait_ready_ms)
         _LOCAL_CHILDREN[child.pid] = child
         return child, record
     except Exception:
@@ -753,12 +1377,24 @@ def runtime_status(config: FlexConfig) -> dict[str, Any]:
         }
 
     processes: list[dict[str, Any]] = []
-    counts = {"running": 0, "dead": 0, "refused": 0}
+    counts = {
+        "running": 0,
+        "ready": 0,
+        "alive": 0,
+        "stale": 0,
+        "dead": 0,
+        "refused": 0,
+    }
+    session_id = str(manifest.get("session_id") or "")
     for item in manifest.get("processes", []):
         status, reason = _record_process_status(item)
-        public_status = (
-            "running" if status == "match" else "refused" if status == "refuse" else status
-        )
+        details: dict[str, Any] = {}
+        if status == "match":
+            counts["running"] += 1
+            public_status, heartbeat_reason, details = _heartbeat_status(item, session_id)
+            reason = heartbeat_reason
+        else:
+            public_status = "refused" if status == "refuse" else status
         counts[public_status] += 1
         entry = {
             "role": item.get("role"),
@@ -769,6 +1405,7 @@ def runtime_status(config: FlexConfig) -> dict[str, Any]:
         }
         if reason:
             entry["reason"] = reason
+        entry.update(details)
         processes.append(entry)
 
     manifest_state = str(manifest.get("state", "running" if processes else "stopped"))
@@ -776,10 +1413,14 @@ def runtime_status(config: FlexConfig) -> dict[str, Any]:
         state = "ownership_error"
     elif counts["dead"]:
         state = "degraded"
+    elif counts["stale"]:
+        state = "stale"
     elif manifest_state in {"starting", "recovering", "stopping"}:
         state = manifest_state
     elif manifest_state in {"failed", "degraded"}:
         state = "degraded"
+    elif counts["ready"] and not counts["alive"]:
+        state = "ready"
     elif counts["running"]:
         state = "running"
     else:
@@ -970,24 +1611,38 @@ def _stop_verified_records(
 
 
 def start_plan(
-    plan: ProcessPlan, config: FlexConfig, execute: bool = False
+    plan: ProcessPlan,
+    config: FlexConfig,
+    execute: bool = False,
+    *,
+    wait_ready_ms: int | None = None,
 ) -> dict[str, Any]:
     """Preview or start a plan; mutation is impossible unless execute is true."""
 
     target_manifest = manifest_path(config)
+    readiness_wait_ms = _readiness_wait_ms(config, wait_ready_ms)
     preview: dict[str, Any] = {
         "mode": "execute" if execute else "dry-run",
         "manifest": target_manifest,
         "processes": [
-            {"role": process.role, "command": list(process.command), "cwd": process.cwd}
+            {
+                "role": process.role,
+                "command": redact_command(
+                    process.command, _process_sensitive_values(process)
+                ),
+                "cwd": redact_text(
+                    process.cwd, _process_sensitive_values(process)
+                ),
+            }
             for process in plan.processes
         ],
+        "wait_ready_ms": readiness_wait_ms,
     }
     if not execute:
         return preview
 
     with _RuntimeMutationLock(config):
-        existing = _manifest_for_config(config)
+        existing = _manifest_for_config(config, access="mutate")
         active_by_role: dict[str, dict[str, Any]] = {}
         if existing:
             for item in existing.get("processes", []):
@@ -1000,6 +1655,8 @@ def start_plan(
                         % (item.get("pid", "unknown"), reason)
                     )
                 active_by_role[str(item.get("role", ""))] = dict(item)
+            if active_by_role:
+                _assert_manifest_config_identity_for_reuse(existing, config)
             planned_roles = {process.role for process in plan.processes}
             unexpected = sorted(set(active_by_role).difference(planned_roles))
             if unexpected:
@@ -1009,21 +1666,43 @@ def start_plan(
                 )
             for process in plan.processes:
                 current = active_by_role.get(process.role)
-                if current and list(process.command) != current.get("command"):
+                command_matches = bool(
+                    current
+                    and (
+                        current.get("command_sha256") == _command_fingerprint(process.command)
+                        or (
+                            not current.get("command_sha256")
+                            and list(process.command) == current.get("command")
+                        )
+                    )
+                )
+                if current and not command_matches:
                     raise RuntimeControlError(
                         "active %s process command differs from the new plan; stop it before restarting"
                         % process.role
                     )
-                if current and current.get("environment_sha256") != _environment_fingerprint(
-                    process.env
-                ):
+                environment_hash = current.get("environment_sha256") if current else None
+                environment_matches = bool(
+                    current
+                    and environment_hash == _effective_environment_fingerprint(process)
+                )
+                if current and not environment_matches:
                     raise RuntimeControlError(
                         "active %s process environment differs from the new plan; stop it before applying overrides"
                         % process.role
                     )
-                if current and os.path.normcase(os.path.abspath(str(current.get("cwd", "")))) != os.path.normcase(
-                    os.path.abspath(process.cwd)
-                ):
+                cwd_matches = bool(
+                    current
+                    and (
+                        current.get("cwd_sha256") == _path_fingerprint(process.cwd)
+                        or (
+                            not current.get("cwd_sha256")
+                            and os.path.normcase(os.path.abspath(str(current.get("cwd", ""))))
+                            == os.path.normcase(os.path.abspath(process.cwd))
+                        )
+                    )
+                )
+                if current and not cwd_matches:
                     raise RuntimeControlError(
                         "active %s process working directory differs from the new plan; stop it before restarting"
                         % process.role
@@ -1031,8 +1710,14 @@ def start_plan(
 
         reused = [dict(active_by_role[p.role]) for p in plan.processes if p.role in active_by_role]
         missing = [process for process in plan.processes if process.role not in active_by_role]
+        session_id = str((existing or {}).get("session_id") or uuid.uuid4().hex)
+        for record in reused:
+            process = next(item for item in plan.processes if item.role == record.get("role"))
+            replacement = _sanitize_process_record(record, process)
+            record.clear()
+            record.update(replacement)
+            _wait_for_ready(record, session_id, readiness_wait_ms)
         if not missing:
-            session_id = str((existing or {}).get("session_id") or uuid.uuid4().hex)
             if (
                 not existing
                 or existing.get("version") != MANIFEST_VERSION
@@ -1053,7 +1738,7 @@ def start_plan(
             preview["session_id"] = session_id
             return preview
 
-        os.makedirs(runtime_directory(config), exist_ok=True)
+        _ensure_runtime_directory(config)
         records = list(reused)
         session_id = (
             str(existing.get("session_id"))
@@ -1093,7 +1778,13 @@ def start_plan(
 
         try:
             for process in missing:
-                child, record = _launch_process(process, config, persist)
+                child, record = _launch_process(
+                    process,
+                    config,
+                    persist,
+                    session_id=session_id,
+                    wait_ready_ms=readiness_wait_ms,
+                )
                 started_children.append((child, process.role))
                 started_records.append(record)
             _write_runtime_manifest(
@@ -1150,7 +1841,7 @@ def stop_managed(config: FlexConfig, execute: bool = False) -> dict[str, Any]:
         return result
 
     with _RuntimeMutationLock(config):
-        manifest = _manifest_for_config(config)
+        manifest = _manifest_for_config(config, access="stop")
         records = list(manifest.get("processes", [])) if manifest else []
         targets, verified, refused, dead = _classify_records(records)
         result.update({"targets": targets, "refused": refused, "dead": dead})
@@ -1175,17 +1866,20 @@ def stop_managed(config: FlexConfig, execute: bool = False) -> dict[str, Any]:
             )
             return result
 
+        legacy_manifest = manifest["version"] != MANIFEST_VERSION
+        result["legacy_manifest"] = legacy_manifest
         session_id = str(manifest.get("session_id") or uuid.uuid4().hex)
         started_at = str(manifest.get("started_at") or _utc_now())
-        _write_runtime_manifest(
-            path,
-            config,
-            records,
-            state="stopping",
-            session_id=session_id,
-            started_at=started_at,
-            previous=manifest,
-        )
+        if not legacy_manifest:
+            _write_runtime_manifest(
+                path,
+                config,
+                records,
+                state="stopping",
+                session_id=session_id,
+                started_at=started_at,
+                previous=manifest,
+            )
         stop_result = _stop_verified_records(verified, targets)
         result.update(stop_result)
         remaining: list[dict[str, Any]] = []
@@ -1198,7 +1892,7 @@ def stop_managed(config: FlexConfig, execute: bool = False) -> dict[str, Any]:
                 os.unlink(path)
             except FileNotFoundError:
                 pass
-        else:
+        elif not legacy_manifest:
             _write_runtime_manifest(
                 path,
                 config,
@@ -1208,6 +1902,18 @@ def stop_managed(config: FlexConfig, execute: bool = False) -> dict[str, Any]:
                 started_at=started_at,
                 previous=manifest,
                 error="; ".join(stop_result["errors"]),
+            )
+        else:
+            # Never relabel a released legacy document as current. If the
+            # identity-verified stop is incomplete, retain the original
+            # manifest for operator inspection and fail below.
+            result["legacy_manifest_retained"] = True
+        if legacy_manifest and remaining and not (
+            stop_result["survivors"] or stop_result["errors"]
+        ):
+            raise RuntimeControlError(
+                "legacy manifest stop could not prove that every process exited; "
+                "the original manifest was retained"
             )
         if stop_result["survivors"]:
             raise RuntimeControlError(
@@ -1233,6 +1939,7 @@ def recover_managed(
     attempts: int = 1,
     restart_running: bool = False,
     execute: bool = False,
+    wait_ready_ms: int | None = None,
 ) -> dict[str, Any]:
     """Recover only the AI role; world/render is never restarted implicitly."""
 
@@ -1248,11 +1955,18 @@ def recover_managed(
             "this plan has no separate ai process; refusing to restart the unified world/render role"
         )
 
+    readiness_wait_ms = _readiness_wait_ms(config, wait_ready_ms)
     path = manifest_path(config)
     manifest = _manifest_for_config(config)
+    preview_session_id = str((manifest or {}).get("session_id") or "")
     records = list(manifest.get("processes", [])) if manifest else []
     current = next((item for item in records if item.get("role") == role), None)
     current_status = _record_process_status(current)[0] if current is not None else "missing"
+    current_readiness = (
+        _heartbeat_status(current, preview_session_id)[0]
+        if current is not None and current_status == "match"
+        else current_status
+    )
     preview_by_role = {str(item.get("role")): item for item in records}
     dependency_states = {
         dependency: (
@@ -1262,14 +1976,26 @@ def recover_managed(
         )
         for dependency in process.dependencies
     }
+    dependency_readiness = {
+        dependency: (
+            _heartbeat_status(preview_by_role[dependency], preview_session_id)[0]
+            if dependency_states[dependency] == "match"
+            else dependency_states[dependency]
+        )
+        for dependency in process.dependencies
+    }
     unhealthy_dependencies = sorted(
-        dependency for dependency, status in dependency_states.items() if status != "match"
+        dependency
+        for dependency, status in dependency_states.items()
+        if status != "match"
+        or (readiness_wait_ms > 0 and dependency_readiness[dependency] != "ready")
     )
     action = (
         "refuse"
         if unhealthy_dependencies
         else "restart"
-        if current_status == "match" and restart_running
+        if current_status == "match"
+        and (restart_running or (readiness_wait_ms > 0 and current_readiness != "ready"))
         else "reuse"
         if current_status == "match"
         else "refuse"
@@ -1284,7 +2010,10 @@ def recover_managed(
         "attempt_limit": attempts,
         "restart_running": restart_running,
         "current_status": current_status,
+        "readiness_status": current_readiness,
         "dependencies": dependency_states,
+        "dependency_readiness": dependency_readiness,
+        "wait_ready_ms": readiness_wait_ms,
     }
     if unhealthy_dependencies:
         preview["reason"] = (
@@ -1295,7 +2024,7 @@ def recover_managed(
         return preview
 
     with _RuntimeMutationLock(config):
-        manifest = _manifest_for_config(config)
+        manifest = _manifest_for_config(config, access="mutate")
         records = [dict(item) for item in manifest.get("processes", [])] if manifest else []
         by_role = {str(item.get("role")): item for item in records}
         statuses = {
@@ -1312,6 +2041,8 @@ def recover_managed(
                 "refusing AI recovery because runtime ownership could not be verified: "
                 + "; ".join(refused)
             )
+        if manifest and any(status[0] == "match" for status in statuses.values()):
+            _assert_manifest_config_identity_for_reuse(manifest, config)
         for dependency in process.dependencies:
             dependency_status = statuses.get(dependency, ("missing", "dependency is absent"))
             if dependency_status[0] != "match":
@@ -1319,12 +2050,34 @@ def recover_managed(
                     "%s dependency is not healthy; it will not be restarted automatically"
                     % dependency
                 )
+            if readiness_wait_ms > 0:
+                dependency_readiness_state = _heartbeat_status(
+                    by_role[dependency],
+                    str((manifest or {}).get("session_id") or ""),
+                )[0]
+                if dependency_readiness_state != "ready":
+                    raise RuntimeControlError(
+                        "%s dependency is alive but not application-ready; it will not be restarted automatically"
+                        % dependency
+                    )
 
         current = by_role.get(role)
         current_state = statuses.get(role, ("missing", ""))[0]
-        if current_state == "match" and not restart_running:
+        current_is_ready = bool(
+            current is not None
+            and current_state == "match"
+            and _heartbeat_status(
+                current, str((manifest or {}).get("session_id") or "")
+            )[0]
+            == "ready"
+        )
+        if current_state == "match" and not restart_running and (
+            readiness_wait_ms == 0 or current_is_ready
+        ):
             preview["action"] = "reuse"
-            preview["reused"] = [dict(current)] if current else []
+            preview["reused"] = (
+                [_sanitize_process_record(current, process)] if current else []
+            )
             preview["attempts_used"] = 0
             return preview
 
@@ -1396,7 +2149,13 @@ def recover_managed(
                 )
 
             try:
-                _child, record = _launch_process(process, config, persist)
+                _child, record = _launch_process(
+                    process,
+                    config,
+                    persist,
+                    session_id=session_id,
+                    wait_ready_ms=readiness_wait_ms,
+                )
             except (OSError, RuntimeControlError) as exc:
                 attempt_errors.append("attempt %d: %s" % (attempt, exc))
                 failed = next((item for item in records if item.get("role") == role), None)

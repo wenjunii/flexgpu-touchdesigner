@@ -11,7 +11,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from flexgpu.config import load_config_data, validate_config  # noqa: E402
+from flexgpu.config import load_config, load_config_data, validate_config  # noqa: E402
 from flexgpu.models import ConfigError  # noqa: E402
 
 
@@ -90,11 +90,44 @@ class RuntimeConfigSectionTests(unittest.TestCase):
                     "fog_density": 0.35,
                     "procedural_mix": 0.7,
                 },
+                "supervisor": {
+                    "heartbeat_timeout_ms": 2500,
+                    "readiness_timeout_ms": 10000,
+                    "require_ready": True,
+                },
             }
         )
         config = validate_config(profile)
         self.assertEqual(config.raw["source"]["frame_state_operator"], "frame_state")
         self.assertEqual(config.raw["sensor"]["auto_load_tox"], True)
+        self.assertEqual(config.supervisor["heartbeat_timeout_ms"], 2500)
+        self.assertEqual(config.supervisor["readiness_timeout_ms"], 10000)
+        self.assertIs(config.supervisor["require_ready"], True)
+
+    def test_supervisor_defaults_are_backwards_compatible(self) -> None:
+        config = validate_config(base_profile())
+        self.assertEqual(
+            config.supervisor,
+            {
+                "heartbeat_timeout_ms": 5000,
+                "readiness_timeout_ms": 0,
+                "require_ready": False,
+            },
+        )
+
+    def test_supervisor_contract_rejects_unknown_types_and_bounds(self) -> None:
+        cases = (
+            {"heartbeat_timeout_ms": 249},
+            {"readiness_timeout_ms": -1},
+            {"require_ready": 1},
+            {"unknown": True},
+        )
+        for supervisor in cases:
+            with self.subTest(supervisor=supervisor):
+                profile = base_profile()
+                profile["supervisor"] = supervisor
+                with self.assertRaises(ConfigError):
+                    validate_config(profile)
 
     def test_unknown_top_level_and_runtime_fields_fail_closed(self) -> None:
         cases = []
@@ -208,6 +241,28 @@ class RuntimeConfigSectionTests(unittest.TestCase):
                     path.write_text(payload, encoding="utf-8")
                     with self.assertRaises(ConfigError):
                         load_config_data(path)
+
+    def test_toml_process_defaults_and_roles_reject_unknown_fields(self) -> None:
+        try:
+            import tomllib  # noqa: F401
+        except ModuleNotFoundError:
+            self.skipTest("tomllib is unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "show.toml"
+            path.write_text(
+                'topology = "single"\n'
+                '[processes.defaults]\n'
+                'gpu_affinty = false\n'
+                '[processes.world]\n'
+                'command = ["python", "show.py"]\n'
+                'workdir = "runtime"\n',
+                encoding="utf-8",
+            )
+            with self.assertRaises(ConfigError) as raised:
+                load_config(path)
+            message = str(raised.exception)
+            self.assertIn("processes.defaults has unsupported field 'gpu_affinty'", message)
+            self.assertIn("processes.world has unsupported field 'workdir'", message)
 
     def test_toml_without_standard_library_support_is_a_config_error(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

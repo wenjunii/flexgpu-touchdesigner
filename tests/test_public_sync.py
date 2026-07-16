@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
 import tempfile
@@ -127,6 +128,174 @@ class PublicSyncPolicyTests(unittest.TestCase):
         )
         self.assertEqual(self.tool.content_findings(".env.example", payload), [])
 
+    def test_renamed_structured_local_artifacts_are_blocked_by_content(self) -> None:
+        fixtures = {
+            "hardware": (
+                {
+                    "version": "flexgpu-hardware-profile/v1",
+                    "captured_ns": 1,
+                    "gpus": [{"uuid": "GPU-local-machine"}],
+                    "recommendation": {},
+                },
+                "local-hardware-profile",
+            ),
+            "commissioning": (
+                {
+                    "version": "flexgpu-commissioning/v1",
+                    "created_ns": 1,
+                    "source": {},
+                    "calibration": {},
+                    "frames": [],
+                },
+                "local-commissioning-manifest",
+            ),
+            "frame": (
+                {
+                    "version": "flexgpu-frame-state/v1",
+                    "session_id": "local-session",
+                    "frame_id": 1,
+                    "timestamp_ns": 1,
+                    "calibration_id": "camera",
+                    "calibration_digest": "a" * 64,
+                },
+                "local-frame-state",
+            ),
+            "runtime": (
+                {
+                    "version": 3,
+                    "session_id": "local-session",
+                    "state": "running",
+                    "started_at": "local",
+                    "updated_at": "local",
+                    "config": "C:/private/show.json",
+                    "planned_roles": ["world"],
+                    "processes": [{"pid": 1234}],
+                },
+                "local-runtime-manifest",
+            ),
+            "telemetry": (
+                {
+                    "schema_version": 1,
+                    "timestamp": 1.0,
+                    "frame_time_ms": 16.7,
+                    "vram_used_mib": 1000,
+                    "vram_total_mib": 16000,
+                    "queue_age_ms": 2,
+                    "quality_level": 2,
+                },
+                "local-telemetry-artifact",
+            ),
+            "support": (
+                {"artifact_type": "support-bundle", "diagnostics": []},
+                "local-support-artifact",
+            ),
+            "capture": (
+                {"artifact_type": "audience-capture", "capture_id": "local"},
+                "local-capture-artifact",
+            ),
+            "td-validation": (
+                {"version": "flexgpu-td-validation/v1", "checks": []},
+                "local-validation-report",
+            ),
+        }
+        private_value = "audience-machine-precise-identifier"
+        for name, (payload, expected_rule) in fixtures.items():
+            payload["machine_name"] = private_value
+            with self.subTest(name=name):
+                findings = self.tool.content_findings(
+                    "docs/innocent-%s.json" % name,
+                    json.dumps(payload).encode("utf-8"),
+                )
+                self.assertTrue(any(item.rule == expected_rule for item in findings))
+                self.assertNotIn(private_value, repr(findings))
+
+    def test_current_and_future_runtime_manifests_are_detected_by_shape(self) -> None:
+        manifest = {
+            "version": 6,
+            "session_id": "local-session",
+            "state": "running",
+            "started_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:01Z",
+            "config": "C:/private/show.json",
+            "planned_roles": ["world"],
+            "processes": [{"role": "world", "pid": 1234}],
+        }
+        for version in (6, 7, 999):
+            with self.subTest(version=version):
+                manifest["version"] = version
+                findings = self.tool.content_findings(
+                    "docs/renamed-state.json",
+                    json.dumps(manifest).encode("utf-8"),
+                )
+                self.assertTrue(
+                    any(item.rule == "local-runtime-manifest" for item in findings)
+                )
+
+    def test_ordinary_versioned_config_is_not_a_runtime_manifest(self) -> None:
+        config = {
+            "version": 7,
+            "state": "enabled",
+            "config": "config/flexshow.example.json",
+            "planned_roles": ["world"],
+            "processes": {"world": {"command": ["python", "show.py"]}},
+            "topology": "single",
+            "experience": "installation",
+        }
+        findings = self.tool.content_findings(
+            "config/example.json", json.dumps(config).encode("utf-8")
+        )
+        self.assertFalse(
+            any(item.rule == "local-runtime-manifest" for item in findings)
+        )
+
+    def test_only_exact_public_synthetic_calibration_fixture_is_allowed(self) -> None:
+        fixture_path = ROOT / "config" / "calibration.example.json"
+        payload = fixture_path.read_bytes()
+        self.assertFalse(
+            any(
+                item.rule == "local-calibration-profile"
+                for item in self.tool.content_findings(
+                    "config/calibration.example.json", payload
+                )
+            )
+        )
+        renamed = self.tool.content_findings("docs/camera.json", payload)
+        self.assertTrue(
+            any(item.rule == "local-calibration-profile" for item in renamed)
+        )
+
+        changed = json.loads(payload)
+        changed["camera_to_world"][3] = 0.5
+        changed_payload = json.dumps(changed).encode("utf-8")
+        findings = self.tool.content_findings(
+            "config/calibration.example.json", changed_payload
+        )
+        self.assertTrue(
+            any(item.rule == "local-calibration-profile" for item in findings)
+        )
+
+    def test_jsonl_telemetry_is_detected_after_rename_without_value_exposure(self) -> None:
+        private_value = "local-stage-machine-name"
+        records = [
+            {
+                "schema_version": 1,
+                "timestamp": index,
+                "frame_time_ms": 16.0,
+                "vram_used_mib": 8000,
+                "vram_total_mib": 16000,
+                "queue_age_ms": 1.0,
+                "quality_level": 2,
+                "metadata": {"machine": private_value},
+            }
+            for index in range(2)
+        ]
+        payload = b"\n".join(json.dumps(record).encode("utf-8") for record in records)
+        findings = self.tool.content_findings("assets/notes.txt", payload)
+        self.assertTrue(
+            any(item.rule == "local-telemetry-artifact" for item in findings)
+        )
+        self.assertNotIn(private_value, repr(findings))
+
     def test_placeholder_recognition_is_exact_and_fail_closed(self) -> None:
         placeholders = (
             b"password=CHANGEME\n"
@@ -152,6 +321,68 @@ class PublicSyncPolicyTests(unittest.TestCase):
                     "fixture.env", b"password=" + value
                 )
                 self.assertTrue(any(item.rule == "assigned-secret" for item in findings))
+
+    def test_int_wrapper_does_not_hide_a_credential_literal(self) -> None:
+        assignment = b"pass" + b"word="
+        for expression in (
+            b"int(" + b'"12345678"' + b")",
+            b"int(" + b"'87654321'" + b")",
+            b"int(" + b"12345678" + b")",
+        ):
+            with self.subTest(expression=expression):
+                findings = self.tool.content_findings(
+                    "fixture.py", assignment + expression
+                )
+                self.assertTrue(
+                    any(item.rule == "assigned-secret" for item in findings)
+                )
+
+    def test_narrow_int_environment_and_runtime_expressions_remain_allowed(self) -> None:
+        payload = (
+            b'token = int(os.getenv("TOKEN"))\n'
+            b'token = os.getenv("TOKEN", "${TOKEN}")\n'
+            b'token = os.environ.get("TOKEN", "CHANGEME")\n'
+            b"token = int(slot.get('fallback_counter', -1)) + 1\n"
+        )
+        self.assertEqual(self.tool.content_findings("runtime.py", payload), [])
+
+    def test_environment_getter_nonplaceholder_defaults_are_credentials(self) -> None:
+        assignment = b"pass" + b"word="
+        lookup = b"get" + b"env"
+        expressions = (
+            b"os." + lookup + b'("PASSWORD", "actual-secret-123")',
+            b"int(os." + lookup + b'("PASSWORD", "12345678"))',
+            lookup + b"('PASSWORD', 'fallback-secret')",
+            b"system." + lookup + b'("PASSWORD", "fallback-secret")',
+            b"os.environ.get(" + b'"PASSWORD", "fallback-secret")',
+        )
+        for expression in expressions:
+            with self.subTest(expression=expression):
+                findings = self.tool.content_findings(
+                    "fixture.py", assignment + expression
+                )
+                self.assertTrue(
+                    any(item.rule == "assigned-secret" for item in findings)
+                )
+
+    def test_environment_getter_without_or_with_placeholder_default_is_allowed(self) -> None:
+        assignment = b"to" + b"ken="
+        lookup = b"get" + b"env"
+        expressions = (
+            b"os." + lookup + b'("TOKEN")',
+            b"int(os." + lookup + b'("TOKEN"))',
+            b"os." + lookup + b'("TOKEN", "${TOKEN}")',
+            b"os.environ.get(" + b'"TOKEN", "CHANGEME")',
+            b"system." + lookup + b'("TOKEN", None)',
+        )
+        for expression in expressions:
+            with self.subTest(expression=expression):
+                self.assertEqual(
+                    self.tool.content_findings(
+                        "fixture.py", assignment + expression
+                    ),
+                    [],
+                )
 
     def test_index_and_candidate_scans_use_their_exact_git_surfaces(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -188,6 +419,38 @@ class PublicSyncPolicyTests(unittest.TestCase):
             findings, _ = self.tool.scan_repository(root, "history")
             self.assertTrue(any(item.rule == "openai-token" for item in findings))
             self.assertTrue(all("sk-" not in repr(item) for item in findings))
+
+    def test_history_scan_rechecks_public_calibration_blob_after_rename(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.assertEqual(git(root, "init", "-q").returncode, 0)
+            self.assertEqual(git(root, "config", "user.email", "test@example.com").returncode, 0)
+            self.assertEqual(git(root, "config", "user.name", "Public Sync Test").returncode, 0)
+            payload = (ROOT / "config" / "calibration.example.json").read_bytes()
+            public = root / "config" / "calibration.example.json"
+            renamed = root / "docs" / "camera.json"
+            public.parent.mkdir()
+            renamed.parent.mkdir()
+            public.write_bytes(payload)
+            renamed.write_bytes(payload)
+            self.assertEqual(git(root, "add", ".").returncode, 0)
+            self.assertEqual(git(root, "commit", "-qm", "calibration copies").returncode, 0)
+
+            findings, _ = self.tool.scan_repository(root, "history")
+            self.assertTrue(
+                any(
+                    item.rule == "local-calibration-profile"
+                    and item.path == "docs/camera.json"
+                    for item in findings
+                )
+            )
+            self.assertFalse(
+                any(
+                    item.rule == "local-calibration-profile"
+                    and item.path == "config/calibration.example.json"
+                    for item in findings
+                )
+            )
 
     def test_history_scan_finds_a_secret_commit_message(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

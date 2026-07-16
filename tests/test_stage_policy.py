@@ -66,8 +66,11 @@ class StagePolicyTests(unittest.TestCase):
         self.assertEqual(policy.bridge_mode, "local")
 
     def test_incompatible_transport_is_rejected(self) -> None:
-        with self.assertRaisesRegex(ValueError, "shared_memory or touch_tcp"):
-            resolve_stage_policy("ai", "dual_local", "installation", "spout")
+        for transport in ("spout", "local"):
+            with self.subTest(transport=transport), self.assertRaisesRegex(
+                ValueError, "shared_memory or touch_tcp"
+            ):
+                resolve_stage_policy("ai", "dual_local", "installation", transport)
         with self.assertRaisesRegex(ValueError, "touch_tcp"):
             resolve_stage_policy("world", "dual_network", "installation", "shared_memory")
 
@@ -77,6 +80,13 @@ class StagePolicyTests(unittest.TestCase):
         self.assertEqual(ai.bridge_mode, "send_tcp")
         self.assertEqual(world.bridge_mode, "receive_tcp")
         self.assertEqual(world.route_index, 1)
+        self.assertEqual(world.atlas_route_index, 1)
+
+    def test_dual_local_stage_policy_default_is_loopback_touch_tcp(self) -> None:
+        ai = resolve_stage_policy("ai", "dual_local", "installation")
+        world = resolve_stage_policy("world", "dual_local", "installation")
+        self.assertEqual(ai.bridge_mode, "send_tcp")
+        self.assertEqual(world.bridge_mode, "receive_tcp")
         self.assertEqual(world.atlas_route_index, 1)
 
 

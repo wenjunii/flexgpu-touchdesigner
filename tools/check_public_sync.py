@@ -95,6 +95,10 @@ BLOCKED_FILENAMES = frozenset(
 
 SAFE_ENV_FILENAMES = frozenset({".env.example"})
 MAX_SCANNED_BLOB_BYTES = 100 * 1024 * 1024
+PUBLIC_CALIBRATION_PATH = "config/calibration.example.json"
+PUBLIC_CALIBRATION_DIGEST = (
+    "4f5fea41488cdc35d9a73cdee73b9844d29d153a14d3cc1b9a29a85c587a88a7"
+)
 
 BLOCKED_PATH_GLOBS = (
     "config/local-*",
@@ -327,7 +331,22 @@ _GENERIC_ASSIGNMENT = re.compile(
     rb"openai|pypi|slack|stripe|twilio)[_-])"
     rb"(?:access[_-]?token|api[_-]?key|key|password|secret|token)"
     rb")[\"']?[ \t]*[:=][ \t]*"
-    rb"(?:\"([^\"\r\n]{8,})\"|'([^'\r\n]{8,})'|([^\"'#,{\r\n}]{8,}))"
+    rb"(?:"
+    rb"((?:int\([ \t]*)?(?:getenv|os\.getenv|system\.getenv|os\.environ\.get)"
+    rb"\([ \t]*(?:\"[^\"\r\n]*\"|'[^'\r\n]*')"
+    rb"(?:[ \t]*,[ \t]*(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|"
+    rb"[+-]?[0-9][0-9_]*|none|null))?[ \t]*\)[ \t]*\)?)|"
+    rb"(int\([ \t]*(?:\"[^\"\r\n]+\"|'[^'\r\n]+'|[+-]?[0-9][0-9_]*)[ \t]*\))|"
+    rb"\"([^\"\r\n]{8,})\"|'([^'\r\n]{8,})'|([^\"'#,{\r\n}]{8,})"
+    rb")"
+)
+
+_ENV_GETTER_EXPRESSION = re.compile(
+    r"^(?:int\(\s*)?(?:getenv|os\.getenv|system\.getenv|os\.environ\.get)"
+    r"\(\s*(?:\"[^\"\r\n]*\"|'[^'\r\n]*')"
+    r"(?:\s*,\s*(?P<fallback>\"[^\"\r\n]*\"|'[^'\r\n]*'|"
+    r"[+-]?[0-9][0-9_]*|none|null))?\s*\)\s*\)?$",
+    re.IGNORECASE,
 )
 
 _CREDENTIALED_URL = re.compile(
@@ -340,6 +359,204 @@ def _line_number(data: bytes, offset: int) -> int:
     return data.count(b"\n", 0, offset) + 1
 
 
+def _json_objects(data: bytes) -> list[tuple[dict[str, object], int]]:
+    """Parse a complete JSON document or an all-JSON-object JSONL payload."""
+
+    try:
+        text = data.decode("utf-8-sig")
+    except UnicodeError:
+        return []
+    try:
+        value = json.loads(text)
+    except (json.JSONDecodeError, ValueError, RecursionError):
+        records: list[tuple[dict[str, object], int]] = []
+        nonempty = [(index, line) for index, line in enumerate(text.splitlines(), 1) if line.strip()]
+        if not nonempty or len(nonempty) > 100_000:
+            return []
+        for line_number, line in nonempty:
+            try:
+                item = json.loads(line)
+            except (json.JSONDecodeError, ValueError, RecursionError):
+                return []
+            if not isinstance(item, dict):
+                return []
+            records.append((item, line_number))
+        return records
+    if isinstance(value, dict):
+        return [(value, 1)]
+    return []
+
+
+def _mapping_digest_without_field(value: dict[str, object], field: str) -> str | None:
+    semantic = dict(value)
+    semantic.pop(field, None)
+    try:
+        payload = json.dumps(
+            semantic,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        return None
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _is_exact_public_calibration(path: str, value: dict[str, object]) -> bool:
+    if normalize_path(path) != PUBLIC_CALIBRATION_PATH:
+        return False
+    computed = _mapping_digest_without_field(value, "calibration_digest")
+    if computed != PUBLIC_CALIBRATION_DIGEST:
+        return False
+    declared = value.get("calibration_digest")
+    return declared is None or declared == computed
+
+
+def _is_runtime_manifest(value: dict[str, object]) -> bool:
+    """Recognize runtime state by its stable shape, not one schema revision."""
+
+    version = value.get("version")
+    if isinstance(version, bool) or not isinstance(version, int) or version < 3:
+        return False
+    required = {
+        "session_id",
+        "state",
+        "started_at",
+        "updated_at",
+        "config",
+        "planned_roles",
+        "processes",
+    }
+    if not required.issubset(value):
+        return False
+    return (
+        isinstance(value.get("session_id"), str)
+        and isinstance(value.get("state"), str)
+        and isinstance(value.get("started_at"), str)
+        and isinstance(value.get("updated_at"), str)
+        and isinstance(value.get("config"), str)
+        and isinstance(value.get("planned_roles"), list)
+        and isinstance(value.get("processes"), list)
+    )
+
+
+def _structured_content_findings(
+    path: str, data: bytes, scope: str
+) -> list[Finding]:
+    """Identify machine-local structured artifacts independently of filenames."""
+
+    findings: list[Finding] = []
+    seen_rules: set[str] = set()
+
+    def add(rule: str, message: str, line: int) -> None:
+        if rule not in seen_rules:
+            findings.append(Finding(normalize_path(path), rule, message, scope, line))
+            seen_rules.add(rule)
+
+    for value, line in _json_objects(data):
+        version = value.get("version")
+        keys = set(value)
+        if version == "flexgpu-hardware-profile/v1" or {
+            "captured_ns",
+            "gpus",
+            "recommendation",
+        }.issubset(keys):
+            add(
+                "local-hardware-profile",
+                "machine-local hardware profile content is not publishable",
+                line,
+            )
+        if version == "flexgpu-commissioning/v1":
+            add(
+                "local-commissioning-manifest",
+                "commissioning manifest content is not publishable",
+                line,
+            )
+        if version == "flexgpu-frame-state/v1":
+            add(
+                "local-frame-state",
+                "captured adapter frame-state content is not publishable",
+                line,
+            )
+        if version == "flexgpu-td-validation/v1":
+            add(
+                "local-validation-report",
+                "machine-local TouchDesigner validation report is not publishable",
+                line,
+            )
+        if version == "flexgpu-calibration/v1" and not _is_exact_public_calibration(
+            path, value
+        ):
+            add(
+                "local-calibration-profile",
+                "only the exact public synthetic calibration fixture is publishable",
+                line,
+            )
+        if _is_runtime_manifest(value):
+            add(
+                "local-runtime-manifest",
+                "machine-local runtime manifest content is not publishable",
+                line,
+            )
+
+        telemetry_record = {
+            "schema_version",
+            "timestamp",
+            "frame_time_ms",
+            "vram_used_mib",
+            "vram_total_mib",
+            "queue_age_ms",
+            "quality_level",
+        }.issubset(keys)
+        telemetry_summary = (
+            value.get("schema_version") == 1
+            and {"count", "duration_s", "metrics"}.issubset(keys)
+        )
+        nested_telemetry = isinstance(value.get("telemetry"), dict) and (
+            {"schema_version", "count", "metrics"}.issubset(
+                set(value["telemetry"])
+            )
+        )
+        if telemetry_record or telemetry_summary or nested_telemetry:
+            add(
+                "local-telemetry-artifact",
+                "captured performance telemetry is not publishable",
+                line,
+            )
+
+        artifact_type = str(value.get("artifact_type", "")).casefold()
+        if artifact_type in {
+            "support",
+            "support-bundle",
+            "support_bundle",
+            "diagnostic-support",
+        } or (
+            "diagnostics" in keys
+            and bool(keys.intersection({"hardware", "runtime", "plan", "environment"}))
+        ):
+            add(
+                "local-support-artifact",
+                "machine-local support or diagnostic bundle is not publishable",
+                line,
+            )
+        if artifact_type in {
+            "capture",
+            "recording",
+            "sensor-capture",
+            "audience-capture",
+        } or (
+            "capture_id" in keys
+            and bool(keys.intersection({"frames", "media", "rgb", "depth"}))
+        ):
+            add(
+                "local-capture-artifact",
+                "captured audience or sensor data is not publishable",
+                line,
+            )
+    return findings
+
+
 def _is_placeholder(value: bytes) -> bool:
     text = value.decode("utf-8", "ignore").strip().rstrip(",;}").strip()
     text = text.strip("\"'").strip().casefold()
@@ -347,21 +564,29 @@ def _is_placeholder(value: bytes) -> bool:
         return True
     if text in {"changeme", "not-a-secret", "redacted"}:
         return True
+    getter = _ENV_GETTER_EXPRESSION.fullmatch(text)
+    if getter is not None:
+        fallback = getter.group("fallback")
+        if fallback is None:
+            return True
+        normalized_fallback = fallback.strip().strip("\"'").strip().casefold()
+        if normalized_fallback in {"", "none", "null"}:
+            return True
+        return _is_placeholder(fallback.encode("utf-8"))
     explicit_prefixes = (
         "<",
         "${",
         "$env:",
         "[environment]::getenvironmentvariable",
         "get_secret(",
-        "getenv(",
+        "int(os.environ[",
+        "int(slot.get(",
         "keyring.",
-        "os.environ",
-        "os.getenv",
+        "os.environ[",
         "process.env",
         "replace_",
         "replace-with-",
         "secretmanager.",
-        "system.getenv",
         "vault.",
         "your_",
         "your-",
@@ -377,6 +602,7 @@ def content_findings(
     """Scan bytes without returning or logging any matched credential value."""
 
     findings: list[Finding] = []
+    findings.extend(_structured_content_findings(path, data, scope))
     for rule, message, pattern in _CONTENT_PATTERNS:
         match = pattern.search(data)
         if match is not None:
@@ -555,6 +781,8 @@ def history_entries(
     commits = _git(root, commit_arguments).decode("ascii", "strict").splitlines()
     seen: set[tuple[str, str]] = set()
     scanned_content: set[str] = set()
+    reusable_calibrations: dict[str, bytes] = {}
+    oversize_content: set[str] = set()
     for commit in commits:
         # Commit messages are public Git objects too. Scan the object without
         # ever displaying the message or any matched value.
@@ -578,7 +806,10 @@ def history_entries(
                 continue
             seen.add(identity)
             if object_id in scanned_content:
-                data: bytes | None = b""
+                if object_id in oversize_content:
+                    data: bytes | None = None
+                else:
+                    data = reusable_calibrations.get(object_id, b"")
             else:
                 size = int(_git(root, ["cat-file", "-s", object_id]).strip())
                 data = (
@@ -587,6 +818,19 @@ def history_entries(
                     else _git(root, ["cat-file", "blob", object_id])
                 )
                 scanned_content.add(object_id)
+                if data is None:
+                    oversize_content.add(object_id)
+                elif (
+                    len(data) <= 1024 * 1024
+                    and any(
+                        value.get("version") == "flexgpu-calibration/v1"
+                        for value, _ in _json_objects(data)
+                    )
+                ):
+                    # Calibration is the only structured artifact with a
+                    # path-sensitive public exception. Retain only these small
+                    # blobs so a renamed copy cannot hide behind de-duplication.
+                    reusable_calibrations[object_id] = data
             yield ScanEntry(path, data, "history:" + commit[:12])
 
 
@@ -724,6 +968,10 @@ def run_self_test() -> list[str]:
         b"api_key=${API_KEY}\n"
         b"client_secret=<provided-at-runtime>\n"
         b'token = os.environ["TOKEN"]\n'
+        b'token = int(os.getenv("TOKEN"))\n'
+        b'token = os.getenv("TOKEN", "${TOKEN}")\n'
+        b'token = os.environ.get("TOKEN", "CHANGEME")\n'
+        b"token = int(slot.get('fallback_counter', -1)) + 1\n"
         b"token=REPLACE_WITH_LOCAL_VALUE\n"
     )
     if content_findings(".env.example", safe_payload, "self-test"):
@@ -738,6 +986,54 @@ def run_self_test() -> list[str]:
     for index, payload in enumerate(real_values):
         if not content_findings("self-test.txt", payload, "self-test"):
             failures.append("real credential-like value was accepted: case " + str(index))
+    coerced_secret = b"pass" + b'word=int("' + b"12345678" + b'")'
+    if not content_findings("self-test.py", coerced_secret, "self-test"):
+        failures.append("int-wrapped credential-like value was accepted")
+    getter = b"get" + b"env"
+    getter_fallbacks = (
+        b"pass" + b"word=os." + getter + b'("PASSWORD", "actual-secret-123")',
+        b"pass" + b"word=int(os." + getter + b'("PASSWORD", "12345678"))',
+        b"pass" + b"word=os.environ.get(" + b'"PASSWORD", "fallback-secret")',
+    )
+    for index, payload in enumerate(getter_fallbacks):
+        if not content_findings("self-test.py", payload, "self-test"):
+            failures.append(
+                "environment getter fallback was accepted: case " + str(index)
+            )
+    structured_local = (
+        {"version": "flexgpu-hardware-profile/v1"},
+        {"version": "flexgpu-commissioning/v1"},
+        {"version": "flexgpu-frame-state/v1"},
+        {"version": "flexgpu-td-validation/v1"},
+        {
+            "version": 6,
+            "session_id": "local-session",
+            "state": "running",
+            "started_at": "local",
+            "updated_at": "local",
+            "config": "C:/private/show.json",
+            "planned_roles": ["world"],
+            "processes": [{"role": "world", "pid": 1234}],
+        },
+        {
+            "version": 999,
+            "session_id": "future-session",
+            "state": "running",
+            "started_at": "local",
+            "updated_at": "local",
+            "config": "C:/private/show.json",
+            "planned_roles": [],
+            "processes": [],
+        },
+        {"artifact_type": "support-bundle"},
+        {"artifact_type": "audience-capture"},
+    )
+    for index, value in enumerate(structured_local):
+        payload = json.dumps(value, separators=(",", ":")).encode("utf-8")
+        if not _structured_content_findings(
+            "renamed-public-note-%d.json" % index, payload, "self-test"
+        ):
+            failures.append("structured local artifact was accepted: case " + str(index))
     return failures
 
 

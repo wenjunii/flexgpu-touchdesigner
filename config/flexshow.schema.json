@@ -53,6 +53,7 @@
     "source": { "$ref": "#/$defs/source" },
     "sensor": { "$ref": "#/$defs/sensor" },
     "render": { "$ref": "#/$defs/render" },
+    "supervisor": { "$ref": "#/$defs/supervisor" },
     "runtime_dir": {
       "type": "string",
       "minLength": 1
@@ -132,6 +133,24 @@
               }
             ]
           }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "topology": { "const": "dual_local" },
+          "transport": {
+            "properties": { "type": { "const": "shared_memory" } },
+            "required": ["type"]
+          }
+        },
+        "required": ["topology", "transport"]
+      },
+      "then": {
+        "required": ["source"],
+        "properties": {
+          "source": { "required": ["frame_state_operator"] }
         }
       }
     },
@@ -300,6 +319,23 @@
         "sample_interval_frames": { "type": "integer", "minimum": 1, "maximum": 100000 },
         "flush_every": { "type": "integer", "minimum": 1, "maximum": 100000 },
         "include_operator_metrics": { "type": "boolean" }
+      }
+    },
+    "supervisor": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "heartbeat_timeout_ms": {
+          "type": "integer",
+          "minimum": 250,
+          "maximum": 600000
+        },
+        "readiness_timeout_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 600000
+        },
+        "require_ready": { "type": "boolean" }
       }
     },
     "source": {

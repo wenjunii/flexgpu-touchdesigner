@@ -10,7 +10,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from flexgpu.commissioning import demo_calibration, generate_demo_bundle  # noqa: E402
+from flexgpu.commissioning import (  # noqa: E402
+    CalibrationProfile,
+    demo_calibration,
+    generate_demo_bundle,
+)
 from flexgpu.config import validate_config  # noqa: E402
 from flexgpu.diagnostics import run_diagnostics  # noqa: E402
 
@@ -117,7 +121,9 @@ class AdapterDiagnosticTests(unittest.TestCase):
             bundle = root / "capture"
             generate_demo_bundle(bundle, frames=1, width=8, height=8)
             alternate = demo_calibration(8, 8).to_dict()
+            alternate.pop("calibration_digest")
             alternate["calibration_id"] = "different-world-epoch"
+            alternate = CalibrationProfile.from_mapping(alternate).to_dict()
             alternate_path = root / "alternate.json"
             alternate_path.write_text(json.dumps(alternate), encoding="utf-8")
             config = validate_config(
@@ -137,6 +143,61 @@ class AdapterDiagnosticTests(unittest.TestCase):
             checks = {item.code: item for item in run_diagnostics(config, ())}
             self.assertEqual(checks["source.calibration.consistency"].level, "fail")
             self.assertEqual(checks["calibration.shared_world"].level, "fail")
+
+    def test_same_calibration_id_with_different_content_digest_fails_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bundle = root / "capture"
+            generate_demo_bundle(bundle, frames=1, width=8, height=8)
+            alternate = demo_calibration(8, 8).to_dict()
+            alternate.pop("calibration_digest")
+            alternate["camera_to_world"][3] = 0.25
+            alternate = CalibrationProfile.from_mapping(alternate).to_dict()
+            alternate_path = root / "same-id-alternate-content.json"
+            alternate_path.write_text(json.dumps(alternate), encoding="utf-8")
+            config = validate_config(
+                profile(
+                    source={
+                        "mode": "replay",
+                        "replay_path": "capture/manifest.json",
+                        "calibration_path": alternate_path.name,
+                    },
+                    sensor={
+                        "mode": "simulated",
+                        "calibration_path": "capture/calibration.json",
+                    },
+                ),
+                str(root / "show.json"),
+            )
+            checks = {item.code: item for item in run_diagnostics(config, ())}
+            self.assertEqual(checks["source.calibration.contract"].level, "pass")
+            self.assertEqual(checks["source.calibration.consistency"].level, "fail")
+            self.assertEqual(checks["calibration.shared_world"].level, "fail")
+
+    def test_sensor_replay_digest_is_validated_against_sensor_calibration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bundle = root / "capture"
+            generate_demo_bundle(bundle, frames=1, width=8, height=8)
+            alternate = demo_calibration(8, 8).to_dict()
+            alternate.pop("calibration_digest")
+            alternate["sensor_to_world"][7] = 0.1
+            alternate = CalibrationProfile.from_mapping(alternate).to_dict()
+            alternate_path = root / "sensor-alternate.json"
+            alternate_path.write_text(json.dumps(alternate), encoding="utf-8")
+            config = validate_config(
+                profile(
+                    sensor={
+                        "mode": "replay",
+                        "replay_path": "capture/manifest.json",
+                        "calibration_path": alternate_path.name,
+                    }
+                ),
+                str(root / "show.json"),
+            )
+            checks = {item.code: item for item in run_diagnostics(config, ())}
+            self.assertEqual(checks["sensor.replay.contract"].level, "pass")
+            self.assertEqual(checks["sensor.calibration.consistency"].level, "fail")
 
 
 if __name__ == "__main__":

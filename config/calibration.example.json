@@ -1,6 +1,7 @@
 {
   "version": "flexgpu-calibration/v1",
   "calibration_id": "demo-camera-v1",
+  "calibration_digest": "4f5fea41488cdc35d9a73cdee73b9844d29d153a14d3cc1b9a29a85c587a88a7",
   "image": {
     "width": 64,
     "height": 36

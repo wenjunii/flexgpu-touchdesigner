@@ -298,7 +298,23 @@ if ($resolvedTopology -eq 'dual_local') {
         world = $worldProcess
     }
 }
-$transportType = if ($resolvedTopology -eq 'dual_local') { 'shared_memory' } else { 'local' }
+$transportType = if ($resolvedTopology -eq 'dual_local') { 'touch_tcp' } else { 'local' }
+$transport = [ordered]@{
+    type = $transportType
+    atlas_width = 1024
+    atlas_height = 512
+    atlas_fps = $atlasFps
+    atlas_port = 12000
+    control_port = 12001
+    heartbeat_port = 12002
+    heartbeat_timeout_ms = 2000
+}
+if ($resolvedTopology -eq 'dual_local') {
+    # Touch In exposes num_received_frames, which provides a usable turnkey
+    # transport-arrival counter. Shared Mem remains an advanced integration
+    # because it needs an explicit producer-backed frame-state sidecar.
+    $transport.peer_host = '127.0.0.1'
+}
 $configuration = [ordered]@{
     '$schema' = './flexshow.schema.json'
     topology = $resolvedTopology
@@ -310,17 +326,7 @@ $configuration = [ordered]@{
         render = [ordered]@{ uuid = $renderGpu.Uuid }
     }
     processes = $processes
-    transport = [ordered]@{
-        type = $transportType
-        segment_name = 'FlexShowWorldBus'
-        atlas_width = 1024
-        atlas_height = 512
-        atlas_fps = $atlasFps
-        atlas_port = 12000
-        control_port = 12001
-        heartbeat_port = 12002
-        heartbeat_timeout_ms = 2000
-    }
+    transport = $transport
     runtime_dir = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot '.flexgpu\local'))
 }
 

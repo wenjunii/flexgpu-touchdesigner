@@ -6,6 +6,8 @@ Reports read-only status for processes owned by the selected FlexShow manifest.
 Status never creates a runtime directory, acquires a mutation lock, starts a
 process, or sends a shutdown signal. It reports running, dead, identity-refused,
 and in-progress session states from the atomically replaced runtime manifest.
+Identity-matched apps are distinguished as alive (no ready heartbeat yet),
+ready, or stale/frozen without changing any process or heartbeat file.
 #>
 #Requires -Version 5.1
 [CmdletBinding()]

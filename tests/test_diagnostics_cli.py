@@ -20,8 +20,11 @@ from flexgpu.diagnostics import diagnostic_summary, run_diagnostics  # noqa: E40
 from flexgpu.models import GPUInfo, RuntimeControlError  # noqa: E402
 from flexgpu.planner import build_process_plan  # noqa: E402
 from flexgpu.runtime import (  # noqa: E402
+    MANIFEST_VERSION,
     MAX_RECOVERY_ATTEMPTS,
     _RuntimeMutationLock,
+    _config_identity,
+    _effective_environment_fingerprint,
     _environment_fingerprint,
     _inspect_process,
     _pid_alive,
@@ -189,7 +192,7 @@ class DiagnosticAndCliTests(unittest.TestCase):
                 self.assertEqual(record["pid"], os.getpid())
             self.assertFalse(os.path.exists(path))
 
-    def test_execute_start_reuses_matching_manifest_owned_process(self) -> None:
+    def test_execute_start_reuses_matching_current_manifest_owned_process(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config = usable_config(directory)
             plan = build_process_plan(config, [GPU])
@@ -201,9 +204,10 @@ class DiagnosticAndCliTests(unittest.TestCase):
             with open(path, "w", encoding="utf-8") as handle:
                 json.dump(
                     {
-                        "version": 2,
+                        "version": MANIFEST_VERSION,
                         "started_at": "test",
                         "config": config.source_path,
+                        "config_sha256": _config_identity(config),
                         "processes": [
                             {
                                 "role": process.role,
@@ -211,7 +215,9 @@ class DiagnosticAndCliTests(unittest.TestCase):
                                 "command": list(process.command),
                                 "cwd": process.cwd,
                                 "identity": identity,
-                                "environment_sha256": _environment_fingerprint(process.env),
+                                "environment_sha256": _effective_environment_fingerprint(
+                                    process
+                                ),
                             }
                         ],
                     },
@@ -221,9 +227,44 @@ class DiagnosticAndCliTests(unittest.TestCase):
             self.assertEqual(result["started"], [])
             self.assertEqual(result["reused"][0]["pid"], os.getpid())
             upgraded = json.loads(Path(path).read_text(encoding="utf-8"))
-            self.assertEqual(upgraded["version"], 3)
+            self.assertEqual(upgraded["version"], MANIFEST_VERSION)
             self.assertEqual(upgraded["state"], "running")
             self.assertTrue(upgraded["session_id"])
+
+    def test_execute_start_refuses_read_only_legacy_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = usable_config(directory)
+            plan = build_process_plan(config, [GPU])
+            process = plan.processes[0]
+            identity = _inspect_process(os.getpid())
+            self.assertIsNotNone(identity)
+            path = manifest_path(config)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "version": 3,
+                        "started_at": "test",
+                        "config": config.source_path,
+                        "processes": [
+                            {
+                                "role": process.role,
+                                "pid": os.getpid(),
+                                "command": list(process.command),
+                                "cwd": process.cwd,
+                                "identity": identity,
+                                "environment_sha256": _environment_fingerprint(
+                                    process.env
+                                ),
+                            }
+                        ],
+                    },
+                    handle,
+                )
+            with self.assertRaisesRegex(
+                RuntimeControlError, "legacy runtime manifest version 3 is read-only"
+            ):
+                start_plan(plan, config, execute=True)
 
     def test_execute_start_writes_incremental_session_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -262,7 +303,7 @@ class DiagnosticAndCliTests(unittest.TestCase):
                 started = True
                 self.assertTrue(result["session_id"])
                 manifest = json.loads(Path(manifest_path(config)).read_text(encoding="utf-8"))
-                self.assertEqual(manifest["version"], 3)
+                self.assertEqual(manifest["version"], MANIFEST_VERSION)
                 self.assertEqual(manifest["state"], "running")
                 self.assertIn("starting", states)
                 self.assertEqual(states[-1], "running")
@@ -284,9 +325,10 @@ class DiagnosticAndCliTests(unittest.TestCase):
             with open(path, "w", encoding="utf-8") as handle:
                 json.dump(
                     {
-                        "version": 2,
+                        "version": MANIFEST_VERSION,
                         "started_at": "test",
                         "config": config.source_path,
+                        "config_sha256": _config_identity(config),
                         "processes": [
                             {
                                 "role": process.role,
@@ -317,10 +359,11 @@ class DiagnosticAndCliTests(unittest.TestCase):
             with open(path, "w", encoding="utf-8") as handle:
                 json.dump(
                     {
-                        "version": 3,
+                        "version": MANIFEST_VERSION,
                         "session_id": "test-session",
                         "started_at": "test",
                         "config": config.source_path,
+                        "config_sha256": _config_identity(config),
                         "processes": [
                             {
                                 "role": process.role,
@@ -328,7 +371,9 @@ class DiagnosticAndCliTests(unittest.TestCase):
                                 "command": list(process.command),
                                 "cwd": os.path.join(directory, "different"),
                                 "identity": identity,
-                                "environment_sha256": _environment_fingerprint(process.env),
+                                "environment_sha256": _effective_environment_fingerprint(
+                                    process
+                                ),
                             }
                         ],
                     },
@@ -349,9 +394,10 @@ class DiagnosticAndCliTests(unittest.TestCase):
             with open(path, "w", encoding="utf-8") as handle:
                 json.dump(
                     {
-                        "version": 2,
+                        "version": MANIFEST_VERSION,
                         "started_at": "test",
                         "config": config.source_path,
+                        "config_sha256": _config_identity(config),
                         "processes": [
                             {
                                 "role": "world",
@@ -507,7 +553,9 @@ class DiagnosticAndCliTests(unittest.TestCase):
                 with open(path, "w", encoding="utf-8") as handle:
                     json.dump(
                         {
-                            "version": 2,
+                            "version": MANIFEST_VERSION,
+                            "config": config.source_path,
+                            "config_sha256": _config_identity(config),
                             "processes": [{"role": role, "pid": pid, "identity": {}}],
                         },
                         handle,
@@ -523,8 +571,9 @@ class DiagnosticAndCliTests(unittest.TestCase):
             with open(path, "w", encoding="utf-8") as handle:
                 json.dump(
                     {
-                        "version": 2,
+                        "version": MANIFEST_VERSION,
                         "config": os.path.join(directory, "another-show.json"),
+                        "config_sha256": _config_identity(config),
                         "processes": [],
                     },
                     handle,
@@ -548,11 +597,80 @@ class DiagnosticAndCliTests(unittest.TestCase):
                 "--completion",
                 "procedural",
                 "--tier",
-                "3080ti_16gb",
+                "custom",
                 "--execute",
+                "--wait-ready-ms",
+                "2500",
             ]
         )
         self.assertTrue(args.execute)
+        self.assertEqual(args.tier, "custom")
+        self.assertEqual(args.wait_ready_ms, 2500)
+
+    def test_powershell_wrappers_accept_and_forward_custom_tier(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        common = (root / "scripts" / "_FlexShow.Common.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("'5090', 'custom'", common)
+        self.assertIn("$arguments.Add('--tier')", common)
+        for name in (
+            "Start-FlexShow.ps1",
+            "Diagnose-FlexShow.ps1",
+            "Recover-FlexShow.ps1",
+        ):
+            with self.subTest(wrapper=name):
+                source = (root / "scripts" / name).read_text(encoding="utf-8")
+                self.assertIn("'5090', 'custom'", source)
+                self.assertIn("-Tier $Tier", source)
+
+    def test_cli_plan_never_prints_secret_env_or_argv_values(self) -> None:
+        sentinel = "CLI-SECRET-SENTINEL-77A9"
+        license_sentinel = "CLI-LICENSE-SENTINEL-55B7"
+        uri_password = "CLI-URI-PASSWORD-22C4"
+        service_auth_env_name = "SERVICE_" + "TOKEN"
+        paid_entitlement_env_name = "LICENSE_" + "KEY"
+        credentialed_endpoint = (
+            "https://user" + ":%s@example.invalid/hook"
+        ) % uri_password
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "show.json")
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "topology": "single",
+                        "processes": {
+                            "world": {
+                                "command": [
+                                    sys.executable,
+                                    "-c",
+                                    "pass",
+                                    "--api-key",
+                                    sentinel,
+                                ],
+                                "touchdesigner": False,
+                                "env": {
+                                    service_auth_env_name: sentinel,
+                                    paid_entitlement_env_name: license_sentinel,
+                                    "SERVICE_ENDPOINT": credentialed_endpoint,
+                                },
+                            }
+                        },
+                    },
+                    handle,
+                )
+            output = io.StringIO()
+            with mock.patch("flexgpu.cli.discover_nvidia_gpus", return_value=[GPU]):
+                with contextlib.redirect_stdout(output):
+                    status = main(
+                        ["plan", "--config", path, "--tier", "custom", "--json"]
+                    )
+            self.assertEqual(status, 0)
+            self.assertNotIn(sentinel, output.getvalue())
+            self.assertNotIn(license_sentinel, output.getvalue())
+            self.assertNotIn(uri_password, output.getvalue())
+            self.assertIn("<redacted>", output.getvalue())
+            self.assertEqual(json.loads(output.getvalue())["plan"]["tier"], "custom")
 
     def test_cli_start_defaults_to_non_mutating_dry_run(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

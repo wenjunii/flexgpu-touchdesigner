@@ -23,8 +23,8 @@
     }
   },
   "transport": {
-    "type": "shared_memory",
-    "segment_name": "FlexShowWorldBus",
+    "type": "touch_tcp",
+    "peer_host": "127.0.0.1",
     "atlas_width": 1024,
     "atlas_height": 512,
     "atlas_fps": 10,
