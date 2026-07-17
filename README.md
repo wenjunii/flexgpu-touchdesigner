@@ -349,7 +349,12 @@ application heartbeat is separate from the WorldBus network heartbeat.
 Readiness waiting requires a v1.2.1 `.toe` and a local profile whose process
 `project` points to it. The tracked synthetic canonical project contains the
 heartbeat writer; an older or privately modified project must be rebuilt before
-`require_ready` is enabled.
+`require_ready` is enabled. `-WaitReadyMs` also requires the selected live source
+to publish accepted frames; while StreamDiffusion is stopped, a healthy project
+correctly remains in `source_not_accepted` instead of reporting ready. Managed
+health inspects an external TOX root for propagated errors but treats its
+paid/private implementation as an opaque boundary, so it cannot exhaust the
+bounded operator scan.
 
 Private source and sensor components remain manual by default. To let the v1.2.1
 runtime load your future component from a local config, set
@@ -553,11 +558,22 @@ See [touchdesigner/README.md](touchdesigner/README.md) for building the starter
 - GPU depth-to-position, one-cook frame-aware temporal persistence, and bounded
   world-space interaction fields.
 - Thick/disocclusion fog, procedural backfill, and hybrid completion.
-- A metric point-render contract, installation preview, and parallel-camera
-  stereo desktop preview.
+- A metric point-render contract with aligned per-point color, soft circular
+  glyphs, stable density thinning, an installation preview, and a
+  parallel-camera stereo desktop preview.
 - Role-gated loopback/network Touch TCP RGB/raw-depth/mask/confidence transport,
   plus an explicit-metadata advanced Shared Mem path.
 - Live adaptive/telemetry bindings and disabled SHARP/Gaussian worker adapters.
+
+The visible render is intentionally sparser than the reconstruction texture.
+`WORKING_PIPELINE/POINT_RENDER/Pointkeep` defaults to `0.68`, so a stable
+random subset reads as discrete geometry instead of a nearly solid image
+sheet. `Pointsize` controls thickness and `Pointopacity` controls the sprite
+alpha. Each point carries its aligned source `Color`; the material uses a small
+circular alpha glyph rather than mapping the full generated image onto every
+point. Raise `Pointkeep` toward `1.0` only when the measured GPU budget and the
+desired visual density justify it. Fog/noise and procedural backfill remain
+separate completion layers around disocclusions.
 
 The scaffold is deliberately adapter-based. Connect the exact StreamDiffusionTD
 component, camera SDK, and VR component available on the show machine rather

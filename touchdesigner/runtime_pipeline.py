@@ -54,6 +54,17 @@ EXPERIMENTAL_ADAPTERS = {
 # strings at module level makes the GPU contracts reviewable without opening a
 # .toe and lets CI guard against accidental interface drift.
 SHADERS = {
+    "point_glyph": r'''// CONTRACT: sprite UV -> soft circular white glyph
+out vec4 fragColor;
+
+void main()
+{
+    vec2 pointUV = vUV.st * 2.0 - 1.0;
+    float radius = length(pointUV);
+    float alpha = 1.0 - smoothstep(0.72, 1.0, radius);
+    fragColor = TDOutputSwizzle(vec4(1.0, 1.0, 1.0, alpha));
+}
+''',
     "validity_combine": r'''// CONTRACT: MASK + CONFIDENCE -> CONFIDENCE
 out vec4 fragColor;
 
@@ -898,6 +909,20 @@ def _expr(node, names, expression):
     try:
         parameter.expr = expression
         return True
+    except Exception:
+        return False
+
+
+def _set_sequence_blocks(node, name, minimum):
+    """Ensure a built-in sequential parameter has at least ``minimum`` blocks."""
+
+    if node is None:
+        return False
+    try:
+        sequence = getattr(node.seq, name)
+        if sequence.numBlocks < minimum:
+            sequence.numBlocks = minimum
+        return sequence.numBlocks >= minimum
     except Exception:
         return False
 
@@ -2094,15 +2119,29 @@ def _build_point_render(parent, report):
     page = _page(comp, "Render")
     _custom(comp, page, "Int", "Maxpoints", 120000, label="Maximum Points")
     _custom(comp, page, "Float", "Pointsize", 3.0, label="Point Thickness")
+    _custom(comp, page, "Float", "Pointkeep", 0.68,
+            label="Visible Point Fraction")
+    _custom(comp, page, "Float", "Pointopacity", 0.92,
+            label="Point Opacity")
     _custom(comp, page, "Float", "Ipdmetres", 0.064,
             label="Preview Inter-Pupillary Distance (metres)")
 
     points = _ensure(comp, "toptoPOP", "POSITION_TO_POINTS", report, optional=True)
+    point_glyph = _glsl(comp, "POINT_GLYPH", "point_glyph", [], report, False)
+    _set_resolution(point_glyph, 64, 64)
     point_material = _ensure(comp, "pointspriteMAT", "POINT_SPRITE_MATERIAL",
                              report, optional=True)
     if point_material is not None:
         _expr(point_material, "pointsize", "parent().par.Pointsize")
-        _set(point_material, "colormap", color.path)
+        _expr(point_material, "alpha", "parent().par.Pointopacity")
+        _set(point_material, "colormap", point_glyph.path)
+        _set(point_material, "colormapfilter", "linear")
+        _set(point_material, "blending", True)
+        _set(point_material, "srcblend", "sa")
+        _set(point_material, "destblend", "omsa")
+        _set(point_material, "alphatest", True)
+        _set(point_material, "alphafunc", "greater")
+        _set(point_material, "alphathreshold", 0.01)
     render_center = None
     render_left = None
     render_right = None
@@ -2112,10 +2151,38 @@ def _build_point_render(parent, report):
         _set(points, "input0chanscope", "r g b a")
         _set(points, "input0attrscope", "P P P P")
         _set(points, "input0filter", "nearest")
+        # Store source color on each point. Using the full source image as the
+        # Point Sprite MAT texture makes every point a tiny textured square and
+        # visually collapses the cloud back into a dense image plate.
+        if _set_sequence_blocks(points, "input", 2):
+            _set(points, "input1top", color.path)
+            _set(points, "input1chanscope", "r g b a")
+            _set(points, "input1attrscope", "Color Color Color Color")
+            _set(points, "input1filter", "nearest")
         _set(points, "surftype", "points")
         _set(points, "texture", "point")
         _set(points, "maxpointsenable", True)
         _expr(points, "maxpoints", "parent().par.Maxpoints")
+
+        # TouchDesigner maps the Thin Random slider cubically. Convert the
+        # public linear keep fraction so 0.68 means approximately 68% of active
+        # points, using a stable seed to avoid frame-to-frame sparkle.
+        point_source = points
+        point_thin = _ensure(comp, "deletePOP", "VISIBLE_POINT_THIN", report,
+                             optional=True)
+        if point_thin is not None:
+            _connect(points, point_thin, report=report, replace=True)
+            _set(point_thin, "entity", "point")
+            _set(point_thin, "thinenabled", True)
+            _set(point_thin, "thininvert", False)
+            _expr(
+                point_thin,
+                "thinrandom",
+                "1.0 - pow(max(0.0, 1.0 - parent().par.Pointkeep.eval()), "
+                "1.0 / 3.0)",
+            )
+            _set(point_thin, "thinrandomseed", 19)
+            point_source = point_thin
 
         # Render Simple cannot translate a camera on X; its old eye path moved
         # and toe-in rotated the geometry, and Normalize Geo destroyed metres.
@@ -2128,7 +2195,7 @@ def _build_point_render(parent, report):
             selected = _ensure(geo, "selectPOP", "SELECT_POINT_WORLD", report,
                                optional=True)
             if selected is not None:
-                _set(selected, "pop", points.path)
+                _set(selected, "pop", point_source.path)
                 try:
                     selected.render = True
                     selected.display = True
@@ -2238,8 +2305,10 @@ def _build_point_render(parent, report):
     _out_top(comp, "OUT_RIGHT_EYE", right_switch, 2, report)
     _table(comp, "RENDER_PATH", [
         ["stage", "operator", "contract"],
-        ["unpack", "POSITION_TO_POINTS (TOP to POP)", "RGBA = Position and Active"],
-        ["thickness", "POINT_SPRITE_MATERIAL", "Pointsize parameter; 3 px default"],
+        ["unpack", "POSITION_TO_POINTS (TOP to POP)", "P + active plus aligned per-point Color"],
+        ["spacing", "VISIBLE_POINT_THIN (Delete POP)", "stable random keep; 68% default"],
+        ["glyph", "POINT_GLYPH + POINT_SPRITE_MATERIAL", "soft circular alpha; no source-image sprite texture"],
+        ["thickness", "POINT_SPRITE_MATERIAL", "Pointsize and Pointopacity controls"],
         ["metric geometry", "POINT_WORLD_GEO/SELECT_POINT_WORLD", "no normalization; XYZ remain metres"],
         ["center", "METRIC_RENDER_CENTER + CAMERA_CENTER_METRIC", TOP_CONTRACTS["INSTALLATION"]],
         ["stereo", "METRIC_RENDER_LEFT/RIGHT + parallel Camera COMPs", "+/- Ipdmetres/2; no toe-in"],

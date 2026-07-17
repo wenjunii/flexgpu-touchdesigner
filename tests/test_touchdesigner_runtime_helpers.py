@@ -1909,6 +1909,36 @@ class TouchDesignerRuntimeHelperTests(unittest.TestCase):
         self.assertEqual(len(nodes), 512)
         self.assertTrue(truncated)
 
+    def test_readiness_inspects_external_tox_root_without_private_internals(self) -> None:
+        helpers = load_helpers()
+        private_child = FakeNode(
+            "/project1/flexgpu/PRIVATE_TOX/private_child",
+            operator_errors=["private implementation detail"],
+        )
+        external_root = FakeNode(
+            "/project1/flexgpu/PRIVATE_TOX",
+            externaltox="C:/paid/private-component.tox",
+            operator_errors=["propagated external TOX error"],
+        )
+        external_root.children = [private_child]
+        managed = FakeNode("/project1/flexgpu/MANAGED")
+        root = FakeRoot({})
+        root.children = [external_root, managed]
+
+        nodes, truncated = helpers["_bounded_managed_nodes"](root)
+        self.assertFalse(truncated)
+        self.assertEqual(
+            {node.path for node in nodes},
+            {root.path, managed.path, external_root.path},
+        )
+
+        health = helpers["_inspect_readiness_health"](
+            root, {"state": {}}, 30.0, force=True
+        )
+        self.assertEqual(health["operator_error_count"], 1)
+        self.assertEqual(external_root.error_inspections, 1)
+        self.assertEqual(private_child.error_inspections, 0)
+
     def test_readiness_requires_an_observed_output_cook_advance_when_available(self) -> None:
         helpers = load_helpers()
         root = complete_runtime_root()

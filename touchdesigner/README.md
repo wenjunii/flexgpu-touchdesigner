@@ -300,7 +300,7 @@ receiver-cook DAT/CHOP is not valid producer metadata.
 | `WORKING_PIPELINE/SENSOR_INTERACTION/DEPTH_SENSOR_ADAPTER/DEPTH_ANYTHING_BRIDGE` | Default-off replaceable no-RGB depth/mask/confidence receiver for temporary webcam interaction rehearsal |
 | `WORKING_PIPELINE/TEMPORAL_WORLD` | One-cook frame-aware confidence/age lifecycle plus dt-integrated position/color feedback and automatic contract resets |
 | `WORKING_PIPELINE/COMPLETION` | Working fog, procedural and hybrid GLSL branches |
-| `WORKING_PIPELINE/POINT_RENDER` | Metric TOP-to-POP point renderer, center/parallel-eye cameras, and honest mono fallback |
+| `WORKING_PIPELINE/POINT_RENDER` | Metric TOP-to-POP point renderer with per-point color, round glyphs, stable thinning, center/parallel-eye cameras, and honest mono fallback |
 | `WORKING_PIPELINE/INSTALLATION_OUTPUT` | Center render and view-space edge-fog development preview |
 | `WORKING_PIPELINE/STEREO_PREVIEW` | Per-eye view-space completion plus side-by-side desktop preview |
 | `WORKING_PIPELINE/TELEMETRY` | Info CHOP metrics used by live telemetry and adaptive monitoring |
@@ -369,7 +369,10 @@ health under the ignored runtime directory. This is separate from WorldBus
 network heartbeat traffic.
 Readiness waits therefore require a v1.2.1 project. The tracked synthetic
 canonical `.toe` satisfies this heartbeat contract; rebuild older or privately
-modified projects before enabling readiness waits.
+modified projects before enabling readiness waits. A wait also requires accepted
+frames from the selected live source; with StreamDiffusion stopped,
+`source_not_accepted` is expected. The managed-health walk checks errors
+propagated to an external TOX root without traversing paid/private internals.
 
 Explicit environment values override `FLEXGPU_CONFIG`. The helper updates
 `CONFIG/runtime_state`, endpoint activity, source/receiver route switches and
@@ -464,6 +467,15 @@ preview IPD, with no toe-in and no world translation. The pre-2025 fallback is
 deliberately mono rather than fake stereo. None of these development cameras
 consume headset pose or runtime projection matrices, and the SBS texture is not
 a compositor submission.
+
+`POINT_RENDER/POSITION_TO_POINTS` also samples the aligned color TOP into the
+POP `Color` attribute. `POINT_SPRITE_MATERIAL` therefore uses per-point color
+and a managed 64-square circular alpha glyph instead of applying the entire
+generated image to every sprite. `VISIBLE_POINT_THIN` uses a fixed seed and a
+linear `Pointkeep` control (`0.68` by default) to preserve visible gaps without
+temporal sparkle. Tune `Pointsize`, `Pointopacity`, and `Pointkeep` on the
+`POINT_RENDER` component. The fog/noise and procedural backfill passes remain
+downstream and fill disocclusions without replacing the clean point render.
 
 Sensor interaction samples a bounded 8x8 set of calibrated world-space
 occupancy primitives for each generated point. Mask and confidence are applied

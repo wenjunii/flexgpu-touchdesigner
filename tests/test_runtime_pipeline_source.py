@@ -35,6 +35,7 @@ class RuntimePipelineSourceTests(unittest.TestCase):
 
     def test_shader_names_are_stable_and_complete(self) -> None:
         expected = {
+            "point_glyph",
             "validity_combine",
             "depth_to_position",
             "sensor_position",
@@ -86,6 +87,9 @@ class RuntimePipelineSourceTests(unittest.TestCase):
                 int(value) for value in re.findall(r"sTD2DInputs\[(\d+)\]", shader)
             ]
             with self.subTest(shader=name):
+                if name == "point_glyph":
+                    self.assertFalse(indices)
+                    continue
                 self.assertTrue(indices)
                 self.assertLessEqual(max(indices), 2)
         self.assertIn("exceeds the three-input limit", self.source)
@@ -125,7 +129,10 @@ class RuntimePipelineSourceTests(unittest.TestCase):
                 self.assertIn("out vec4 fragColor;", shader)
                 self.assertIn("void main()", shader)
                 self.assertIn("TDOutputSwizzle", shader)
-                self.assertIn("sTD2DInputs", shader)
+                if name == "point_glyph":
+                    self.assertNotIn("sTD2DInputs", shader)
+                else:
+                    self.assertIn("sTD2DInputs", shader)
 
     def test_position_and_persistence_contracts_keep_active_alpha(self) -> None:
         depth = self.module.SHADERS["depth_to_position"]
@@ -510,7 +517,7 @@ class RuntimePipelineSourceTests(unittest.TestCase):
     def test_actual_point_render_and_visible_outputs_are_built(self) -> None:
         for operator_name in (
             "toptoPOP", "rendersimpleTOP", "pointspriteMAT", "geometryCOMP",
-            "selectPOP", "cameraCOMP", "renderTOP",
+            "selectPOP", "cameraCOMP", "renderTOP", "deletePOP",
         ):
             self.assertIn('"%s"' % operator_name, self.source)
         for output in ("OUT_INSTALLATION", "OUT_LEFT_EYE", "OUT_RIGHT_EYE",
@@ -518,8 +525,16 @@ class RuntimePipelineSourceTests(unittest.TestCase):
             self.assertIn(output, self.source)
         self.assertIn('"rgba", "pactive"', self.source)
         self.assertIn("POSITION_TO_POINTS", self.source)
+        self.assertIn("VISIBLE_POINT_THIN", self.source)
+        self.assertIn("POINT_GLYPH", self.source)
         self.assertIn("POINT_SPRITE_MATERIAL", self.source)
         self.assertIn('"Pointsize", 3.0', self.source)
+        self.assertIn('"Pointkeep", 0.68', self.source)
+        self.assertIn('"Pointopacity", 0.92', self.source)
+        self.assertIn('_set_sequence_blocks(points, "input", 2)', self.source)
+        self.assertIn('"input1attrscope", "Color Color Color Color"', self.source)
+        self.assertIn('"thinrandomseed", 19', self.source)
+        self.assertIn("1.0 - parent().par.Pointkeep.eval()", self.source)
         self.assertIn('"overridemat", point_material.path', self.source)
         self.assertIn('"normalizegeo", False', self.source)
         self.assertNotIn('"normalizegeo", True', self.source)
@@ -527,6 +542,16 @@ class RuntimePipelineSourceTests(unittest.TestCase):
         self.assertIn('_set(camera, "ipdshift", 0.0)', self.source)
         self.assertNotIn("eye_offset * -35.0", self.source)
         self.assertIn("HEADSET_ADAPTER_CONTRACT", self.source)
+
+    def test_point_glyph_is_round_soft_and_separate_from_scene_color(self) -> None:
+        glyph = self.module.SHADERS["point_glyph"]
+        self.assertIn("length(pointUV)", glyph)
+        self.assertIn("smoothstep(0.72, 1.0, radius)", glyph)
+        self.assertIn("vec4(1.0, 1.0, 1.0, alpha)", glyph)
+        self.assertIn('_set(point_material, "colormap", point_glyph.path)', self.source)
+        self.assertNotIn('_set(point_material, "colormap", color.path)', self.source)
+        self.assertIn('_set(point_material, "alphatest", True)', self.source)
+        self.assertIn('_set(point_material, "blending", True)', self.source)
 
     def test_explicit_resolutions_ignore_the_host_global_multiplier(self) -> None:
         self.assertIn('_set(node, "resmult", False)', self.source)

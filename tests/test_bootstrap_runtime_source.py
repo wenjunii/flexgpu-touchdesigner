@@ -117,6 +117,8 @@ class BootstrapRuntimeSourceTests(unittest.TestCase):
             "build_identity_mismatch", "config_identity_mismatch",
             "def _update_readiness_progress",
             "def _inspect_readiness_health", "READINESS_MANAGED_OPERATOR_LIMIT",
+            "def _readiness_external_tox_path",
+            "node is not root_comp and _readiness_external_tox_path(node)",
             "managed_operator_errors", "managed_shader_compile_errors",
             "required_output_dimensions_invalid", "managed_health",
             "def _required_readiness_outputs", "required_output_progress",

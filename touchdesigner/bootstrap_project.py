@@ -58,8 +58,9 @@ SHA256_PATTERN = re.compile(r'^[0-9a-f]{64}$')
 TRANSFORM_TOLERANCE = 1e-4
 
 # Readiness inspection runs on the heartbeat path, so keep both its cadence and
-# result size bounded. The generated network is well below this operator limit;
-# exceeding it makes readiness fail closed instead of silently skipping nodes.
+# result size bounded. External TOX roots are inspected for propagated errors,
+# but their private internals are opaque to this scan; a paid or user-supplied
+# component must not consume the entire managed-health budget.
 READINESS_HEALTH_INTERVAL_SECONDS = 0.5
 READINESS_MANAGED_OPERATOR_LIMIT = 512
 READINESS_ISSUE_LIMIT = 8
@@ -2698,6 +2699,21 @@ def _readiness_messages(node, method_name):
             break
     return messages, None
 
+def _readiness_external_tox_path(node):
+    try:
+        external = getattr(getattr(node, 'par', None), 'externaltox', None)
+    except Exception:
+        return ''
+    if external is None:
+        return ''
+    try:
+        return str(external.eval()).strip()
+    except Exception:
+        try:
+            return str(external).strip()
+        except Exception:
+            return ''
+
 def _bounded_managed_nodes(root_comp, limit=READINESS_MANAGED_OPERATOR_LIMIT):
     pending = [root_comp]
     seen = set()
@@ -2711,6 +2727,11 @@ def _bounded_managed_nodes(root_comp, limit=READINESS_MANAGED_OPERATOR_LIMIT):
             continue
         seen.add(key)
         nodes.append(node)
+        # The root COMP still exposes propagated errors from an external TOX.
+        # Descending into its implementation would make readiness depend on the
+        # size and licensing details of private third-party components.
+        if node is not root_comp and _readiness_external_tox_path(node):
+            continue
         try:
             iterator = iter(node.children)
         except Exception:

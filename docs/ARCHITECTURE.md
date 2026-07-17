@@ -129,6 +129,12 @@ missing; hybrid blends procedural volume with fog in those holes. Fog can hide
 seams and backfill can invent plausible shape, but neither recovers ground
 truth.
 
+The point renderer keeps these concerns separate. The TOP-to-POP conversion
+stores aligned image color as a point `Color` attribute, applies a circular
+alpha glyph, and uses fixed-seed thinning to leave legible gaps. Fog and
+procedural completion are composited afterward; they do not turn the generated
+image into the point-sprite texture.
+
 Sensor mask/confidence are applied once after rigid sensor-to-world calibration.
 Each generated point samples a bounded 8x8 set of sensor occupancy primitives
 in shared-world metres, and force in metres/second is integrated with a clamped
@@ -242,7 +248,11 @@ launched child. This remains operator-authorized supervision, not an autonomous
 service, and application readiness is separate from WorldBus network heartbeat.
 Required readiness applies to a v1.2.1 project. The tracked synthetic canonical
 `.toe` publishes this heartbeat; older or privately modified projects must be
-rebuilt before readiness is required.
+rebuilt before readiness is required. Readiness also requires accepted live
+source frames, so a stopped StreamDiffusion source intentionally reports
+`source_not_accepted`. External TOX roots remain visible to propagated-error
+inspection, while their paid/private internals are opaque to the bounded
+managed-operator traversal.
 
 Config cannot override launcher-owned `CUDA_*`/`FLEXGPU_*` values. Secret-like
 environment and command values are redacted from public plans, diagnostics,
