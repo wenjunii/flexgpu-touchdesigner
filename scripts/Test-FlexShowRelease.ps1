@@ -114,6 +114,11 @@ function Test-InitializerSmoke {
     Write-Host '[FlexShow release] Smoke-test machine initializer'
     $fakeSmi = Join-Path $TemporaryDirectory 'nvidia-smi.cmd'
     $fakeTouchDesigner = Join-Path $TemporaryDirectory 'TouchDesigner.exe'
+    $fakeProgramFiles = Join-Path $TemporaryDirectory 'Program Files'
+    $fakeTouchDesignerStandard = Join-Path $fakeProgramFiles 'Derivative\TouchDesigner\bin\TouchDesigner.exe'
+    $fakeTouchDesigner32820 = Join-Path $fakeProgramFiles 'Derivative\TouchDesigner.2025.32820\bin\TouchDesigner.exe'
+    $fakeTouchDesigner33060 = Join-Path $fakeProgramFiles 'Derivative\TouchDesigner.2025.33060\bin\TouchDesigner.exe'
+    $fakeProject = Join-Path $TemporaryDirectory 'FlexShow-candidate-local.toe'
     $smiOutput = @'
 @echo off
 echo 0, GPU-low, 00000000:01:00.0, NVIDIA GeForce RTX 3080 Ti Laptop GPU, 16384, 555.10
@@ -125,6 +130,192 @@ echo 1, GPU-high, 00000000:02:00.0, NVIDIA GeForce RTX 4090, 24564, 555.10
         [System.Text.Encoding]::ASCII
     )
     [System.IO.File]::WriteAllBytes($fakeTouchDesigner, [byte[]]@())
+    foreach ($fakeVersionedExecutable in @(
+        $fakeTouchDesignerStandard,
+        $fakeTouchDesigner32820,
+        $fakeTouchDesigner33060
+    )) {
+        New-Item -ItemType Directory -Path ([System.IO.Path]::GetDirectoryName($fakeVersionedExecutable)) -Force | Out-Null
+        [System.IO.File]::WriteAllBytes($fakeVersionedExecutable, [byte[]]@())
+    }
+    [System.IO.File]::WriteAllBytes($fakeProject, [byte[]]@())
+
+    Write-Host '[FlexShow release] Smoke-test TouchDesigner version inventory and selectors'
+    $previousProgramFiles = $env:ProgramFiles
+    $previousPath = $env:PATH
+    try {
+        $env:ProgramFiles = $fakeProgramFiles
+        $env:PATH = ''
+        $inventoryOutput = & $initializer -ListTouchDesigner -Json
+        $inventoryValue = @($inventoryOutput)[-1] | ConvertFrom-Json
+        $inventory = @($inventoryValue | ForEach-Object { $_ })
+        if (@($inventory | Where-Object { $_.version -eq '2025.32820' }).Count -ne 1 -or
+            @($inventory | Where-Object { $_.version -eq '2025.33060' }).Count -ne 1) {
+            throw 'Initializer did not report both synthetic TouchDesigner versions.'
+        }
+
+        $defaultPreview = & $initializer `
+            -Topology auto `
+            -NvidiaSmi $fakeSmi `
+            -Output $LocalConfig `
+            -WhatIf `
+            -Json
+        $defaultResult = @($defaultPreview)[-1] | ConvertFrom-Json
+        if ($defaultResult.touchdesigner_selection -ne 'validated_baseline' -or
+            $defaultResult.touchdesigner_version -ne '2025.32820' -or
+            -not [string]::Equals(
+                [System.IO.Path]::GetFullPath($defaultResult.touchdesigner),
+                [System.IO.Path]::GetFullPath($fakeTouchDesigner32820),
+                [System.StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw 'Initializer did not preserve the validated TouchDesigner baseline.'
+        }
+
+        $disabledBaseline = "$fakeTouchDesigner32820.disabled"
+        Move-Item -LiteralPath $fakeTouchDesigner32820 -Destination $disabledBaseline
+        try {
+            $candidateOnlyRejected = $false
+            try {
+                & $initializer `
+                    -Topology auto `
+                    -NvidiaSmi $fakeSmi `
+                    -Output $LocalConfig `
+                    -WhatIf `
+                    -Json *> $null
+            }
+            catch {
+                if ($_.Exception.Message -like '*validated TouchDesigner baseline*not found uniquely*') {
+                    $candidateOnlyRejected = $true
+                }
+                else {
+                    throw
+                }
+            }
+            if (-not $candidateOnlyRejected) {
+                throw 'Initializer automatically selected an unvalidated TouchDesigner candidate.'
+            }
+        }
+        finally {
+            Move-Item -LiteralPath $disabledBaseline -Destination $fakeTouchDesigner32820
+        }
+
+        foreach ($versionCase in @(
+            [pscustomobject]@{ Version = '2025.32820'; Executable = $fakeTouchDesigner32820 },
+            [pscustomobject]@{ Version = '2025.33060'; Executable = $fakeTouchDesigner33060 }
+        )) {
+            $versionPreview = & $initializer `
+                -Topology auto `
+                -NvidiaSmi $fakeSmi `
+                -TouchDesignerVersion $versionCase.Version `
+                -Output $LocalConfig `
+                -WhatIf `
+                -Json
+            $versionResult = @($versionPreview)[-1] | ConvertFrom-Json
+            if ($versionResult.touchdesigner_version -ne $versionCase.Version -or
+                $versionResult.touchdesigner_selection -ne 'explicit_version' -or
+                -not [string]::Equals(
+                    [System.IO.Path]::GetFullPath($versionResult.touchdesigner),
+                    [System.IO.Path]::GetFullPath($versionCase.Executable),
+                    [System.StringComparison]::OrdinalIgnoreCase
+                )) {
+                throw "Initializer selected the wrong TouchDesigner executable for $($versionCase.Version)."
+            }
+            if (Test-Path -LiteralPath $LocalConfig) {
+                throw 'TouchDesigner version selector preview unexpectedly wrote a local configuration.'
+            }
+
+            $versionWriteOutput = & $initializer `
+                -Topology auto `
+                -NvidiaSmi $fakeSmi `
+                -TouchDesignerVersion $versionCase.Version `
+                -Project $fakeProject `
+                -Output $LocalConfig `
+                -Force `
+                -Json
+            $versionWriteResult = @($versionWriteOutput)[-1] | ConvertFrom-Json
+            $versionWritten = Get-Content -LiteralPath $LocalConfig -Raw | ConvertFrom-Json
+            if (-not [string]::Equals(
+                [System.IO.Path]::GetFullPath($versionWriteResult.project),
+                [System.IO.Path]::GetFullPath($fakeProject),
+                [System.StringComparison]::OrdinalIgnoreCase
+            )) {
+                throw "Initializer did not report the selected project for $($versionCase.Version)."
+            }
+            foreach ($processProperty in $versionWritten.processes.psobject.Properties) {
+                if (-not [string]::Equals(
+                    [System.IO.Path]::GetFullPath($processProperty.Value.executable),
+                    [System.IO.Path]::GetFullPath($versionCase.Executable),
+                    [System.StringComparison]::OrdinalIgnoreCase
+                ) -or -not [string]::Equals(
+                    [System.IO.Path]::GetFullPath($processProperty.Value.project),
+                    [System.IO.Path]::GetFullPath($fakeProject),
+                    [System.StringComparison]::OrdinalIgnoreCase
+                )) {
+                    throw "Initializer wrote the wrong executable or project for $($versionCase.Version)."
+                }
+            }
+            Remove-Item -LiteralPath $LocalConfig -Force
+        }
+
+        $mutualExclusionRejected = $false
+        try {
+            & $initializer `
+                -Topology auto `
+                -NvidiaSmi $fakeSmi `
+                -TouchDesignerExe $fakeTouchDesigner32820 `
+                -TouchDesignerVersion '2025.32820' `
+                -Output $LocalConfig `
+                -WhatIf `
+                -Json *> $null
+        }
+        catch {
+            if ($_.Exception.Message -like '*cannot be combined*') {
+                $mutualExclusionRejected = $true
+            }
+            else {
+                throw
+            }
+        }
+        if (-not $mutualExclusionRejected) {
+            throw 'Initializer accepted conflicting TouchDesigner selectors.'
+        }
+
+        $unknownVersionRejected = $false
+        try {
+            & $initializer `
+                -Topology auto `
+                -NvidiaSmi $fakeSmi `
+                -TouchDesignerVersion '2025.99999' `
+                -Output $LocalConfig `
+                -WhatIf `
+                -Json *> $null
+        }
+        catch {
+            if ($_.Exception.Message -like '*was not found*') {
+                $unknownVersionRejected = $true
+            }
+            else {
+                throw
+            }
+        }
+        if (-not $unknownVersionRejected) {
+            throw 'Initializer accepted an unavailable TouchDesigner version.'
+        }
+    }
+    finally {
+        if ($null -eq $previousProgramFiles) {
+            Remove-Item Env:ProgramFiles -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:ProgramFiles = $previousProgramFiles
+        }
+        if ($null -eq $previousPath) {
+            Remove-Item Env:PATH -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:PATH = $previousPath
+        }
+    }
 
     $preview = & $initializer `
         -Topology auto `
@@ -164,6 +355,8 @@ echo 1, GPU-high, 00000000:02:00.0, NVIDIA GeForce RTX 4090, 24564, 555.10
         $written.tier -ne $result.tier -or
         $written.gpu.ai.uuid -ne $result.ai_gpu.uuid -or
         $written.gpu.render.uuid -ne $result.render_gpu.uuid -or
+        $written.processes.ai.executable -ne $fakeTouchDesigner -or
+        $written.processes.world.executable -ne $fakeTouchDesigner -or
         $written.transport.type -ne 'touch_tcp') {
         throw 'Written initializer configuration does not match its result.'
     }

@@ -28,9 +28,10 @@ headset submission, SHARP, and Gaussian inference are user-supplied adapters.
 
 - Windows 10/11 with PowerShell 5.1 or newer.
 - An NVIDIA driver that provides `nvidia-smi`.
-- TouchDesigner 2025. The v1.2.1 builder sources target the 2025 API; rebuild,
-  validate, and inspect a local project before using the new runtime foundation
-  in a show.
+- TouchDesigner 2025. Build 2025.32820 is the current live-validated baseline.
+  Build 2025.33060 may be installed side-by-side, but remains a compatibility
+  candidate until a copied local project passes the in-process validator and
+  hardware smoke/soak checks. Never upgrade the only show copy in place.
 - Python 3.10 or newer, or TouchDesigner's bundled Python runtime. JSON works
   on 3.10; TOML configuration requires a runtime with `tomllib` (Python 3.11+).
 
@@ -55,6 +56,7 @@ touchdesigner/       TD 2025 bootstrap source and integration guide
 | GPU discovery, tier selection, process planning and affinity | Implemented and tested |
 | Safe preview/start/identity-verified stop | Implemented and tested on Windows |
 | `FlexShow.toe` component layout and runtime parameters | Tracked v1.2.1 synthetic starter rebuilt in TouchDesigner 2025.32820 |
+| TouchDesigner build compatibility | 2025.32820 live-validated and retained as the show baseline; 2025.33060 is selectable side-by-side but not yet accepted for show use |
 | Calibrated depth, frame-aware temporal lifecycle, metric interaction, fog and procedural backfill | Implemented and synthetic combined-mode validated in TouchDesigner; physical calibration is still required |
 | Dual-role direct image bridge | Atomic RGBA32F RGB/raw-depth/mask/confidence atlas; loopback Touch TCP is turnkey for two local GPUs, while Shared Mem is an explicit-metadata advanced path |
 | WorldBus validation, newest-frame queue, heartbeat and replay | Dependency-free full-contract Python reference; distinct from the built-in image-only bridge |
@@ -112,16 +114,27 @@ let the initializer discover NVIDIA GPUs and TouchDesigner, then write a
 gitignored UUID-based preset:
 
 ```powershell
+.\scripts\Initialize-FlexShow.ps1 -ListTouchDesigner
 .\scripts\Initialize-FlexShow.ps1 -ListOnly
 .\scripts\Initialize-FlexShow.ps1 `
   -Topology auto `
   -Experience installation `
-  -Completion hybrid
+  -Completion hybrid `
+  -TouchDesignerVersion 2025.32820
 ```
 
 `auto` chooses `single` for one NVIDIA GPU and `dual_local` for two or more.
 Use `-AIIndex` and `-RenderIndex` to override its assignment, `-Output` for a
 different `config/local-*.json` name, and `-Force` to replace that local file.
+`-ListTouchDesigner` is read-only and reports product versions, paths, and the
+deterministic default without probing GPUs. `-TouchDesignerVersion` selects one
+exact installed build; `-TouchDesignerExe` selects one exact path. They cannot
+be combined. With neither selector, the initializer chooses the unique validated
+2025.32820 baseline; on the current machine that is the standard
+`C:\Program Files\Derivative\TouchDesigner\bin\TouchDesigner.exe`. It fails
+closed when that build is absent or ambiguous, so 2025.33060 cannot silently
+become the show default. `-Project` selects one existing `.toe`; relative paths
+resolve from the repository root.
 The generated dual-local profile uses loopback Touch TCP on `127.0.0.1`, as do
 the shipped dual-local presets. The initializer does not create two-computer
 network profiles.
@@ -159,6 +172,63 @@ manifest:
 ```powershell
 .\scripts\Stop-FlexShow.ps1 -Config .\config\presets\local-show.json -Stop
 ```
+
+### Side-by-side TouchDesigner candidate test
+
+Keep the accepted 2025.32820 configuration and working `.toe` untouched. The
+example assumes the accepted ignored project is `projects/FlexShow-local.toe`;
+change that first path to your real accepted show copy. Create separate ignored
+baseline/candidate configs and guard the copy destination explicitly, so an
+existing candidate is never overwritten:
+
+```powershell
+.\scripts\Initialize-FlexShow.ps1 -ListTouchDesigner
+$baselineProject = (Resolve-Path .\projects\FlexShow-local.toe).Path
+$candidateProject = Join-Path (Resolve-Path .\projects).Path 'FlexShow-td33060-candidate-local.toe'
+if (Test-Path -LiteralPath $candidateProject) {
+  throw "Candidate project already exists: $candidateProject"
+}
+Copy-Item -LiteralPath $baselineProject -Destination $candidateProject -ErrorAction Stop
+
+.\scripts\Initialize-FlexShow.ps1 `
+  -Topology single `
+  -Experience combined `
+  -Completion hybrid `
+  -TouchDesignerVersion 2025.32820 `
+  -Project $baselineProject `
+  -Output .\config\local-td32820-baseline.json
+.\scripts\Initialize-FlexShow.ps1 `
+  -Topology single `
+  -Experience combined `
+  -Completion hybrid `
+  -TouchDesignerVersion 2025.33060 `
+  -Project $candidateProject `
+  -Output .\config\local-td33060-candidate.json
+.\scripts\Diagnose-FlexShow.ps1 -Config .\config\local-td33060-candidate.json
+.\scripts\Start-FlexShow.ps1 -Config .\config\local-td33060-candidate.json
+```
+
+Those commands copy/write local files but do not launch TouchDesigner. Confirm
+that the preview names the candidate executable and copied candidate `.toe`
+before adding `-Start`; never save the candidate over the 2025.32820 show copy.
+Run the timestamped in-process validator in 2025.33060, exercise MoGe
+active/stale behavior and sensor fail-closed output, then complete a GPU/thermal
+soak. Source tests and GitHub CI do not establish TouchDesigner binary
+compatibility.
+
+If the candidate was started, save any work and return to 2025.32820 explicitly:
+
+```powershell
+.\scripts\Stop-FlexShow.ps1 -Config .\config\local-td33060-candidate.json -Stop
+.\scripts\Diagnose-FlexShow.ps1 -Config .\config\local-td32820-baseline.json
+.\scripts\Start-FlexShow.ps1 -Config .\config\local-td32820-baseline.json
+```
+
+The final command is still preview-only. Add `-Start` only after its resolved
+2025.32820 path and plan are correct. Both local configs and copied working
+`.toe` files stay ignored. Every `.tox` and every `.toe` except the manually
+inspected canonical `projects/FlexShow.toe` must remain outside public sync,
+including private StreamDiffusionTD and paid Depth Anything components.
 
 The tracked `projects/FlexShow.toe` contains the public v1.2.1 synthetic
 RGB/depth and audience-interaction starter. Build an ignored local copy before

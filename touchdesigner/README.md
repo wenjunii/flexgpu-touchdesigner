@@ -27,6 +27,41 @@ The builder is safe to run in an existing project:
 Bootstrap-owned tables and Text DATs are rewritten when the builder runs. Keep
 custom code in separate operators rather than editing generated DAT contents.
 
+## Validated and candidate TouchDesigner builds
+
+TouchDesigner 2025.32820 is the accepted show baseline. TouchDesigner
+2025.33060 may remain installed side-by-side, but it is a compatibility
+candidate until it passes live validation. Inventory the installations or pin
+one exact build when creating a local config. After saving the accepted ignored
+project described below, open PowerShell in the repository root and run:
+
+```powershell
+.\scripts\Initialize-FlexShow.ps1 -ListTouchDesigner
+.\scripts\Initialize-FlexShow.ps1 `
+  -Topology single `
+  -Experience combined `
+  -Completion hybrid `
+  -TouchDesignerVersion 2025.32820 `
+  -Project .\projects\FlexShow-local.toe `
+  -Output .\config\local-td32820-baseline.json
+```
+
+Without an exact selector, the unique validated 2025.32820 build remains the
+deterministic default. The initializer fails closed instead of promoting a sole
+or numerically newest candidate. Use `-TouchDesignerVersion 2025.33060` only
+with `-Project` pointing to a separate copied, ignored working `.toe` and a
+separate ignored candidate config. Never save the candidate over the accepted
+2025.32820 project. The complete copy, preview, and rollback commands are in
+the [side-by-side candidate workflow](../README.md#side-by-side-touchdesigner-candidate-test).
+
+Run the timestamped in-process validator below from the candidate build, then
+verify application readiness, exact output dimensions, MoGe-2 active/stale
+behavior, zero/fail-closed sensor output, installation and stereo/VR previews,
+GPU memory, and a thermal soak. Promote the candidate only after all checks
+pass. Rollback means stopping the candidate and selecting the untouched
+2025.32820 config/project pair. The source-only release script and GitHub CI do
+not establish compatibility with a TouchDesigner binary.
+
 ## Build in TouchDesigner
 
 Start from a blank project. Run the following as one line in the TouchDesigner

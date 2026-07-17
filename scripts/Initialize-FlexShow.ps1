@@ -16,11 +16,18 @@ param(
 
     [string]$Output = 'config/local-flexshow.json',
 
+    [string]$Project = '',
+
     [string]$TouchDesignerExe = '',
+
+    [ValidatePattern('^20\d{2}\.\d{5}$')]
+    [string]$TouchDesignerVersion = '',
 
     [string]$NvidiaSmi = '',
 
     [switch]$ListOnly,
+
+    [switch]$ListTouchDesigner,
 
     [switch]$Force,
 
@@ -35,6 +42,7 @@ if ($env:OS -ne 'Windows_NT') {
 }
 
 $repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$validatedTouchDesignerVersion = '2025.32820'
 if ($AIIndex -lt -1 -or $RenderIndex -lt -1) {
     throw 'AIIndex and RenderIndex must be -1 (automatic) or a non-negative GPU index.'
 }
@@ -135,39 +143,168 @@ function Get-HardwareTier {
     return 'auto'
 }
 
-function Find-TouchDesignerExecutable {
-    param([string]$RequestedPath)
+function Get-TouchDesignerVersion {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Executable
+    )
+
+    $productVersion = ''
+    try {
+        $versionInfo = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($Executable)
+        $productVersion = [string]$versionInfo.ProductVersion
+    }
+    catch {
+        # A metadata-less synthetic executable is valid for release smoke tests.
+        $productVersion = ''
+    }
+
+    $binDirectory = [System.IO.Path]::GetDirectoryName($Executable)
+    $installDirectory = if ([string]::IsNullOrWhiteSpace($binDirectory)) {
+        ''
+    }
+    else {
+        [System.IO.Path]::GetDirectoryName($binDirectory)
+    }
+    $installFolder = if ([string]::IsNullOrWhiteSpace($installDirectory)) {
+        ''
+    }
+    else {
+        [System.IO.Path]::GetFileName($installDirectory)
+    }
+
+    foreach ($value in @($productVersion, $installFolder)) {
+        $match = [regex]::Match([string]$value, '(?<!\d)(20\d{2}\.\d{5})(?!\d)')
+        if ($match.Success) {
+            return $match.Groups[1].Value
+        }
+    }
+    return 'unknown'
+}
+
+function Get-TouchDesignerInstallations {
+    $rawCandidates = [System.Collections.Generic.List[object]]::new()
+    $derivativeRoot = Join-Path $env:ProgramFiles 'Derivative'
+    $standard = Join-Path $derivativeRoot 'TouchDesigner\bin\TouchDesigner.exe'
+    if (Test-Path -LiteralPath $standard -PathType Leaf) {
+        $rawCandidates.Add([pscustomobject]@{
+            path = $standard
+            source = 'standard'
+            is_standard = $true
+        })
+    }
+
+    $pathCommand = Get-Command 'TouchDesigner.exe' -ErrorAction SilentlyContinue
+    if ($null -ne $pathCommand) {
+        $rawCandidates.Add([pscustomobject]@{
+            path = $pathCommand.Source
+            source = 'PATH'
+            is_standard = $false
+        })
+    }
+
+    if (Test-Path -LiteralPath $derivativeRoot -PathType Container) {
+        foreach ($folder in Get-ChildItem -LiteralPath $derivativeRoot -Directory -Filter 'TouchDesigner*' |
+            Sort-Object -Property FullName) {
+            $candidate = Join-Path $folder.FullName 'bin\TouchDesigner.exe'
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                $rawCandidates.Add([pscustomobject]@{
+                    path = $candidate
+                    source = 'side_by_side'
+                    is_standard = $false
+                })
+            }
+        }
+    }
+
+    $seen = @{}
+    $inventory = [System.Collections.Generic.List[object]]::new()
+    foreach ($candidate in $rawCandidates) {
+        $resolved = [System.IO.Path]::GetFullPath([string]$candidate.path)
+        if ($seen.ContainsKey($resolved)) {
+            continue
+        }
+        $seen[$resolved] = $true
+        $inventory.Add([pscustomobject]@{
+            path = $resolved
+            version = Get-TouchDesignerVersion -Executable $resolved
+            source = [string]$candidate.source
+            is_standard = [bool]$candidate.is_standard
+        })
+    }
+
+    $sortProperties = @(
+        @{ Expression = { if ($_.is_standard) { 0 } else { 1 } }; Descending = $false },
+        @{ Expression = 'version'; Descending = $true },
+        @{ Expression = 'path'; Descending = $false }
+    )
+    return @($inventory | Sort-Object -Property $sortProperties)
+}
+
+function Select-TouchDesignerInstallation {
+    param(
+        [string]$RequestedPath,
+        [string]$RequestedVersion
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($RequestedPath) -and
+        -not [string]::IsNullOrWhiteSpace($RequestedVersion)) {
+        throw '-TouchDesignerExe and -TouchDesignerVersion cannot be combined. Use one exact selector.'
+    }
 
     if (-not [string]::IsNullOrWhiteSpace($RequestedPath)) {
         $resolved = [System.IO.Path]::GetFullPath($RequestedPath)
         if (-not (Test-Path -LiteralPath $resolved -PathType Leaf)) {
             throw "TouchDesigner executable does not exist: $resolved"
         }
-        return $resolved
-    }
-
-    $pathCommand = Get-Command 'TouchDesigner.exe' -ErrorAction SilentlyContinue
-    if ($null -ne $pathCommand) {
-        return $pathCommand.Source
-    }
-    $derivativeRoot = Join-Path $env:ProgramFiles 'Derivative'
-    $candidates = [System.Collections.Generic.List[string]]::new()
-    $standard = Join-Path $derivativeRoot 'TouchDesigner\bin\TouchDesigner.exe'
-    if (Test-Path -LiteralPath $standard -PathType Leaf) {
-        $candidates.Add($standard)
-    }
-    if (Test-Path -LiteralPath $derivativeRoot -PathType Container) {
-        foreach ($folder in Get-ChildItem -LiteralPath $derivativeRoot -Directory -Filter 'TouchDesigner*') {
-            $candidate = Join-Path $folder.FullName 'bin\TouchDesigner.exe'
-            if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-                $candidates.Add($candidate)
-            }
+        return [pscustomobject]@{
+            path = $resolved
+            version = Get-TouchDesignerVersion -Executable $resolved
+            selection = 'explicit_path'
         }
     }
-    if ($candidates.Count -eq 0) {
+
+    $installations = @(Get-TouchDesignerInstallations)
+    if (-not [string]::IsNullOrWhiteSpace($RequestedVersion)) {
+        $matches = @($installations | Where-Object { $_.version -eq $RequestedVersion })
+        if ($matches.Count -eq 0) {
+            $available = @($installations | Where-Object { $_.version -ne 'unknown' } |
+                ForEach-Object { $_.version } | Sort-Object -Unique) -join ', '
+            if ([string]::IsNullOrWhiteSpace($available)) {
+                $available = 'none detected'
+            }
+            throw "TouchDesigner version $RequestedVersion was not found. Installed versions: $available. Run -ListTouchDesigner or pass -TouchDesignerExe."
+        }
+        if ($matches.Count -ne 1) {
+            throw "TouchDesigner version $RequestedVersion has multiple executable paths. Pass -TouchDesignerExe to select one exactly."
+        }
+        return [pscustomobject]@{
+            path = $matches[0].path
+            version = $matches[0].version
+            selection = 'explicit_version'
+        }
+    }
+
+    $validatedMatches = @($installations | Where-Object {
+        $_.version -eq $validatedTouchDesignerVersion
+    })
+    if ($validatedMatches.Count -gt 1) {
+        $validatedStandardMatches = @($validatedMatches | Where-Object { $_.is_standard })
+        if ($validatedStandardMatches.Count -eq 1) {
+            $validatedMatches = @($validatedStandardMatches[0])
+        }
+    }
+    if ($validatedMatches.Count -eq 1) {
+        return [pscustomobject]@{
+            path = $validatedMatches[0].path
+            version = $validatedMatches[0].version
+            selection = 'validated_baseline'
+        }
+    }
+    if ($installations.Count -eq 0) {
         throw 'TouchDesigner.exe was not found. Install TouchDesigner or pass -TouchDesignerExe.'
     }
-    return @($candidates | Sort-Object -Unique)[-1]
+    throw "The validated TouchDesigner baseline $validatedTouchDesignerVersion was not found uniquely. Run -ListTouchDesigner and pass -TouchDesignerVersion or -TouchDesignerExe to select another build explicitly."
 }
 
 function Resolve-LocalConfigOutput {
@@ -189,6 +326,73 @@ function Resolve-LocalConfigOutput {
         throw 'Local preset filename must match local-*.json or *-local.json so .gitignore protects it.'
     }
     return $fullPath
+}
+
+function Resolve-TouchDesignerProject {
+    param([string]$RequestedPath)
+
+    $fullPath = if ([string]::IsNullOrWhiteSpace($RequestedPath)) {
+        [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot 'projects\FlexShow.toe'))
+    }
+    elseif ([System.IO.Path]::IsPathRooted($RequestedPath)) {
+        [System.IO.Path]::GetFullPath($RequestedPath)
+    }
+    else {
+        [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot $RequestedPath))
+    }
+    if (-not [System.IO.Path]::GetExtension($fullPath).Equals(
+        '.toe',
+        [System.StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw "TouchDesigner project must be a .toe file: $fullPath"
+    }
+    if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+        throw "TouchDesigner project does not exist: $fullPath"
+    }
+    return $fullPath
+}
+
+if ($ListOnly -and $ListTouchDesigner) {
+    throw '-ListOnly and -ListTouchDesigner cannot be combined.'
+}
+if ($ListTouchDesigner) {
+    if (-not [string]::IsNullOrWhiteSpace($TouchDesignerExe) -or
+        -not [string]::IsNullOrWhiteSpace($TouchDesignerVersion)) {
+        throw '-ListTouchDesigner cannot be combined with a TouchDesigner selector.'
+    }
+    $installations = @(Get-TouchDesignerInstallations)
+    $validatedMatches = @($installations | Where-Object {
+        $_.version -eq $validatedTouchDesignerVersion
+    })
+    if ($validatedMatches.Count -gt 1) {
+        $validatedStandardMatches = @($validatedMatches | Where-Object { $_.is_standard })
+        if ($validatedStandardMatches.Count -eq 1) {
+            $validatedMatches = @($validatedStandardMatches[0])
+        }
+    }
+    $defaultPath = if ($validatedMatches.Count -eq 1) {
+        [string]$validatedMatches[0].path
+    } else { '' }
+    $rows = @($installations | ForEach-Object {
+        [pscustomobject][ordered]@{
+            version = $_.version
+            default = (-not [string]::IsNullOrWhiteSpace($defaultPath) -and
+                [string]::Equals($_.path, $defaultPath, [System.StringComparison]::OrdinalIgnoreCase))
+            is_standard = $_.is_standard
+            source = $_.source
+            path = $_.path
+        }
+    })
+    if ($Json) {
+        ConvertTo-Json -InputObject $rows -Depth 4 -Compress
+    }
+    elseif ($rows.Count -eq 0) {
+        Write-Host '[FlexShow] no TouchDesigner installations found.'
+    }
+    else {
+        $rows | Format-Table -AutoSize version, default, is_standard, source, path
+    }
+    return
 }
 
 $nvidiaSmiPath = Find-NvidiaSmiExecutable -RequestedPath $NvidiaSmi
@@ -259,11 +463,11 @@ else {
     }
 }
 
-$touchDesignerPath = Find-TouchDesignerExecutable -RequestedPath $TouchDesignerExe
-$projectPath = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot 'projects\FlexShow.toe'))
-if (-not (Test-Path -LiteralPath $projectPath -PathType Leaf)) {
-    throw "FlexShow project does not exist: $projectPath"
-}
+$touchDesignerSelection = Select-TouchDesignerInstallation `
+    -RequestedPath $TouchDesignerExe `
+    -RequestedVersion $TouchDesignerVersion
+$touchDesignerPath = $touchDesignerSelection.path
+$projectPath = Resolve-TouchDesignerProject -RequestedPath $Project
 $outputPath = Resolve-LocalConfigOutput -RequestedPath $Output
 if ((Test-Path -LiteralPath $outputPath) -and -not $Force) {
     throw "Local preset already exists: $outputPath. Pass -Force to replace it."
@@ -346,6 +550,9 @@ $result = [ordered]@{
     ai_gpu = [ordered]@{ index = $aiGpu.Index; uuid = $aiGpu.Uuid; name = $aiGpu.Name }
     render_gpu = [ordered]@{ index = $renderGpu.Index; uuid = $renderGpu.Uuid; name = $renderGpu.Name }
     touchdesigner = $touchDesignerPath
+    touchdesigner_version = $touchDesignerSelection.version
+    touchdesigner_selection = $touchDesignerSelection.selection
+    project = $projectPath
 }
 if ($Json) {
     $result | ConvertTo-Json -Depth 5 -Compress
@@ -355,4 +562,5 @@ else {
     Write-Host "[FlexShow] topology=$resolvedTopology tier=$tier AI-tier=$aiTier render-tier=$renderTier"
     Write-Host "[FlexShow] AI GPU $($aiGpu.Index): $($aiGpu.Name)"
     Write-Host "[FlexShow] render GPU $($renderGpu.Index): $($renderGpu.Name)"
+    Write-Host "[FlexShow] TouchDesigner $($touchDesignerSelection.version) [$($touchDesignerSelection.selection)]: $touchDesignerPath"
 }

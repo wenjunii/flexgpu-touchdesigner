@@ -25,13 +25,17 @@ from your actual show network before launch.
 
 ## Safe first run
 
+Open PowerShell in the repository root. The commands below use repository-root
+relative paths.
+
 Start and Stop are previews by default. `-Start` authorizes launch and `-Stop`
 authorizes forceful shutdown. Diagnose is always read-only; its legacy
 `-Start`/`-Run` switch is accepted but ignored with a warning:
 
 ```powershell
+.\scripts\Initialize-FlexShow.ps1 -ListTouchDesigner
 .\scripts\Initialize-FlexShow.ps1 -ListOnly
-.\scripts\Initialize-FlexShow.ps1 -Topology auto -Experience installation -Completion hybrid
+.\scripts\Initialize-FlexShow.ps1 -Topology auto -Experience installation -Completion hybrid -TouchDesignerVersion 2025.32820
 .\scripts\Start-FlexShow.ps1
 .\scripts\Diagnose-FlexShow.ps1
 .\scripts\Start-FlexShow.ps1 -Config config\presets\single-4090.json -Experience vr
@@ -41,7 +45,15 @@ authorizes forceful shutdown. Diagnose is always read-only; its legacy
 UUIDs, and the local hardware tier. `auto` writes a single-GPU plan for one
 card or a dual-local plan for two or more. Its default output is the gitignored
 `config/local-flexshow.json`; use `-AIIndex`, `-RenderIndex`, `-Output`, or
-`-TouchDesignerExe` when automatic selection is not the desired show layout.
+an exact TouchDesigner selector when automatic selection is not the desired
+show layout. `-ListTouchDesigner` is a read-only inventory that does not probe
+the GPUs. `-TouchDesignerVersion 2025.32820` selects that exact installed
+product version, while `-TouchDesignerExe` selects one exact executable path;
+the two selectors cannot be combined. With neither selector, the unique
+validated 2025.32820 installation is the deterministic default. The initializer
+fails closed if that baseline is absent or ambiguous; it never promotes a sole
+or numerically newest candidate automatically. `-Project` selects one existing
+`.toe` file, with relative paths resolved from the repository root.
 It never starts TouchDesigner and does not generate network-node profiles.
 Dual-local output deliberately keeps `tier: auto`: the planner resolves the AI
 and world process tiers independently, so a 5090 AI card cannot give its point
@@ -77,7 +89,19 @@ The templates target the normal TouchDesigner installation at:
 
 `C:\Program Files\Derivative\TouchDesigner\bin\TouchDesigner.exe`
 
-They expect `projects/FlexShow.toe` at the repository root. The planner injects `FLEXGPU_CONFIG`, `FLEXGPU_ROLE`, and GPU identity through environment variables, allowing one project scaffold to serve every role. Change `executable`, `project`, or `cwd` if your installation differs. An execute request intentionally fails before launching anything when a required executable or project is missing.
+On the current show machine that path is the accepted 2025.32820 baseline.
+TouchDesigner 2025.33060 is a side-by-side compatibility candidate at
+`C:\Program Files\Derivative\TouchDesigner.2025.33060\bin\TouchDesigner.exe`;
+it is not the show default. Give a candidate its own ignored local config and
+copied ignored `.toe`, select both with `-TouchDesignerVersion` and `-Project`,
+and retain the untouched 2025.32820 config/project pair for rollback.
+
+The templates expect `projects/FlexShow.toe` at the repository root. The planner
+injects `FLEXGPU_CONFIG`, `FLEXGPU_ROLE`, and GPU identity through environment
+variables, allowing one project scaffold to serve every role. Change
+`executable`, `project`, or `cwd` if your installation differs. An execute
+request intentionally fails before launching anything when a required
+executable or project is missing.
 
 ## Presets
 

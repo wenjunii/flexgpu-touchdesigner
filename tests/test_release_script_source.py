@@ -13,6 +13,7 @@ COMMON_SCRIPT_PATH = ROOT / "scripts" / "_FlexShow.Common.ps1"
 START_SCRIPT_PATH = ROOT / "scripts" / "Start-FlexShow.ps1"
 RECOVER_SCRIPT_PATH = ROOT / "scripts" / "Recover-FlexShow.ps1"
 TEST_REQUIREMENTS_PATH = ROOT / "requirements-test.txt"
+INITIALIZER_SCRIPT_PATH = ROOT / "scripts" / "Initialize-FlexShow.ps1"
 
 
 class ReleaseScriptSourceTests(unittest.TestCase):
@@ -29,6 +30,7 @@ class ReleaseScriptSourceTests(unittest.TestCase):
             "tools/benchmark_flexshow.py",
             "Parser]::ParseFile",
             "Initialize-FlexShow.ps1",
+            "Smoke-test TouchDesigner version inventory and selectors",
             "Smoke-test Start/Recover readiness arguments",
             "-Scope Both -SelfTest",
             "-Scope History -Revision HEAD",
@@ -56,9 +58,37 @@ class ReleaseScriptSourceTests(unittest.TestCase):
             "$written.tier -ne $result.tier",
             "$written.gpu.ai.uuid -ne $result.ai_gpu.uuid",
             "$written.gpu.render.uuid -ne $result.render_gpu.uuid",
+            "$written.processes.ai.executable -ne $fakeTouchDesigner",
             "$written.transport.type -ne 'touch_tcp'",
+            "touchdesigner_version -ne $versionCase.Version",
+            "touchdesigner_selection -ne 'validated_baseline'",
+            "$versionWritten.processes.psobject.Properties",
+            "$previousPath = $env:PATH",
+            "automatically selected an unvalidated TouchDesigner candidate",
+            "2025.32820",
+            "2025.33060",
         ):
             self.assertIn(marker, source)
+
+    def test_initializer_has_deterministic_touchdesigner_build_selection(self) -> None:
+        source = INITIALIZER_SCRIPT_PATH.read_text(encoding="utf-8-sig")
+        for marker in (
+            "$TouchDesignerVersion",
+            "$ListTouchDesigner",
+            "$Project",
+            "$validatedTouchDesignerVersion = '2025.32820'",
+            "Get-TouchDesignerInstallations",
+            "Get-TouchDesignerVersion",
+            "selection = 'validated_baseline'",
+            "selection = 'explicit_version'",
+            "touchdesigner_version = $touchDesignerSelection.version",
+            "touchdesigner_selection = $touchDesignerSelection.selection",
+            "project = $projectPath",
+            "cannot be combined. Use one exact selector",
+        ):
+            self.assertIn(marker, source)
+        self.assertNotIn("Sort-Object -Unique)[-1]", source)
+        self.assertNotIn("selection = 'sole_installation'", source)
 
     def test_release_script_uses_bounded_temporary_outputs(self) -> None:
         source = SCRIPT_PATH.read_text(encoding="utf-8")
