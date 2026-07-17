@@ -34,10 +34,18 @@ def _ensure_local_src_path() -> None:
     candidates = []
     explicit_src = os.environ.get("FLEXGPU_SRC")
     explicit_root = os.environ.get("FLEXGPU_ROOT")
+    explicit_config = os.environ.get("FLEXGPU_CONFIG")
     if explicit_src:
         candidates.append(os.path.abspath(explicit_src))
     if explicit_root:
         candidates.append(os.path.abspath(os.path.join(explicit_root, "src")))
+    if explicit_config:
+        config_dir = os.path.dirname(os.path.abspath(explicit_config))
+        candidates.append(os.path.abspath(os.path.join(config_dir, "src")))
+        candidates.append(os.path.abspath(os.path.join(config_dir, "..", "src")))
+        candidates.append(
+            os.path.abspath(os.path.join(config_dir, "..", "..", "src"))
+        )
     project_value = globals().get("project", getattr(builtins, "project", None))
     try:
         project_folder = str(project_value.folder)

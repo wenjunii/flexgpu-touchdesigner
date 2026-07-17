@@ -404,6 +404,8 @@ def run_diagnostics(
             expected_env = {
                 "CUDA_VISIBLE_DEVICES",
                 "FLEXGPU_CONFIG",
+                "FLEXGPU_ROOT",
+                "FLEXGPU_SRC",
                 "FLEXGPU_ROLE",
                 "FLEXGPU_EXPERIENCE",
                 "FLEXGPU_COMPLETION",
@@ -414,7 +416,7 @@ def run_diagnostics(
                 Diagnostic(
                     "pass" if not missing_env else "fail",
                     "process.%s.environment" % role,
-                    "Role and CUDA environment are complete"
+                    "Role, CUDA, and bridge import environment are complete"
                     if not missing_env
                     else "Missing environment keys: " + ", ".join(missing_env),
                 )

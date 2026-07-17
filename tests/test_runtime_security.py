@@ -245,6 +245,10 @@ class RuntimeSecurityTests(unittest.TestCase):
                 TOUCHDESIGNER_BUILD_VERSION,
             )
             self.assertEqual(environment["FLEXGPU_CONFIG_ID"], _config_identity(config))
+            self.assertEqual(
+                Path(environment["FLEXGPU_SRC"]),
+                Path(__file__).resolve().parents[1] / "src",
+            )
 
     def test_touchdesigner_identity_includes_all_cli_mode_overrides(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

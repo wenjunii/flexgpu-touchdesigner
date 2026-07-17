@@ -104,6 +104,14 @@ class ConfigPlannerTests(unittest.TestCase):
             self.assertNotIn("-config", process.command)
             self.assertNotIn("-role", process.command)
             self.assertEqual(process.env["FLEXGPU_ROLE"], "world")
+            self.assertEqual(
+                Path(process.env["FLEXGPU_ROOT"]),
+                Path(__file__).resolve().parents[1],
+            )
+            self.assertEqual(
+                Path(process.env["FLEXGPU_SRC"]),
+                Path(__file__).resolve().parents[1] / "src",
+            )
             self.assertEqual(process.env["FLEXGPU_EXPERIENCE"], "combined")
             self.assertEqual(process.env["FLEXGPU_COMPLETION"], "fog")
             self.assertEqual(process.env["CUDA_VISIBLE_DEVICES"], "GPU-3080")

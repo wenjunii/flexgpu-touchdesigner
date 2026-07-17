@@ -415,6 +415,13 @@ resolution, point limit/thickness, completion mode and shader controls, output
 dimensions, source/sensor modes, role bridge endpoints, and stage cooking
 gates.
 
+Managed launches also set `FLEXGPU_ROOT` and `FLEXGPU_SRC` before
+TouchDesigner starts. This is required because saving a `.toe` preserves Text
+DAT source but not an interactive Textport's `sys.path` or imported-module
+cache. The MoGe-2 and Depth Anything embedded runtimes additionally validate
+bounded candidates relative to `FLEXGPU_CONFIG`, so reopening through
+`Start-FlexShow.ps1` does not depend on a previous installer session.
+
 When `adaptive.enabled` is true, the Execute DAT calls `tick()` at frame start.
 The embedded controller uses measured frame interval plus configured
 high/low/critical thresholds, windows, and cooldown to move through discrete

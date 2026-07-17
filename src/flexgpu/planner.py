@@ -26,6 +26,10 @@ _PLACEHOLDER_RE = re.compile(
 )
 _TD_BUS_RE = re.compile(r"^(\d+):(\d+):(\d+):(\d+)$")
 _PROTECTED_ENV_PREFIXES = ("CUDA_", "FLEXGPU_")
+FLEXGPU_SRC_PATH = os.path.realpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir)
+)
+FLEXGPU_ROOT_PATH = os.path.realpath(os.path.join(FLEXGPU_SRC_PATH, os.pardir))
 
 
 def _is_path_like(value: str) -> bool:
@@ -277,6 +281,12 @@ def build_process_plan(
             "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
             "CUDA_VISIBLE_DEVICES": gpu.uuid or str(gpu.index),
             "FLEXGPU_CONFIG": config.source_path,
+            # Embedded TouchDesigner DAT modules compile before project startup
+            # callbacks can amend sys.path. Give every managed child the exact
+            # import root used by this launcher so a saved .toe cold-reopens
+            # without relying on process cwd or a prior Textport import.
+            "FLEXGPU_ROOT": FLEXGPU_ROOT_PATH,
+            "FLEXGPU_SRC": FLEXGPU_SRC_PATH,
             "FLEXGPU_ROLE": role,
             "FLEXGPU_TOPOLOGY": config.topology,
             "FLEXGPU_EXPERIENCE": config.experience,

@@ -23,6 +23,7 @@ from .models import (
     redact_text,
     sensitive_environment_values,
 )
+from .planner import FLEXGPU_ROOT_PATH, FLEXGPU_SRC_PATH
 
 
 MANIFEST_NAME = "flexgpu-manifest.json"
@@ -47,6 +48,8 @@ _RUNTIME_ENV_KEYS = {
     "CUDA_DEVICE_ORDER",
     "CUDA_VISIBLE_DEVICES",
     "FLEXGPU_CONFIG",
+    "FLEXGPU_ROOT",
+    "FLEXGPU_SRC",
     "FLEXGPU_ROLE",
     "FLEXGPU_TOPOLOGY",
     "FLEXGPU_EXPERIENCE",
@@ -1059,6 +1062,8 @@ def _launch_environment(
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
         "CUDA_VISIBLE_DEVICES": (gpu.uuid or str(gpu.index)) if gpu else "",
         "FLEXGPU_CONFIG": config.source_path,
+        "FLEXGPU_ROOT": FLEXGPU_ROOT_PATH,
+        "FLEXGPU_SRC": FLEXGPU_SRC_PATH,
         "FLEXGPU_ROLE": process.role,
         "FLEXGPU_TOPOLOGY": config.topology,
         "FLEXGPU_GPU_INDEX": str(gpu.index) if gpu else "",

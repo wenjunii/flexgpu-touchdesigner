@@ -145,6 +145,9 @@ Use two PowerShell windows. Start TouchDesigner without a readiness wait,
 because the source cannot become ready until the separate worker returns its
 first frame. Open the local MoGe `.toe`, confirm StreamDiffusion RGB is moving,
 and enable `MOGE2_BRIDGE/Enabled`. This starts the result receiver first.
+Launch through `Start-FlexShow.ps1`: the managed process environment supplies
+the repository import root before embedded DAT modules compile. A one-time
+Textport `sys.path` edit is not preserved in a saved `.toe`.
 
 In the second window, preview a deterministic mock worker:
 
@@ -157,6 +160,15 @@ The expected bridge status is `synchronized atlas uploaded and ready`;
 `Resultvalid` turns on only after the Script TOP confirms the exact staged
 atlas upload, `FRAME_STATE` and `CAMERA_METADATA` become populated, and all
 four route switches change together. Stop the mock with Ctrl+C.
+
+If both `bridge_runtime` and `sensor_runtime` report
+`ModuleNotFoundError: No module named 'flexgpu'` immediately after reopening a
+saved project, the project was opened without its managed import environment or
+with an older launcher. Stop TouchDesigner normally and relaunch it through the
+current `Start-FlexShow.ps1`. The launcher exports `FLEXGPU_SRC`,
+`FLEXGPU_ROOT`, and `FLEXGPU_CONFIG`; current embedded runtimes also derive a
+bounded `src` candidate from the configuration path. Do not treat a temporary
+Textport import as a persistent repair.
 
 Then run the pinned real worker:
 

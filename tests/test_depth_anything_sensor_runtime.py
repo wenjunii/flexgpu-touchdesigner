@@ -241,6 +241,46 @@ class FakeBridge:
 
 
 class ImportAndContractTests(unittest.TestCase):
+    def test_embedded_dat_resolves_src_from_launcher_config_on_cold_reopen(self) -> None:
+        bridge_path = ROOT / "touchdesigner" / "depth_anything_sensor_runtime.py"
+        config_path = (
+            ROOT / "config" / "presets" / "single-3080ti-16gb.json"
+        )
+        command = f"""
+import os, pathlib, sys, types
+repo = pathlib.Path({str(ROOT)!r})
+src = repo / 'src'
+td = repo / 'touchdesigner'
+def normalized(value):
+    return os.path.normcase(os.path.abspath(os.fspath(value)))
+for key in ('FLEXGPU_ROOT', 'FLEXGPU_SRC'):
+    os.environ.pop(key, None)
+os.environ['FLEXGPU_CONFIG'] = os.fspath(pathlib.Path({str(config_path)!r}))
+for name in tuple(sys.modules):
+    if name == 'flexgpu' or name.startswith('flexgpu.'):
+        sys.modules.pop(name, None)
+forbidden = {{normalized(repo), normalized(src), normalized(td)}}
+sys.path[:] = [entry for entry in sys.path
+               if not isinstance(entry, str) or normalized(entry) not in forbidden]
+module = types.ModuleType('embedded_depth_anything_sensor_runtime_cold')
+module.__file__ = '/project1/flexgpu/WORKING_PIPELINE/SENSOR_INTERACTION/DEPTH_SENSOR_ADAPTER/DEPTH_ANYTHING_BRIDGE/sensor_runtime'
+sys.modules[module.__name__] = module
+source = pathlib.Path({str(bridge_path)!r}).read_text(encoding='utf-8')
+exec(compile(source, module.__file__, 'exec'), module.__dict__)
+assert 'flexgpu.worldbus' in sys.modules
+assert normalized(src) in {{normalized(entry) for entry in sys.path if isinstance(entry, str)}}
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            completed = subprocess.run(
+                [sys.executable, "-S", "-c", command],
+                cwd=directory,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
     def test_embedded_dat_resolves_src_from_touchdesigner_sys_path(self) -> None:
         bridge_path = ROOT / "touchdesigner" / "depth_anything_sensor_runtime.py"
         command = f"""
