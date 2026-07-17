@@ -40,6 +40,19 @@ GPU = GPUInfo(
     "555.1",
 )
 
+
+def _managed_test_python() -> str:
+    """Avoid Windows venv redirectors whose Popen PID differs from the child PID."""
+
+    if os.name == "nt" and sys.prefix != sys.base_prefix:
+        base_executable = getattr(sys, "_base_executable", "")
+        if isinstance(base_executable, str) and os.path.isfile(base_executable):
+            return os.path.abspath(base_executable)
+    return sys.executable
+
+
+MANAGED_TEST_PYTHON = _managed_test_python()
+
 SLEEP_SCRIPT = "import time; time.sleep(30)"
 READY_SCRIPT = """
 import datetime, json, os, time
@@ -93,7 +106,7 @@ def make_config(directory: str, script: str, *, supervisor: dict[str, object] | 
             "runtime_dir": os.path.join(directory, "runtime"),
             "processes": {
                 "world": {
-                    "command": [sys.executable, "-c", script],
+                    "command": [MANAGED_TEST_PYTHON, "-c", script],
                     "touchdesigner": False,
                 }
             },
@@ -123,7 +136,7 @@ def make_ai_config(directory: str, script: str):
             },
             "processes": {
                 "ai": {
-                    "command": [sys.executable, "-c", script],
+                    "command": [MANAGED_TEST_PYTHON, "-c", script],
                     "touchdesigner": False,
                 }
             },
@@ -157,7 +170,13 @@ class RuntimeSecurityTests(unittest.TestCase):
                 processes={
                     "world": replace(
                         definition,
-                        command=(sys.executable, "-c", SLEEP_SCRIPT, "--token", sentinel),
+                        command=(
+                            MANAGED_TEST_PYTHON,
+                            "-c",
+                            SLEEP_SCRIPT,
+                            "--token",
+                            sentinel,
+                        ),
                         env={"SERVICE_API_TOKEN": sentinel},
                     )
                 },
@@ -238,7 +257,7 @@ class RuntimeSecurityTests(unittest.TestCase):
                 "runtime_dir": os.path.join(directory, "runtime"),
                 "processes": {
                     "world": {
-                        "command": [sys.executable, "-c", SLEEP_SCRIPT],
+                        "command": [MANAGED_TEST_PYTHON, "-c", SLEEP_SCRIPT],
                         "touchdesigner": False,
                     }
                 },

@@ -222,6 +222,16 @@ try {
         throw "The selected Python runtime ($($python.Source)) must contain jsonschema==4.17.3. Install it into that exact interpreter or set FLEXSHOW_PYTHON. $($_.Exception.Message)"
     }
 
+    try {
+        Invoke-CheckedPython -Name 'Check NumPy source-test dependency' -Arguments @(
+            '-c',
+            "import numpy"
+        )
+    }
+    catch {
+        throw "The selected Python runtime ($($python.Source)) must contain NumPy. Install requirements-test.txt into that exact interpreter or set FLEXSHOW_PYTHON. $($_.Exception.Message)"
+    }
+
     Invoke-CheckedPython -Name 'Compile Python sources' -Arguments @(
         '-m', 'compileall', '-q', 'src', 'tools', 'tests', 'touchdesigner'
     )

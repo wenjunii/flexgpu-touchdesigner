@@ -633,18 +633,18 @@ deleting it only from the latest revision is insufficient.
 ### Test suite
 
 Point the gate at the Python 3.10+ interpreter you intend to use, install the
-same pinned schema validator used by CI into that exact interpreter, then run
-the complete non-publishing source release gate:
+same pinned source-test dependencies used by CI into that exact interpreter,
+then run the complete non-publishing source release gate:
 
 ```powershell
 $env:FLEXSHOW_PYTHON = (Get-Command python).Source
-& $env:FLEXSHOW_PYTHON -m pip install --disable-pip-version-check jsonschema==4.17.3
+& $env:FLEXSHOW_PYTHON -m pip install --disable-pip-version-check -r .\requirements-test.txt
 .\scripts\Test-FlexShowRelease.ps1
 ```
 
 Set `FLEXSHOW_PYTHON` directly to `.venv\Scripts\python.exe` or another full
-path when that is the intended runtime. The release script reports a failure if
-the selected interpreter cannot load the pinned validator.
+path when that is the intended runtime. The release script reports a focused
+failure if the selected interpreter cannot load the schema validator or NumPy.
 
 The release script selects a working Python 3.10+ interpreter through the same
 logic as the launcher, compiles `src`, `tools`, `tests`, and `touchdesigner`,

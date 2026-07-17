@@ -12,6 +12,7 @@ TOUCHDESIGNER_README_PATH = ROOT / "touchdesigner" / "README.md"
 COMMON_SCRIPT_PATH = ROOT / "scripts" / "_FlexShow.Common.ps1"
 START_SCRIPT_PATH = ROOT / "scripts" / "Start-FlexShow.ps1"
 RECOVER_SCRIPT_PATH = ROOT / "scripts" / "Recover-FlexShow.ps1"
+TEST_REQUIREMENTS_PATH = ROOT / "requirements-test.txt"
 
 
 class ReleaseScriptSourceTests(unittest.TestCase):
@@ -20,6 +21,8 @@ class ReleaseScriptSourceTests(unittest.TestCase):
         for marker in (
             "Get-FlexShowPython",
             "m.version('jsonschema') == '4.17.3'",
+            "Check NumPy source-test dependency",
+            '"import numpy"',
             "-m', 'compileall'",
             "tools/validate_configs.py",
             "'-m', 'unittest'",
@@ -79,10 +82,16 @@ class ReleaseScriptSourceTests(unittest.TestCase):
     def test_ci_and_readme_use_the_release_script(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
         readme = README_PATH.read_text(encoding="utf-8")
+        requirements = TEST_REQUIREMENTS_PATH.read_text(encoding="utf-8")
         self.assertIn(
             r".\scripts\Test-FlexShowRelease.ps1 -SkipPublicSync",
             workflow,
         )
+        self.assertIn("-r requirements-test.txt", workflow)
+        self.assertIn(r"-r .\requirements-test.txt", readme)
+        self.assertIn("jsonschema==4.17.3", requirements)
+        self.assertIn("numpy==2.2.6", requirements)
+        self.assertIn("Pillow==10.4.0", requirements)
         self.assertIn(r".\scripts\Test-FlexShowRelease.ps1", readme)
         self.assertIn("does not launch TouchDesigner", readme)
 
