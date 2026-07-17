@@ -58,6 +58,13 @@ class RuntimePipelineSourceTests(unittest.TestCase):
             "transport_unpack_depth",
             "transport_unpack_confidence",
             "transport_unpack_mask",
+            "moge2_unpack_rgb",
+            "moge2_unpack_depth",
+            "moge2_unpack_confidence",
+            "moge2_unpack_mask",
+            "depth_anything_sensor_position",
+            "depth_anything_sensor_mask",
+            "depth_anything_sensor_confidence",
         }
         self.assertEqual(set(self.module.SHADERS), expected)
 
@@ -427,6 +434,47 @@ class RuntimePipelineSourceTests(unittest.TestCase):
         root_wiring = self.source.split("# These wires are owned by the builder", 1)[1]
         root_wiring = root_wiring.split("# Easy-to-find root outputs", 1)[0]
         self.assertNotIn("_connect(sources, reconstruction", root_wiring)
+
+    def test_moge2_bridge_is_opt_in_synchronized_and_decodes_uint16_depth(self) -> None:
+        for name in (
+            "MOGE2_BRIDGE",
+            "RESULT_ATLAS",
+            "DEPTH_SCALE_BIAS",
+            "FRAME_STATE",
+            "CAMERA_METADATA",
+            "MOGE2_RGB_ROUTE",
+            "MOGE2_DEPTH_ROUTE",
+            "MOGE2_CONFIDENCE_ROUTE",
+            "MOGE2_MASK_ROUTE",
+        ):
+            self.assertIn(name, self.source)
+        self.assertIn('_custom(comp, page, "Toggle", "Enabled", False)', self.source)
+        self.assertIn("op('MOGE2_BRIDGE').par.Resultvalid", self.source)
+        self.assertIn("returned RGB with its metric depth", self.source)
+        depth = self.module.SHADERS["moge2_unpack_depth"]
+        self.assertIn("highByte * 256.0 + lowByte", depth)
+        self.assertIn("uint16Depth * scaleBias.r + scaleBias.g", depth)
+        self.assertIn("packed.b >= 0.5 && packed.a >= 0.5", depth)
+        self.assertIn("texelFetch(sTD2DInputs[1]", depth)
+        self.assertNotEqual(
+            self.module.SHADERS["moge2_unpack_depth"],
+            self.module.SHADERS["transport_unpack_depth"],
+        )
+        self.assertIn("module_dat.module.stop(me.parent())", self.module.MOGE2_EXECUTE_CALLBACKS)
+        self.assertNotIn('_set(atlas, "alwayscook"', self.source)
+        self.assertNotIn(".destroy(", self.source)
+
+    def test_bounded_moge2_installer_preserves_existing_adapter_fallbacks(self) -> None:
+        signature = inspect.signature(self.module.install_moge2_bridge)
+        self.assertEqual(list(signature.parameters), ["root"])
+        self.assertIsNone(signature.parameters["root"].default)
+        installer = inspect.getsource(self.module.install_moge2_bridge)
+        self.assertIn("fallbacks.append(source)", installer)
+        self.assertIn("_first_input(source)", installer)
+        self.assertIn("_wire_moge2_routes", installer)
+        self.assertNotIn("build(", installer)
+        self.assertNotIn("destroy", installer)
+        self.assertIn("installed disabled", installer)
 
     def test_feedback_history_has_a_deterministic_seed_input(self) -> None:
         self.assertIn(

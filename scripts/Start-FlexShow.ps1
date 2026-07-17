@@ -39,12 +39,27 @@ param(
 
 . (Join-Path $PSScriptRoot '_FlexShow.Common.ps1')
 
-if ($Start) {
-    Invoke-FlexShowCli -Command start -Config $Config -Experience $Experience -Completion $Completion -Tier $Tier -NvidiaSmi $NvidiaSmi -WaitReadyMs $WaitReadyMs -ActionMode Execute -Json:$Json -ExitWithCode:$ExitWithCode
+$mode = if ($Start) { 'Execute' } else { 'DryRun' }
+if (-not $Start -and -not $Json) {
+    Write-Host '[FlexShow] Full preflight preview only. Add -Start to authorize process launch.'
 }
-else {
-    if (-not $Json) {
-        Write-Host '[FlexShow] Full preflight preview only. Add -Start to authorize process launch.'
-    }
-    Invoke-FlexShowCli -Command start -Config $Config -Experience $Experience -Completion $Completion -Tier $Tier -NvidiaSmi $NvidiaSmi -WaitReadyMs $WaitReadyMs -ActionMode DryRun -Json:$Json -ExitWithCode:$ExitWithCode
+
+$invokeArguments = @{
+    Command = 'start'
+    Config = $Config
+    Experience = $Experience
+    Completion = $Completion
+    Tier = $Tier
+    NvidiaSmi = $NvidiaSmi
+    ActionMode = $mode
+    Json = $Json
+    ExitWithCode = $ExitWithCode
 }
+# Passing an omitted Nullable[int] as an explicit $null makes Windows
+# PowerShell 5.1 run ValidateRange against null. Preserve omission so the
+# configuration's readiness default remains authoritative.
+if ($PSBoundParameters.ContainsKey('WaitReadyMs')) {
+    $invokeArguments['WaitReadyMs'] = [int]$WaitReadyMs
+}
+
+Invoke-FlexShowCli @invokeArguments

@@ -208,7 +208,10 @@ function Invoke-FlexShowCli {
     }
     if ($null -ne $WaitReadyMs -and $Command -in @('start', 'recover')) {
         $arguments.Add('--wait-ready-ms')
-        $arguments.Add([string]$WaitReadyMs.Value)
+        # PowerShell unwraps Nullable[int] values during parameter binding, so
+        # an explicitly supplied value is normally an Int32 rather than an
+        # object with a .Value property.
+        $arguments.Add([string]([int]$WaitReadyMs))
     }
 
     switch ($ActionMode) {

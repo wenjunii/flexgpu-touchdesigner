@@ -9,6 +9,9 @@ SCRIPT_PATH = ROOT / "scripts" / "Test-FlexShowRelease.ps1"
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci.yml"
 README_PATH = ROOT / "README.md"
 TOUCHDESIGNER_README_PATH = ROOT / "touchdesigner" / "README.md"
+COMMON_SCRIPT_PATH = ROOT / "scripts" / "_FlexShow.Common.ps1"
+START_SCRIPT_PATH = ROOT / "scripts" / "Start-FlexShow.ps1"
+RECOVER_SCRIPT_PATH = ROOT / "scripts" / "Recover-FlexShow.ps1"
 
 
 class ReleaseScriptSourceTests(unittest.TestCase):
@@ -23,10 +26,25 @@ class ReleaseScriptSourceTests(unittest.TestCase):
             "tools/benchmark_flexshow.py",
             "Parser]::ParseFile",
             "Initialize-FlexShow.ps1",
+            "Smoke-test Start/Recover readiness arguments",
             "-Scope Both -SelfTest",
             "-Scope History -Revision HEAD",
         ):
             self.assertIn(marker, source)
+
+    def test_readiness_wait_is_forwarded_only_when_supplied(self) -> None:
+        common = COMMON_SCRIPT_PATH.read_text(encoding="utf-8")
+        self.assertIn("[string]([int]$WaitReadyMs)", common)
+        self.assertNotIn("$WaitReadyMs.Value", common)
+
+        for path in (START_SCRIPT_PATH, RECOVER_SCRIPT_PATH):
+            source = path.read_text(encoding="utf-8")
+            self.assertIn("$PSBoundParameters.ContainsKey('WaitReadyMs')", source)
+            self.assertIn(
+                "$invokeArguments['WaitReadyMs'] = [int]$WaitReadyMs",
+                source,
+            )
+            self.assertNotIn("-WaitReadyMs $WaitReadyMs", source)
 
     def test_initializer_smoke_compares_the_written_contract(self) -> None:
         source = SCRIPT_PATH.read_text(encoding="utf-8")

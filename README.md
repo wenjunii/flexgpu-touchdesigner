@@ -12,13 +12,17 @@ real-time generated point world.  It supports:
 - A role-gated atomic RGB/raw-depth/mask/confidence atlas bridge for dual-GPU
   and two-machine preview pipelines, keeping AI generation off the world/render
   GPU.
+- A default-off, replaceable no-RGB audience-sensor bridge plus optional laptop
+  webcam/Depth Anything V2 Small rehearsal worker.
 
 It does **not** bundle StreamDiffusionTD, a depth sensor SDK, an OpenXR/OpenVR
 headset runtime, or model weights. The built-in demo generators make the point
 world visible without those dependencies. Later, replace the labelled source
 TOPs with outputs from your own `StreamDiffusionTD.tox`; the downstream TOP
-contracts stay the same. Real sensor input, headset submission, SHARP, and
-Gaussian inference are likewise user-supplied adapters.
+contracts stay the same. A pinned external MoGe-2 worker and default-off live
+TouchDesigner bridge are included for image-derived generated geometry, while
+the checkpoint remains an explicit ignored local download. Real sensor input,
+headset submission, SHARP, and Gaussian inference are user-supplied adapters.
 
 ## Prerequisites
 
@@ -58,7 +62,9 @@ touchdesigner/       TD 2025 bootstrap source and integration guide
 | Commissioning and calibration | Deterministic synchronized demo/inspection tools and strict calibration contract; no physical sensor or venue calibration claim |
 | Local GPU placement | Read-only `nvidia-smi` snapshot and starting recommendation; not a benchmark or scheduler |
 | Process status, readiness and AI recovery | Atomic TouchDesigner application heartbeat, read-only alive/ready/stale status, bounded readiness waits, and operator-authorized recovery of a separate AI role; not an autonomous watchdog |
-| StreamDiffusionTD and sensor SDK | Labelled manual boundaries plus opt-in private `.tox` loading with safe demo/simulated fallback |
+| StreamDiffusionTD and sensor SDK | Labelled manual boundaries plus opt-in private `.tox` loading with safe demo/simulated fallback; paid/private components remain excluded |
+| Live MoGe-2 generated geometry | Pinned offline worker, newest-only synchronized atlas, strict camera/frame metadata, and default-off TD bridge implemented; real worker and local `.toe` path live-accepted on the 3080 Ti Laptop |
+| Temporary laptop audience sensor | Default-off result-only TD bridge and optional Depth Anything V2 Small webcam worker implemented; RGB-free mock transport, live routing, and stale zero-gating accepted on the 3080 Ti Laptop; webcam/paid-app acceptance remains local |
 | Installation and VR | Metric installation render plus parallel-camera stereo development textures; projection mapping, headset runtime, pose/input, compositor submission, and physical validation are user-supplied |
 | SHARP and Gaussian reconstruction | Disabled external-worker adapter contracts; inference is not bundled |
 
@@ -166,6 +172,21 @@ headset output at their similarly labelled boundaries. A missing required
 process path is reported by validation instead of silently launching the wrong
 file. See [touchdesigner/README.md](touchdesigner/README.md) for the exact
 replacement and feedback-reset sequence.
+
+For the lower-latency generated-world path, keep StreamDiffusionTD as the RGB
+producer and add the external MoGe-2 bridge to an ignored working `.toe`.
+[docs/MOGE2_LIVE.md](docs/MOGE2_LIVE.md) gives the exact offline gate,
+default-off installer, local 3080 startup order, mock/real worker commands, and
+one-/two-GPU network settings. The worker never imports into TouchDesigner and
+normal inference never downloads a model.
+
+Until a physical audience depth sensor arrives, the laptop webcam can drive a
+separate temporary interaction branch. It is not the generated-world depth
+path and its pseudo-metres are not physical measurement. See
+[docs/DEPTH_ANYTHING_SENSOR.md](docs/DEPTH_ANYTHING_SENSOR.md) for the bounded
+TouchDesigner installer, no-RGB privacy boundary, 3080 defaults, mock/webcam
+acceptance sequence, and how a paid app or physical sensor later replaces the
+worker without changing downstream world contracts.
 
 Add `-Json` to any operator script for compact machine-readable output. Start
 and Diagnose also accept `-NvidiaSmi C:\path\to\nvidia-smi.exe`. Config selection
@@ -457,6 +478,8 @@ See [touchdesigner/README.md](touchdesigner/README.md) for building the starter
 
 - Synthetic RGB/depth and simulated audience input that run immediately.
 - A stable StreamDiffusionTD RGB/depth adapter for your later `.tox`.
+- A default-off MoGe-2 bridge that returns synchronized RGB, metric depth,
+  mask, confidence, frame state, and camera metadata from an external worker.
 - GPU depth-to-position, one-cook frame-aware temporal persistence, and bounded
   world-space interaction fields.
 - Thick/disocclusion fog, procedural backfill, and hybrid completion.

@@ -622,7 +622,7 @@ class DiagnosticAndCliTests(unittest.TestCase):
             with self.subTest(wrapper=name):
                 source = (root / "scripts" / name).read_text(encoding="utf-8")
                 self.assertIn("'5090', 'custom'", source)
-                self.assertIn("-Tier $Tier", source)
+                self.assertRegex(source, r"(?:-Tier \$Tier|Tier\s*=\s*\$Tier)")
 
     def test_cli_plan_never_prints_secret_env_or_argv_values(self) -> None:
         sentinel = "CLI-SECRET-SENTINEL-77A9"

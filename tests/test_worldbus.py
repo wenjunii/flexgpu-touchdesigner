@@ -327,6 +327,20 @@ class WorldBusDatagramAndReplayTests(unittest.TestCase):
             receiver.start()
         receiver.close()  # idempotent
 
+    def test_tcp_only_receiver_does_not_allocate_udp_endpoint(self) -> None:
+        receiver = WorldBusReceiver(udp_port=None).start()
+        try:
+            self.assertIsNone(receiver._udp_endpoint)
+            self.assertIsNone(receiver._udp_thread)
+            with self.assertRaisesRegex(WorldBusError, "not enabled"):
+                _ = receiver.udp_address
+            sent = frame(12, producer_session_id="tcp-only")
+            with TCPFrameSender(*receiver.tcp_address) as sender:
+                sender.send(sent)
+            self.assertEqual(receiver.frames.get(2.0), sent)
+        finally:
+            receiver.close()
+
     def test_incomplete_trickle_client_cannot_hold_the_only_tcp_slot(self) -> None:
         limits = WorldBusLimits(socket_timeout_s=0.3)
         receiver = WorldBusReceiver(limits=limits).start()

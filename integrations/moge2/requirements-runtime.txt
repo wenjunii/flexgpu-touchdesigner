@@ -1,0 +1,10 @@
+# Runtime-only dependencies for the pinned MoGe-2 worker.  PyTorch and
+# torchvision are installed separately from the official CUDA wheel index by
+# scripts/Initialize-MoGe2.ps1.
+numpy==2.2.6
+Pillow==10.4.0
+huggingface-hub==0.25.2
+opencv-python==4.10.0.84
+scipy==1.14.1
+matplotlib==3.9.2
+utils3d @ git+https://github.com/EasternJournalist/utils3d.git@3fab839f0be9931dac7c8488eb0e1600c236e183

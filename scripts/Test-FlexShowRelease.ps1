@@ -30,6 +30,8 @@ $root = Get-FlexShowRepositoryRoot
 $python = Get-FlexShowPython
 $publicChecker = Join-Path $PSScriptRoot 'Test-PublicSync.ps1'
 $initializer = Join-Path $PSScriptRoot 'Initialize-FlexShow.ps1'
+$startWrapper = Join-Path $PSScriptRoot 'Start-FlexShow.ps1'
+$recoverWrapper = Join-Path $PSScriptRoot 'Recover-FlexShow.ps1'
 
 function Invoke-CheckedPython {
     param(
@@ -170,6 +172,31 @@ echo 1, GPU-high, 00000000:02:00.0, NVIDIA GeForce RTX 4090, 24564, 555.10
         'tools/validate_configs.py',
         $LocalConfig
     )
+
+    Write-Host '[FlexShow release] Smoke-test Start/Recover readiness arguments'
+    foreach ($wrapper in @($startWrapper, $recoverWrapper)) {
+        foreach ($testCase in @(
+            [pscustomobject]@{ Name = 'omitted'; Include = $false; Expected = 0 },
+            [pscustomobject]@{ Name = 'zero'; Include = $true; Expected = 0 },
+            [pscustomobject]@{ Name = 'nonzero'; Include = $true; Expected = 2500 }
+        )) {
+            $wrapperArguments = @{
+                Config = $LocalConfig
+                NvidiaSmi = $fakeSmi
+                Json = $true
+            }
+            if ($testCase.Include) {
+                $wrapperArguments['WaitReadyMs'] = $testCase.Expected
+            }
+            $wrapperOutput = & $wrapper @wrapperArguments
+            $wrapperResult = @($wrapperOutput)[-1] | ConvertFrom-Json
+            if ($wrapperResult.status -ne 'dry-run' -or
+                [int]$wrapperResult.runtime.wait_ready_ms -ne $testCase.Expected) {
+                $wrapperName = [System.IO.Path]::GetFileName($wrapper)
+                throw "$wrapperName failed the $($testCase.Name) WaitReadyMs preview contract."
+            }
+        }
+    }
 }
 
 $temporaryRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())

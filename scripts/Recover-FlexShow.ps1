@@ -51,4 +51,21 @@ elseif ($Recover -and -not $Json) {
     Write-Warning 'Only the separate AI role may be restarted; world/render is never restarted automatically.'
 }
 
-Invoke-FlexShowCli -Command recover -Config $Config -Experience $Experience -Completion $Completion -Tier $Tier -NvidiaSmi $NvidiaSmi -RecoveryAttempts $Attempts -RestartRunning:$RestartRunning -WaitReadyMs $WaitReadyMs -ActionMode $mode -Json:$Json -ExitWithCode:$ExitWithCode
+$invokeArguments = @{
+    Command = 'recover'
+    Config = $Config
+    Experience = $Experience
+    Completion = $Completion
+    Tier = $Tier
+    NvidiaSmi = $NvidiaSmi
+    RecoveryAttempts = $Attempts
+    RestartRunning = $RestartRunning
+    ActionMode = $mode
+    Json = $Json
+    ExitWithCode = $ExitWithCode
+}
+if ($PSBoundParameters.ContainsKey('WaitReadyMs')) {
+    $invokeArguments['WaitReadyMs'] = [int]$WaitReadyMs
+}
+
+Invoke-FlexShowCli @invokeArguments

@@ -7,11 +7,12 @@ without third-party packages: animated RGB/depth, depth-to-position GLSL,
 temporal feedback, simulated audience interaction, fog/procedural completion,
 a point-render path, an installation preview, and a desktop stereo preview.
 
-The repository does not bundle your `StreamDiffusionTD.tox`, a production
-depth estimator, a sensor SDK/calibration, an OpenXR/OpenVR runtime, projection
-mapping, or SHARP/Gaussian inference. Those remain explicit adapter boundaries.
-The demo is the fallback for building and testing everything downstream before
-those site-specific pieces are available.
+The repository does not bundle your `StreamDiffusionTD.tox`, model weights, a
+sensor SDK/calibration, an OpenXR/OpenVR runtime, projection mapping, or
+SHARP/Gaussian inference. It does include a pinned external MoGe-2 worker and a
+default-off live bridge; PyTorch and the checkpoint remain outside
+TouchDesigner. The demo is the fallback for building and testing everything
+downstream before those site-specific pieces are available.
 
 The builder is safe to run in an existing project:
 
@@ -147,6 +148,59 @@ adapter outputs lets reconstruction, persistence, completion, and all render
 outputs remain unchanged. Rerunning the builder preserves an existing input on
 `OUT_RGB` or `OUT_DEPTH` inside this adapter.
 
+## Add live MoGe-2 generated geometry
+
+The bounded local installer adds only a default-off bridge and four route
+switches to the existing StreamDiffusion adapter. It preserves the component
+currently feeding each adapter output:
+
+```python
+from pathlib import Path; import importlib, sys; root = Path(r'C:\path\to\flexgpu-touchdesigner'); sys.path.insert(0, str(root / 'touchdesigner')); import runtime_pipeline as rp; importlib.reload(rp); rp.install_moge2_bridge(op('/project1/flexgpu'))
+```
+
+Run this only in an ignored local working `.toe`, then save that working copy.
+The bridge path is
+`WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER/MOGE2_BRIDGE`. It sends the
+exact `IN_RGB` image to a separate newest-only worker and receives one atomic
+RGBA8 atlas. Four shaders unpack matching RGB, metric depth, validity, and
+confidence; strict `FRAME_STATE` and `CAMERA_METADATA` DATs drive lifecycle and
+camera reconstruction. The bridge is disabled after installation and
+TouchDesigner never imports MoGe or Torch.
+
+Enable the bridge's result receiver before starting
+`scripts/Start-MoGe2Worker.ps1`; the worker opens its return TCP connection at
+startup. Use the deterministic mock first, then the pinned real backend. Do not
+use `-WaitReadyMs` for the initial TouchDesigner launch because readiness
+depends on the separate worker's first returned frame.
+
+See [docs/MOGE2_LIVE.md](../docs/MOGE2_LIVE.md) for the exact source
+configuration, 3080 Ti starting profile, startup order, two-GPU/two-computer
+settings, orientation check, and acceptance sequence.
+
+## Rehearse audience interaction with the laptop webcam
+
+The optional Depth Anything sensor emulator is separate from MoGe: MoGe
+reconstructs the generated StreamDiffusion image, while this branch estimates
+only audience interaction from the laptop camera. Install its default-off,
+bounded receiver into an ignored local `.toe`:
+
+```python
+from pathlib import Path; import importlib, sys; root = Path(r'C:\path\to\flexgpu-touchdesigner'); sys.path.insert(0, str(root / 'touchdesigner')); import runtime_pipeline as rp; importlib.reload(rp); rp.install_depth_anything_sensor_bridge(op('/project1/flexgpu'))
+```
+
+The bridge is below `WORKING_PIPELINE/SENSOR_INTERACTION/DEPTH_SENSOR_ADAPTER`.
+It receives no RGB, publishes sensor-local XYZ/mask/confidence plus strict
+FRAME_STATE, and selects zero occupancy on stale, error, or disconnect. The
+existing `CALIBRATE_SENSOR_POSITION` remains the only sensor-to-world step.
+
+A paid Depth Anything application or physical sensor may later replace the
+temporary worker. It can publish the same packed WorldBus frame, or a local
+Spout/NDI/TOP/API adapter can feed the existing `OUT_POSITION`, `OUT_MASK`,
+`OUT_CONFIDENCE`, and `FRAME_STATE` boundary. Reconstruction, temporal world,
+interaction, installation, and VR outputs do not change. See
+[docs/DEPTH_ANYTHING_SENSOR.md](../docs/DEPTH_ANYTHING_SENSOR.md) for the
+profile fields, ports, privacy boundary, worker startup, and acceptance test.
+
 Local `.tox` loading remains off unless `source.auto_load_tox` is explicitly
 `true`. In that mode, `streamdiffusion_tox` must resolve to an existing local
 `.tox`, `rgb_operator` is required, and configured depth/confidence/metadata
@@ -204,9 +258,11 @@ receiver-cook DAT/CHOP is not valid producer metadata.
 | `OPERATOR_DASHBOARD` | Declarative settings, status and commissioning checklist |
 | `STARTUP` | Environment-aware helper module and startup callbacks |
 | `WORKING_PIPELINE/SOURCES` | Demo RGB/depth plus private StreamDiffusionTD adapter |
+| `WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER/MOGE2_BRIDGE` | Default-off external-worker generated RGB/metric-depth/mask/confidence path with strict frame and camera metadata |
 | `WORKING_PIPELINE/ROLE_BRIDGE` | Atomic RGBA32F RGB/raw-depth/mask/confidence path over local, Shared Mem, or Touch TCP routes |
 | `WORKING_PIPELINE/RECONSTRUCTION` | Aligned color and depth-to-position GLSL |
 | `WORKING_PIPELINE/SENSOR_INTERACTION` | Calibrated sensor validity plus bounded 8x8 world-space occupancy interaction |
+| `WORKING_PIPELINE/SENSOR_INTERACTION/DEPTH_SENSOR_ADAPTER/DEPTH_ANYTHING_BRIDGE` | Default-off replaceable no-RGB depth/mask/confidence receiver for temporary webcam interaction rehearsal |
 | `WORKING_PIPELINE/TEMPORAL_WORLD` | One-cook frame-aware confidence/age lifecycle plus dt-integrated position/color feedback and automatic contract resets |
 | `WORKING_PIPELINE/COMPLETION` | Working fog, procedural and hybrid GLSL branches |
 | `WORKING_PIPELINE/POINT_RENDER` | Metric TOP-to-POP point renderer, center/parallel-eye cameras, and honest mono fallback |
@@ -452,10 +508,16 @@ sensor validation, projector/LED acceptance, or headset/compositor validation.
   lifecycle rather than optical-flow reprojection or a general-purpose particle
   solver. SHARP/Gaussian nodes are disabled contracts and contain no inference.
 - Configured frame-state operators are sampled into lifecycle state,
-  `LIVE_HEALTH`, and the launcher application heartbeat. The separate
-  camera-metadata operator is still only a resolved adapter boundary; runtime
-  projection/intrinsic changes must come through validated calibration or a
-  production metadata adapter.
+  `LIVE_HEALTH`, and the launcher application heartbeat. A strict
+  `flexgpu-camera-metadata/v1` source operator can now apply frame-bound metric
+  depth scale, intrinsics, near/far range, and a rigid camera-to-world matrix.
+  Unknown fields, mismatched frames, invalid transforms, and same-session
+  calibration drift fail closed.
+- Every explicit sensor `FRAME_STATE`, including a paid-app direct TOP adapter,
+  locks its calibration ID/digest for one producer session. Same-session drift
+  zero-gates interaction without replacing the lock. A deliberate identity
+  change requires a new unique session and resets temporal history when
+  accepted; loaded sensor or legacy shared calibration remains authoritative.
 - The atomic Shared Mem/Touch `.toe` preview bridge is installed automatically,
   and it carries RGB/raw depth/mask/confidence atomically. The 32-bit float
   atlas itself has no producer session/timestamp strings, camera matrices,

@@ -360,6 +360,36 @@ class TouchDesignerRuntimeHelperTests(unittest.TestCase):
             "confidence_mean": 0.8,
         }
 
+    @staticmethod
+    def camera_metadata(
+        frame: dict[str, object], *, generation_id: str = "prompt-1",
+        intrinsics: list[float] | None = None,
+        depth_scale_bias: list[float] | None = None,
+        camera_to_world: list[float] | None = None,
+        near_metres: float = 0.2, far_metres: float = 12.0,
+    ) -> dict[str, object]:
+        return {
+            "version": "flexgpu-camera-metadata/v1",
+            "session_id": frame["session_id"],
+            "frame_id": frame["frame_id"],
+            "timestamp_ns": frame["timestamp_ns"],
+            "width": frame["width"],
+            "height": frame["height"],
+            "generation_id": generation_id,
+            "intrinsics_pixels": intrinsics or [300.0, 320.0, 192.0, 192.0],
+            "depth_scale_bias": depth_scale_bias or [0.001, 0.0],
+            "camera_to_world": camera_to_world or [
+                1, 0, 0, 0.25,
+                0, 1, 0, 0,
+                0, 0, 1, -0.5,
+                0, 0, 0, 1,
+            ],
+            "near_metres": near_metres,
+            "far_metres": far_metres,
+            "calibration_id": frame["calibration_id"],
+            "calibration_digest": frame["calibration_digest"],
+        }
+
     def test_apply_binds_adaptive_quality_to_real_pipeline_nodes(self) -> None:
         helpers = load_helpers()
         root = complete_runtime_root()
@@ -443,6 +473,8 @@ class TouchDesignerRuntimeHelperTests(unittest.TestCase):
         self.assertTrue(sources.par.UseStreamDiffusion.val)
         self.assertTrue(sources.par.UseExternalDepth.val)
         self.assertTrue(adapter.par.Enabled.val)
+        self.assertEqual(sensor.par.Mode.val, "replay")
+        helpers["tick"](root)
         self.assertEqual(sensor.par.Mode.val, "replay")
 
     def test_build_style_apply_can_ignore_ambient_private_config(self) -> None:
@@ -611,6 +643,12 @@ class TouchDesignerRuntimeHelperTests(unittest.TestCase):
 
         reconstruction = root.op("WORKING_PIPELINE/RECONSTRUCTION")
         self.assertEqual(state["calibration_status"], "ready")
+        self.assertEqual(state["source_calibration_status"], "ready")
+        self.assertEqual(state["sensor_calibration_status"], "ready")
+        self.assertEqual(
+            state["source_calibration_digest"], state["sensor_calibration_digest"]
+        )
+        self.assertEqual(state["calibration_id"], state["source_calibration_id"])
         self.assertEqual(reconstruction.par.Depthmode.val, "metric")
         self.assertEqual(reconstruction.par.Depthscale.val, 1.25)
         self.assertAlmostEqual(reconstruction.par.Fxnormalized.val, 0.5)
@@ -847,6 +885,343 @@ class TouchDesignerRuntimeHelperTests(unittest.TestCase):
         )
         self.assertIsNone(helpers["_child_op"](root, root, "metadata"))
 
+    def test_camera_metadata_contract_is_exact_bounded_and_frame_bound(self) -> None:
+        helpers = load_helpers()
+        source = helpers["_validate_frame_state"](
+            self.frame_state(timestamp_ns=100_000_000_000), {}
+        )
+        metadata = self.camera_metadata(source)
+        table_values = dict(metadata)
+        for field in ("frame_id", "timestamp_ns", "width", "height",
+                      "near_metres", "far_metres"):
+            table_values[field] = str(table_values[field])
+        for field in ("intrinsics_pixels", "depth_scale_bias", "camera_to_world"):
+            table_values[field] = json.dumps(table_values[field])
+
+        validated = helpers["_validate_camera_metadata"](table_values, source)
+        self.assertEqual(validated["intrinsics_pixels"], (300.0, 320.0, 192.0, 192.0))
+        self.assertEqual(validated["depth_scale_bias"], (0.001, 0.0))
+
+        extra = dict(metadata, unexpected=True)
+        with self.assertRaisesRegex(ValueError, "unsupported field"):
+            helpers["_validate_camera_metadata"](extra, source)
+        mismatched = dict(metadata, timestamp_ns=int(source["timestamp_ns"]) + 1)
+        with self.assertRaisesRegex(ValueError, "timestamp_ns does not match"):
+            helpers["_validate_camera_metadata"](mismatched, source)
+        non_rigid = dict(metadata)
+        non_rigid["camera_to_world"] = list(metadata["camera_to_world"])
+        non_rigid["camera_to_world"][0] = 1.01
+        with self.assertRaisesRegex(ValueError, "unit length"):
+            helpers["_validate_camera_metadata"](non_rigid, source)
+        bad_digest = dict(metadata, calibration_digest="A" * 64)
+        with self.assertRaisesRegex(ValueError, "lowercase SHA-256"):
+            helpers["_validate_camera_metadata"](bad_digest, source)
+
+    def test_new_camera_metadata_applies_metric_reconstruction_contract(self) -> None:
+        helpers = load_helpers()
+        root = complete_runtime_root()
+        frame = self.frame_state(timestamp_ns=200_000_000_000)
+        frame_node = FakeTextNode("frame_state", json.dumps(frame))
+        camera_node = FakeTextNode(
+            "camera_metadata", json.dumps(self.camera_metadata(frame))
+        )
+        frame_node.isTOP = camera_node.isTOP = False
+        root.nodes.update({"frame_state": frame_node, "camera_metadata": camera_node})
+        state = quiet_apply(
+            helpers, root,
+            {"source": {
+                "mode": "demo",
+                "frame_state_operator": "frame_state",
+                "camera_metadata_operator": "camera_metadata",
+            }},
+        )
+
+        with (
+            mock.patch.object(helpers["time"], "perf_counter", return_value=10.0),
+            mock.patch.object(helpers["time"], "time_ns", return_value=200_001_000_000),
+        ):
+            helpers["tick"](root)
+
+        reconstruction = root.op("WORKING_PIPELINE/RECONSTRUCTION")
+        self.assertEqual(state["source_camera_metadata_status"], "accepted")
+        self.assertNotIn("source_camera_metadata_error", state)
+        self.assertEqual(reconstruction.par.Depthmode.val, "metric")
+        self.assertEqual(reconstruction.par.Depthscale.val, 1.0)
+        self.assertEqual(reconstruction.par.Depthbias.val, 0.0)
+        self.assertEqual(reconstruction.par.Nearmetres.val, 0.2)
+        self.assertEqual(reconstruction.par.Farmetres.val, 12.0)
+        self.assertAlmostEqual(reconstruction.par.Fxnormalized.val, 300.0 / 384.0)
+        self.assertAlmostEqual(reconstruction.par.Fynormalized.val, 320.0 / 384.0)
+        self.assertIn("0.25", reconstruction.par.Cameratoworld0.val)
+        self.assertEqual(state["calibration_id"], "camera-v1")
+        self.assertEqual(state["calibration_digest"], "a" * 64)
+        self.assertEqual(state["source_calibration_id"], "camera-v1")
+        self.assertEqual(state["source_calibration_digest"], "a" * 64)
+        self.assertEqual(
+            reconstruction.par.Calibrationepoch.val,
+            int(("a" * 64)[:8], 16) % 2147483647,
+        )
+        shader = root.op(
+            "WORKING_PIPELINE/RECONSTRUCTION/depth_to_position_PIXEL"
+        ).text
+        self.assertIn("const int depthMode = 1; // FLEXGPU_DEPTH_MODE", shader)
+        self.assertIn("const float depthScale = 1", shader)
+
+        with (
+            mock.patch.object(helpers["time"], "perf_counter", return_value=10.01),
+            mock.patch.object(helpers["time"], "time_ns", return_value=200_002_000_000),
+        ):
+            helpers["tick"](root)
+        self.assertEqual(state["source_camera_metadata_status"], "held")
+        self.assertNotIn("source_camera_metadata_error", state)
+
+    def test_dynamic_source_and_sensor_use_independent_calibration_identities(self) -> None:
+        helpers = load_helpers()
+        root = complete_runtime_root()
+        source_frame = self.frame_state(
+            session_id="moge-session", frame_id=7,
+            timestamp_ns=250_000_000_000, digest="a" * 64,
+        )
+        source_frame_node = FakeTextNode(
+            "source_frame_state", json.dumps(source_frame)
+        )
+        camera_node = FakeTextNode(
+            "source_camera_metadata",
+            json.dumps(self.camera_metadata(source_frame, generation_id="prompt-7")),
+        )
+        sensor_frame = self.frame_state(
+            session_id="webcam-session", frame_id=3,
+            timestamp_ns=250_000_000_000, digest="0" * 64,
+        )
+        sensor_frame_node = FakeTextNode(
+            "sensor_frame_state", json.dumps(sensor_frame)
+        )
+        for node in (source_frame_node, camera_node, sensor_frame_node):
+            node.isTOP = False
+            root.nodes[node.path] = node
+
+        identity = [1, 0, 0, 0, 0, 1, 0, 0,
+                    0, 0, 1, 0, 0, 0, 0, 1]
+        sensor_to_world = [1, 0, 0, -1.25, 0, 1, 0, 0,
+                           0, 0, 1, 0.5, 0, 0, 0, 1]
+        with tempfile.TemporaryDirectory() as directory:
+            calibration = Path(directory) / "webcam-sensor.json"
+            calibration.write_text(
+                json.dumps({
+                    "version": "flexgpu-calibration/v1",
+                    "calibration_id": "webcam-sensor-v1",
+                    "image": {"width": 640, "height": 360},
+                    "intrinsics": {"fx": 500, "fy": 500, "cx": 320, "cy": 180},
+                    "depth": {
+                        "encoding": "metres", "scale": 1, "bias": 0,
+                        "near_m": 0.2, "far_m": 8,
+                    },
+                    "camera_to_world": identity,
+                    "sensor_to_world": sensor_to_world,
+                }),
+                encoding="utf-8",
+            )
+            state = quiet_apply(
+                helpers, root,
+                {
+                    "source": {
+                        "mode": "demo",
+                        "frame_state_operator": source_frame_node.path,
+                        "camera_metadata_operator": camera_node.path,
+                    },
+                    "sensor": {
+                        "mode": "depth_sensor",
+                        "calibration_path": str(calibration),
+                        "frame_state_operator": sensor_frame_node.path,
+                    },
+                },
+            )
+
+        self.assertEqual(state["sensor_calibration_id"], "webcam-sensor-v1")
+        self.assertNotIn("source_calibration_id", state)
+        self.assertNotIn("calibration_id", state)
+        self.assertEqual(state["sensor_route_active"], "disabled")
+        self.assertEqual(
+            root.op("WORKING_PIPELINE/SENSOR_INTERACTION").par.Mode.val,
+            "disabled",
+        )
+        sensor_frame["calibration_id"] = state["sensor_calibration_id"]
+        sensor_frame["calibration_digest"] = state["sensor_calibration_digest"]
+        sensor_frame_node.text = json.dumps(sensor_frame)
+
+        with (
+            mock.patch.object(helpers["time"], "perf_counter", return_value=12.0),
+            mock.patch.object(helpers["time"], "time_ns", return_value=250_001_000_000),
+        ):
+            helpers["tick"](root)
+
+        runtime = root.fetch("_flexgpu_runtime")
+        self.assertTrue(runtime["frame_lifecycle"]["source"]["valid"])
+        self.assertTrue(runtime["frame_lifecycle"]["sensor"]["valid"])
+        self.assertEqual(state["sensor_route_active"], "depth_sensor")
+        self.assertEqual(state["source_calibration_id"], "camera-v1")
+        self.assertEqual(state["source_calibration_digest"], "a" * 64)
+        self.assertEqual(state["calibration_id"], "camera-v1")
+        self.assertEqual(state["sensor_calibration_id"], "webcam-sensor-v1")
+        self.assertNotEqual(
+            state["source_calibration_digest"], state["sensor_calibration_digest"]
+        )
+        self.assertIn(
+            "-1.25",
+            root.op("WORKING_PIPELINE/SENSOR_INTERACTION").par.Sensortoworld0.val,
+        )
+        self.assertIn(
+            "0.25",
+            root.op("WORKING_PIPELINE/RECONSTRUCTION").par.Cameratoworld0.val,
+        )
+
+        rejected_sensor = dict(
+            sensor_frame, frame_id=4, timestamp_ns=250_010_000_000,
+            calibration_id="camera-v1", calibration_digest="a" * 64,
+        )
+        sensor_frame_node.text = json.dumps(rejected_sensor)
+        with (
+            mock.patch.object(helpers["time"], "perf_counter", return_value=12.01),
+            mock.patch.object(helpers["time"], "time_ns", return_value=250_011_000_000),
+        ):
+            helpers["tick"](root)
+        self.assertFalse(runtime["frame_lifecycle"]["sensor"]["valid"])
+        self.assertEqual(
+            runtime["frame_lifecycle"]["sensor"]["decision"],
+            "metadata_rejected",
+        )
+        self.assertEqual(state["sensor_route_active"], "disabled")
+
+        recovered_sensor = dict(
+            rejected_sensor,
+            calibration_id=state["sensor_calibration_id"],
+            calibration_digest=state["sensor_calibration_digest"],
+        )
+        sensor_frame_node.text = json.dumps(recovered_sensor)
+        with (
+            mock.patch.object(helpers["time"], "perf_counter", return_value=12.02),
+            mock.patch.object(helpers["time"], "time_ns", return_value=250_012_000_000),
+        ):
+            helpers["tick"](root)
+        self.assertTrue(runtime["frame_lifecycle"]["sensor"]["valid"])
+        self.assertEqual(state["sensor_route_active"], "depth_sensor")
+
+    def test_frame_state_validation_is_strict_per_stream(self) -> None:
+        helpers = load_helpers()
+        state = {
+            "source_calibration_id": "source-camera-v1",
+            "source_calibration_digest": "a" * 64,
+            "sensor_calibration_id": "audience-sensor-v1",
+            "sensor_calibration_digest": "b" * 64,
+        }
+        source_frame = self.frame_state(digest="a" * 64)
+        source_frame["calibration_id"] = "source-camera-v1"
+        sensor_frame = self.frame_state(digest="b" * 64)
+        sensor_frame["calibration_id"] = "audience-sensor-v1"
+        self.assertEqual(
+            helpers["_validate_frame_state"](source_frame, state, "source")[
+                "calibration_id"
+            ],
+            "source-camera-v1",
+        )
+        self.assertEqual(
+            helpers["_validate_frame_state"](sensor_frame, state, "sensor")[
+                "calibration_id"
+            ],
+            "audience-sensor-v1",
+        )
+        with self.assertRaisesRegex(ValueError, "calibration_id"):
+            helpers["_validate_frame_state"](sensor_frame, state, "source")
+        with self.assertRaisesRegex(ValueError, "calibration_id"):
+            helpers["_validate_frame_state"](source_frame, state, "sensor")
+
+    def test_camera_drift_fails_closed_until_a_new_session_is_accepted(self) -> None:
+        helpers = load_helpers()
+        root = complete_runtime_root()
+        first_frame = self.frame_state(
+            session_id="session-a", frame_id=1, timestamp_ns=300_000_000_000
+        )
+        frame_node = FakeTextNode("frame_state", json.dumps(first_frame))
+        camera_node = FakeTextNode(
+            "camera_metadata", json.dumps(self.camera_metadata(first_frame))
+        )
+        frame_node.isTOP = camera_node.isTOP = False
+        root.nodes.update({"frame_state": frame_node, "camera_metadata": camera_node})
+        state = quiet_apply(
+            helpers, root,
+            {"source": {
+                "mode": "demo",
+                "frame_state_operator": "frame_state",
+                "camera_metadata_operator": "camera_metadata",
+            }},
+        )
+        histories = [
+            root.op("WORKING_PIPELINE/TEMPORAL_WORLD/" + name)
+            for name in ("POSITION_HISTORY", "COLOR_HISTORY", "STATE_HISTORY")
+        ]
+
+        with (
+            mock.patch.object(helpers["time"], "perf_counter", return_value=20.0),
+            mock.patch.object(helpers["time"], "time_ns", return_value=300_001_000_000),
+        ):
+            helpers["tick"](root)
+        self.assertEqual([node.par.reset.pulse_count for node in histories], [2, 2, 2])
+
+        drift_frame = self.frame_state(
+            session_id="session-a", frame_id=2, timestamp_ns=300_010_000_000
+        )
+        drift_metadata = self.camera_metadata(
+            drift_frame, intrinsics=[301.0, 320.0, 192.0, 192.0]
+        )
+        frame_node.text = json.dumps(drift_frame)
+        camera_node.text = json.dumps(drift_metadata)
+        with (
+            mock.patch.object(helpers["time"], "perf_counter", return_value=20.01),
+            mock.patch.object(helpers["time"], "time_ns", return_value=300_011_000_000),
+        ):
+            helpers["tick"](root)
+        source = root.fetch("_flexgpu_runtime")["frame_lifecycle"]["source"]
+        self.assertEqual(state["source_camera_metadata_status"], "rejected")
+        self.assertIn("drift", state["source_camera_metadata_error"])
+        self.assertLessEqual(len(state["source_camera_metadata_error"]), 160)
+        self.assertFalse(source["valid"])
+        self.assertFalse(root.op("WORKING_PIPELINE/SOURCES").par.Sourcevalid.val)
+        self.assertAlmostEqual(
+            root.op("WORKING_PIPELINE/RECONSTRUCTION").par.Fxnormalized.val,
+            300.0 / 384.0,
+        )
+        self.assertEqual([node.par.reset.pulse_count for node in histories], [2, 2, 2])
+
+        new_frame = self.frame_state(
+            session_id="session-b", frame_id=0,
+            timestamp_ns=300_020_000_000, digest="b" * 64,
+        )
+        new_frame["calibration_id"] = "camera-v2"
+        new_metadata = self.camera_metadata(
+            new_frame, generation_id="prompt-2",
+            intrinsics=[301.0, 320.0, 192.0, 192.0],
+        )
+        frame_node.text = json.dumps(new_frame)
+        camera_node.text = json.dumps(new_metadata)
+        with (
+            mock.patch.object(helpers["time"], "perf_counter", return_value=20.02),
+            mock.patch.object(helpers["time"], "time_ns", return_value=300_021_000_000),
+        ):
+            helpers["tick"](root)
+        source = root.fetch("_flexgpu_runtime")["frame_lifecycle"]["source"]
+        self.assertTrue(source["valid"])
+        self.assertTrue(source["new_frame"])
+        self.assertEqual(state["source_camera_metadata_status"], "accepted")
+        self.assertNotIn("source_camera_metadata_error", state)
+        self.assertEqual(state["source_camera_session_id"], "session-b")
+        self.assertEqual(state["source_generation_id"], "prompt-2")
+        self.assertEqual(state["calibration_digest"], "b" * 64)
+        self.assertAlmostEqual(
+            root.op("WORKING_PIPELINE/RECONSTRUCTION").par.Fxnormalized.val,
+            301.0 / 384.0,
+        )
+        self.assertEqual([node.par.reset.pulse_count for node in histories], [3, 3, 3])
+
     def test_explicit_frame_lifecycle_pulses_once_and_rejects_old_frames(self) -> None:
         helpers = load_helpers()
         root = complete_runtime_root()
@@ -910,6 +1285,181 @@ class TouchDesignerRuntimeHelperTests(unittest.TestCase):
             runtime, "source", first, now, 1.2, 1000.0
         )
         self.assertEqual(replay["decision"], "retired_session_rejected")
+
+    def test_sensor_calibration_identity_is_frozen_per_explicit_session(self) -> None:
+        helpers = load_helpers()
+        runtime = {"frame_lifecycle": {}}
+        now = 400_020_000_000
+        first = helpers["_validate_frame_state"](
+            self.frame_state(
+                session_id="paid-app-a", frame_id=1,
+                timestamp_ns=400_000_000_000, digest="a" * 64,
+            ),
+            {}, "sensor",
+        )
+        first["calibration_id"] = "paid-sensor-a"
+        accepted = dict(helpers["_accept_explicit_frame"](
+            runtime, "sensor", first, now, 1.0, 1000.0
+        ))
+        self.assertTrue(accepted["valid"])
+        self.assertEqual(accepted["calibration_id"], "paid-sensor-a")
+
+        drift = dict(
+            first, frame_id=2, timestamp_ns=400_010_000_000,
+            calibration_id="paid-sensor-b", calibration_digest="b" * 64,
+        )
+        rejected = dict(helpers["_accept_explicit_frame"](
+            runtime, "sensor", drift, now, 1.1, 1000.0
+        ))
+        self.assertFalse(rejected["valid"])
+        self.assertFalse(rejected["new_frame"])
+        self.assertEqual(rejected["decision"], "calibration_drift_rejected")
+        self.assertIn("producer session", rejected["error"])
+        self.assertEqual(rejected["accepted_count"], 1)
+        self.assertEqual(rejected["frame_id"], 1)
+        self.assertEqual(rejected["calibration_id"], "paid-sensor-a")
+        self.assertEqual(rejected["calibration_digest"], "a" * 64)
+
+        corrected = dict(
+            drift, calibration_id="paid-sensor-a", calibration_digest="a" * 64,
+        )
+        recovered = dict(helpers["_accept_explicit_frame"](
+            runtime, "sensor", corrected, now, 1.2, 1000.0
+        ))
+        self.assertTrue(recovered["valid"])
+        self.assertEqual(recovered["decision"], "accepted")
+        self.assertNotIn("error", recovered)
+
+        replacement = dict(
+            drift, session_id="paid-app-b", frame_id=0,
+            timestamp_ns=400_015_000_000,
+        )
+        replaced = dict(helpers["_accept_explicit_frame"](
+            runtime, "sensor", replacement, now, 1.3, 1000.0
+        ))
+        self.assertTrue(replaced["valid"])
+        self.assertEqual(replaced["decision"], "new_session")
+        self.assertEqual(replaced["calibration_id"], "paid-sensor-b")
+        self.assertEqual(replaced["calibration_digest"], "b" * 64)
+        self.assertIn("paid-app-a", replaced["retired_sessions"])
+
+    def test_sensor_session_recalibration_resets_temporal_contract(self) -> None:
+        helpers = load_helpers()
+        root = complete_runtime_root()
+        frame = self.frame_state(
+            session_id="paid-app-a", frame_id=1,
+            timestamp_ns=500_000_000_000, digest="a" * 64,
+        )
+        frame["calibration_id"] = "paid-sensor-a"
+        frame_node = FakeTextNode("paid_sensor_frame_state", json.dumps(frame))
+        frame_node.isTOP = False
+        root.nodes[frame_node.path] = frame_node
+        state = quiet_apply(
+            helpers, root,
+            {"sensor": {
+                "mode": "depth_sensor",
+                "frame_state_operator": frame_node.path,
+                "stale_timeout_ms": 800,
+            }},
+        )
+        histories = [
+            root.op("WORKING_PIPELINE/TEMPORAL_WORLD/" + name)
+            for name in ("POSITION_HISTORY", "COLOR_HISTORY", "STATE_HISTORY")
+        ]
+
+        with (
+            mock.patch.object(helpers["time"], "perf_counter", return_value=30.0),
+            mock.patch.object(helpers["time"], "time_ns", return_value=500_001_000_000),
+        ):
+            helpers["tick"](root)
+        runtime = root.fetch("_flexgpu_runtime")
+        sensor = runtime["frame_lifecycle"]["sensor"]
+        self.assertTrue(sensor["valid"])
+        self.assertEqual(state["sensor_route_active"], "depth_sensor")
+        self.assertEqual(state["sensor_frame_session_id"], "paid-app-a")
+        self.assertEqual(state["sensor_frame_calibration_id"], "paid-sensor-a")
+        self.assertEqual(state["sensor_frame_calibration_digest"], "a" * 64)
+        self.assertNotIn("sensor_calibration_id", state)
+        first_reset_count = runtime["temporal_reset_count"]
+        first_pulses = [node.par.reset.pulse_count for node in histories]
+
+        drift = dict(
+            frame, frame_id=2, timestamp_ns=500_010_000_000,
+            calibration_id="paid-sensor-b", calibration_digest="b" * 64,
+        )
+        frame_node.text = json.dumps(drift)
+        with (
+            mock.patch.object(helpers["time"], "perf_counter", return_value=30.01),
+            mock.patch.object(helpers["time"], "time_ns", return_value=500_011_000_000),
+        ):
+            helpers["tick"](root)
+        sensor = runtime["frame_lifecycle"]["sensor"]
+        self.assertFalse(sensor["valid"])
+        self.assertEqual(sensor["decision"], "calibration_drift_rejected")
+        self.assertEqual(state["sensor_route_active"], "disabled")
+        self.assertEqual(state["sensor_frame_calibration_id"], "paid-sensor-a")
+        self.assertEqual(runtime["temporal_reset_count"], first_reset_count)
+        self.assertEqual(
+            [node.par.reset.pulse_count for node in histories], first_pulses
+        )
+
+        replacement = dict(
+            drift, session_id="paid-app-b", frame_id=0,
+            timestamp_ns=500_020_000_000,
+        )
+        frame_node.text = json.dumps(replacement)
+        with (
+            mock.patch.object(helpers["time"], "perf_counter", return_value=30.02),
+            mock.patch.object(helpers["time"], "time_ns", return_value=500_021_000_000),
+        ):
+            helpers["tick"](root)
+        sensor = runtime["frame_lifecycle"]["sensor"]
+        self.assertTrue(sensor["valid"])
+        self.assertEqual(sensor["decision"], "new_session")
+        self.assertEqual(state["sensor_route_active"], "depth_sensor")
+        self.assertEqual(state["sensor_frame_session_id"], "paid-app-b")
+        self.assertEqual(state["sensor_frame_calibration_id"], "paid-sensor-b")
+        self.assertEqual(state["sensor_frame_calibration_digest"], "b" * 64)
+        self.assertEqual(runtime["temporal_reset_count"], first_reset_count + 1)
+        self.assertEqual(
+            [node.par.reset.pulse_count for node in histories],
+            [count + 1 for count in first_pulses],
+        )
+
+    def test_dynamic_sensor_lock_does_not_change_source_or_legacy_validation(self) -> None:
+        helpers = load_helpers()
+        runtime = {"frame_lifecycle": {}}
+        now = 600_020_000_000
+        source_a = helpers["_validate_frame_state"](
+            self.frame_state(
+                session_id="source-a", frame_id=1,
+                timestamp_ns=600_000_000_000, digest="a" * 64,
+            ), {}, "source",
+        )
+        source_b = dict(
+            source_a, frame_id=2, timestamp_ns=600_010_000_000,
+            calibration_id="camera-v2", calibration_digest="b" * 64,
+        )
+        helpers["_accept_explicit_frame"](
+            runtime, "source", source_a, now, 1.0, 1000.0
+        )
+        accepted_source = helpers["_accept_explicit_frame"](
+            runtime, "source", source_b, now, 1.1, 1000.0
+        )
+        self.assertTrue(accepted_source["valid"])
+        self.assertEqual(accepted_source["decision"], "accepted")
+        self.assertEqual(accepted_source["calibration_id"], "camera-v2")
+
+        legacy = {
+            "calibration_id": "legacy-shared-v1",
+            "calibration_digest": "c" * 64,
+        }
+        mismatched_sensor = self.frame_state(digest="d" * 64)
+        mismatched_sensor["calibration_id"] = "paid-sensor-v2"
+        with self.assertRaisesRegex(ValueError, "calibration_id"):
+            helpers["_validate_frame_state"](
+                mismatched_sensor, legacy, "sensor"
+            )
 
     def test_metadata_less_cook_frame_fallback_holds_without_reabsorption(self) -> None:
         helpers = load_helpers()

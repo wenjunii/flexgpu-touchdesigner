@@ -124,6 +124,74 @@ class BootstrapRuntimeSourceTests(unittest.TestCase):
         ):
             self.assertIn(marker, self.runtime)
 
+    def test_camera_metadata_is_frame_bound_before_temporal_signature(self) -> None:
+        for marker in (
+            "CAMERA_METADATA_VERSION = 'flexgpu-camera-metadata/v1'",
+            "def _validate_camera_metadata",
+            "def _sample_source_camera_metadata",
+            "camera calibration drift is forbidden within a source session",
+        ):
+            self.assertIn(marker, self.runtime)
+        lifecycle = self.runtime.index(
+            "    _sample_frame_lifecycle(root_comp, runtime, now_ns, now)"
+        )
+        camera = self.runtime.index(
+            "    camera_contract_accepted = _sample_source_camera_metadata"
+        )
+        calibration = self.runtime.index(
+            "        _apply_calibrated_contracts(root_comp, runtime['state'])",
+            camera,
+        )
+        signature = self.runtime.index(
+            "    signature_changed = _check_temporal_signature", camera
+        )
+        self.assertLess(lifecycle, camera)
+        self.assertLess(camera, calibration)
+        self.assertLess(calibration, signature)
+
+    def test_source_and_sensor_calibration_identities_are_independent(self) -> None:
+        for marker in (
+            "def _calibration_targets",
+            "def _calibration_identity",
+            "state[target + '_calibration_id']",
+            "state[target + '_calibration_digest']",
+            "state['source_calibration_id'] = metadata['calibration_id']",
+            "_calibration_identity(state, label)",
+            "_load_calibration(root_comp, state, configured_path, label='shared')",
+        ):
+            self.assertIn(marker, self.runtime)
+        dynamic = self.runtime.split("dynamic_camera_identity = (", 1)[1].split(
+            "if expected_id", 1
+        )[0]
+        self.assertIn("source_config.get('calibration_path')", dynamic)
+        self.assertNotIn("sensor_config", dynamic)
+        camera_static = self.runtime.split(
+            "static_identity = bool(source_config.get('calibration_path'))", 1
+        )[1].split("_apply_camera_metadata_contract", 1)[0]
+        self.assertNotIn("state.get('sensor')", camera_static)
+
+    def test_explicit_sensor_identity_lock_precedes_temporal_signature(self) -> None:
+        for marker in (
+            "label == 'sensor' and previous_session == session_id",
+            "calibration_drift_rejected",
+            "def _publish_sensor_frame_identity",
+            "sensor_frame_calibration_id",
+            "sensor_frame_calibration_digest",
+        ):
+            self.assertIn(marker, self.runtime)
+        publish_call = self.runtime.index(
+            "    _publish_sensor_frame_identity(state, sensor)"
+        )
+        signature_call = self.runtime.index(
+            "    signature_changed = _check_temporal_signature"
+        )
+        self.assertLess(publish_call, signature_call)
+        accept = self.runtime.split("def _accept_explicit_frame", 1)[1].split(
+            "def _operator_cook_token", 1
+        )[0]
+        self.assertIn("label == 'sensor'", accept)
+        self.assertNotIn("label == 'source'", accept)
+
     def test_runtime_overrides_are_bounded_and_point_budget_matches_texture(self) -> None:
         self.assertIn("def _bounded_integer", self.runtime)
         self.assertIn("def _bounded_number", self.runtime)

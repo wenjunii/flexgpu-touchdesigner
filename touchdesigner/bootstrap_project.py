@@ -51,6 +51,7 @@ import time
 
 RUNTIME_BUILD_VERSION = '1.2.1'
 FRAME_STATE_VERSION = 'flexgpu-frame-state/v1'
+CAMERA_METADATA_VERSION = 'flexgpu-camera-metadata/v1'
 HEARTBEAT_VERSION = 1
 IDENTIFIER_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$')
 SHA256_PATTERN = re.compile(r'^[0-9a-f]{64}$')
@@ -510,8 +511,13 @@ def _public_state(state):
         'transport_type', 'transport_fps', 'transport_atlas_width',
         'transport_atlas_height', 'bridge_mode', 'adaptive_enabled',
         'adaptive_level', 'sensor_mode_active', 'source_mode_active',
+        'sensor_route_active',
         'source_frame_decision', 'source_metadata_mode',
+        'source_camera_metadata_status', 'source_camera_metadata_error',
+        'source_camera_session_id', 'source_generation_id',
+        'source_calibration_status', 'source_calibration_error',
         'sensor_frame_decision', 'sensor_metadata_mode',
+        'sensor_calibration_status', 'sensor_calibration_error',
     )
     return dict((key, state[key]) for key in public_keys if key in state)
 
@@ -712,6 +718,8 @@ def _temporal_signature(root_comp, state):
     reconstruction = root_comp.op('WORKING_PIPELINE/RECONSTRUCTION')
     source_config = _mapping(state.get('source'))
     sensor_config = _mapping(state.get('sensor'))
+    source_calibration = _calibration_identity(state, 'source')
+    sensor_calibration = _calibration_identity(state, 'sensor')
     values = [
         _integer(_value(reconstruction, 'Geometryresolution',
                         state.get('geometry_resolution', 384)), 384),
@@ -728,12 +736,24 @@ def _temporal_signature(root_comp, state):
         _number(_value(reconstruction, 'Cxnormalized', 0.5), 0.5),
         _number(_value(reconstruction, 'Cynormalized', 0.5), 0.5),
         _integer(_value(reconstruction, 'Calibrationepoch', 0), 0),
-        str(state.get('calibration_id', '')),
-        str(state.get('calibration_digest', '')),
+        str(source_calibration[0] or ''),
+        str(source_calibration[1] or ''),
+        str(sensor_calibration[0] or ''),
+        str(sensor_calibration[1] or ''),
+        str(state.get('sensor_frame_calibration_id', '')),
+        str(state.get('sensor_frame_calibration_digest', '')),
+        str(state.get('source_camera_session_id', '')),
+        str(state.get('source_generation_id', '')),
     ]
     for index in range(4):
         values.append(tuple(_vec4(
             _value(reconstruction, 'Cameratoworld%d' % index, ''),
+            ((1, 0, 0, 0), (0, 1, 0, 0),
+             (0, 0, 1, 0), (0, 0, 0, 1))[index])))
+    sensor_comp = root_comp.op('WORKING_PIPELINE/SENSOR_INTERACTION')
+    for index in range(4):
+        values.append(tuple(_vec4(
+            _value(sensor_comp, 'Sensortoworld%d' % index, ''),
             ((1, 0, 0, 0), (0, 1, 0, 0),
              (0, 0, 1, 0), (0, 0, 0, 1))[index])))
     # Configured local adapter/calibration identities are safe fingerprints;
@@ -826,6 +846,8 @@ def _health_snapshot(root_comp, runtime, frame_ms):
         ('source_contract_error', 'source_contract_error'),
         ('sensor_contract_error', 'sensor_contract_error'),
         ('calibration_error', 'calibration_error'),
+        ('source_calibration_error', 'source_calibration_error'),
+        ('sensor_calibration_error', 'sensor_calibration_error'),
         ('source_fallback', 'source_fallback'),
         ('sensor_fallback', 'sensor_fallback'),
     ):
@@ -1002,10 +1024,58 @@ def _strict_pairs(pairs):
 def _reject_json_constant(value):
     raise ValueError('non-finite calibration number')
 
-def _load_calibration(root_comp, state, configured_path):
+def _calibration_targets(state, label):
+    """Return the streams a calibration file owns.
+
+    Explicit source and sensor calibration paths are independent. A single
+    legacy path still owns both transforms, unless a dynamic source-camera
+    metadata producer makes the source identity authoritative at runtime.
+    """
+    if label == 'shared':
+        return ('source', 'sensor')
+    if label not in ('source', 'sensor'):
+        raise ValueError('unsupported calibration stream')
+    source = _mapping(state.get('source'))
+    sensor = _mapping(state.get('sensor'))
+    if label == 'source':
+        return (('source',) if sensor.get('calibration_path') else
+                ('source', 'sensor'))
+    owns_dynamic_source = bool(source.get('camera_metadata_operator')) and not bool(
+        source.get('calibration_path'))
+    if source.get('calibration_path') or owns_dynamic_source:
+        return ('sensor',)
+    return ('source', 'sensor')
+
+def _calibration_identity(state, label):
+    """Return one stream's identity, accepting the pre-split state contract."""
+    identity_key = label + '_calibration_id'
+    digest_key = label + '_calibration_digest'
+    if identity_key in state or digest_key in state:
+        return state.get(identity_key), state.get(digest_key)
+    split_keys = (
+        'source_calibration_id', 'source_calibration_digest',
+        'sensor_calibration_id', 'sensor_calibration_digest',
+    )
+    if not any(key in state for key in split_keys):
+        return state.get('calibration_id'), state.get('calibration_digest')
+    return None, None
+
+def _record_calibration_error(state, label, message):
+    safe = str(message).strip()[:160] or 'calibration validation failed'
+    try:
+        targets = _calibration_targets(state, label)
+    except Exception:
+        targets = (label,) if label in ('source', 'sensor') else ('source', 'sensor')
+    for target in targets:
+        state[target + '_calibration_error'] = safe
+    # Preserve the legacy aggregate error used by readiness and launchers.
+    state['calibration_error'] = safe
+
+def _load_calibration(root_comp, state, configured_path, label='shared'):
     path = _local_path(state, configured_path, '.json')
     if not path:
-        state['calibration_error'] = 'configured calibration is missing or invalid'
+        _record_calibration_error(
+            state, label, 'configured calibration is missing or invalid')
         return False
     try:
         if os.path.getsize(path) > 1024 * 1024:
@@ -1028,9 +1098,6 @@ def _load_calibration(root_comp, state, configured_path):
                 re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}',
                              calibration_id) is None):
             raise ValueError('invalid calibration id')
-        existing_id = state.get('calibration_id')
-        if existing_id and existing_id != calibration_id:
-            raise ValueError('source and sensor calibration ids differ')
         image = data.get('image')
         if not isinstance(image, dict) or set(image).difference({'width', 'height'}):
             raise ValueError('invalid calibration image')
@@ -1122,33 +1189,48 @@ def _load_calibration(root_comp, state, configured_path):
                     SHA256_PATTERN.fullmatch(supplied_digest) is None or
                     supplied_digest != calibration_digest):
                 raise ValueError('calibration digest does not match content')
-        existing_digest = state.get('calibration_digest')
-        if existing_digest and existing_digest != calibration_digest:
-            raise ValueError('source and sensor calibration digests differ')
+        targets = _calibration_targets(state, label)
+        for target in targets:
+            existing_id, existing_digest = _calibration_identity(state, target)
+            if existing_id and existing_id != calibration_id:
+                raise ValueError(target + ' calibration id changed during apply')
+            if existing_digest and existing_digest != calibration_digest:
+                raise ValueError(target + ' calibration digest changed during apply')
         reconstruction = root_comp.op('WORKING_PIPELINE/RECONSTRUCTION')
-        _set(reconstruction, 'Depthmode', mode)
-        _set(reconstruction, 'Depthscale', scale)
-        _set(reconstruction, 'Depthbias', bias)
-        _set(reconstruction, 'Nearmetres', near_m)
-        _set(reconstruction, 'Farmetres', far_m)
-        _set(reconstruction, 'Fxnormalized', fx / float(width))
-        _set(reconstruction, 'Fynormalized', fy / float(height))
-        _set(reconstruction, 'Cxnormalized', cx / float(width))
-        _set(reconstruction, 'Cynormalized', cy / float(height))
         epoch = int(calibration_digest[:8], 16) % 2147483647
-        _set(reconstruction, 'Calibrationepoch', epoch)
         sensor_comp = root_comp.op('WORKING_PIPELINE/SENSOR_INTERACTION')
-        for index in range(4):
-            _set(reconstruction, 'Cameratoworld%d' % index,
-                 ' '.join('%.12g' % item for item in camera[index * 4:index * 4 + 4]))
-            _set(sensor_comp, 'Sensortoworld%d' % index,
-                 ' '.join('%.12g' % item for item in sensor[index * 4:index * 4 + 4]))
-        state['calibration_id'] = calibration_id
-        state['calibration_digest'] = calibration_digest
-        state['calibration_status'] = 'ready'
+        if 'source' in targets:
+            _set(reconstruction, 'Depthmode', mode)
+            _set(reconstruction, 'Depthscale', scale)
+            _set(reconstruction, 'Depthbias', bias)
+            _set(reconstruction, 'Nearmetres', near_m)
+            _set(reconstruction, 'Farmetres', far_m)
+            _set(reconstruction, 'Fxnormalized', fx / float(width))
+            _set(reconstruction, 'Fynormalized', fy / float(height))
+            _set(reconstruction, 'Cxnormalized', cx / float(width))
+            _set(reconstruction, 'Cynormalized', cy / float(height))
+            _set(reconstruction, 'Calibrationepoch', epoch)
+            for index in range(4):
+                _set(reconstruction, 'Cameratoworld%d' % index, ' '.join(
+                    '%.12g' % item for item in camera[index * 4:index * 4 + 4]))
+        if 'sensor' in targets:
+            for index in range(4):
+                _set(sensor_comp, 'Sensortoworld%d' % index, ' '.join(
+                    '%.12g' % item for item in sensor[index * 4:index * 4 + 4]))
+        for target in targets:
+            state[target + '_calibration_id'] = calibration_id
+            state[target + '_calibration_digest'] = calibration_digest
+            state[target + '_calibration_status'] = 'ready'
+            state.pop(target + '_calibration_error', None)
+        if 'source' in targets:
+            # Compatibility alias: the historic aggregate identity is the
+            # image-derived reconstruction/source-camera identity.
+            state['calibration_id'] = calibration_id
+            state['calibration_digest'] = calibration_digest
+            state['calibration_status'] = 'ready'
         return True
     except Exception:
-        state['calibration_error'] = 'calibration validation failed'
+        _record_calibration_error(state, label, 'calibration validation failed')
         return False
 
 def _configure_source_adapter(root_comp, state, source):
@@ -1186,7 +1268,8 @@ def _configure_source_adapter(root_comp, state, source):
                 return False
             state['source_' + field + '_path'] = str(resolved.path)
     calibration_path = source.get('calibration_path')
-    if calibration_path and not _load_calibration(root_comp, state, calibration_path):
+    if calibration_path and not _load_calibration(
+            root_comp, state, calibration_path, 'source'):
         return False
     state['source_adapter_status'] = 'ready'
     return True
@@ -1223,7 +1306,8 @@ def _configure_sensor_adapter(root_comp, state, sensor):
                 return False
             state['sensor_' + field + '_path'] = str(resolved.path)
     calibration_path = sensor.get('calibration_path')
-    if calibration_path and not _load_calibration(root_comp, state, calibration_path):
+    if calibration_path and not _load_calibration(
+            root_comp, state, calibration_path, 'sensor'):
         return False
     state['sensor_adapter_status'] = 'ready'
     return True
@@ -1300,7 +1384,7 @@ def _strict_frame_integer(value, field, low, high):
         raise ValueError(field + ' is outside the supported range')
     return parsed
 
-def _validate_frame_state(value, state):
+def _validate_frame_state(value, state, label='source'):
     if not isinstance(value, dict):
         raise ValueError('frame state must be an object')
     allowed = {'version', 'session_id', 'frame_id', 'timestamp_ns',
@@ -1324,11 +1408,17 @@ def _validate_frame_state(value, state):
     digest = value.get('calibration_digest')
     if not isinstance(digest, str) or SHA256_PATTERN.fullmatch(digest) is None:
         raise ValueError('calibration_digest must be lowercase SHA-256')
-    expected_id = state.get('calibration_id')
-    expected_digest = state.get('calibration_digest')
-    if expected_id and calibration_id != expected_id:
+    if label not in ('source', 'sensor'):
+        raise ValueError('frame state has an unsupported stream label')
+    expected_id, expected_digest = _calibration_identity(state, label)
+    source_config = _mapping(state.get('source'))
+    dynamic_camera_identity = (
+        label == 'source' and bool(source_config.get('camera_metadata_operator')) and
+        not bool(source_config.get('calibration_path')))
+    if expected_id and not dynamic_camera_identity and calibration_id != expected_id:
         raise ValueError('frame calibration_id does not match loaded calibration')
-    if expected_digest and digest != expected_digest:
+    if (expected_digest and not dynamic_camera_identity and
+            digest != expected_digest):
         raise ValueError('frame calibration_digest does not match loaded calibration')
     valid_fraction = _finite(value.get('valid_fraction'), 'valid_fraction')
     confidence_mean = _finite(value.get('confidence_mean'), 'confidence_mean')
@@ -1350,6 +1440,273 @@ def _validate_frame_state(value, state):
         'valid_fraction':valid_fraction,
         'confidence_mean':confidence_mean,
     }
+
+def _camera_metadata_sequence(value, field, length):
+    if isinstance(value, str):
+        try:
+            value = json.loads(value, parse_constant=_reject_json_constant)
+        except Exception:
+            raise ValueError(field + ' must be a JSON array')
+    if not isinstance(value, (list, tuple)) or len(value) != length:
+        raise ValueError('%s must contain exactly %d numbers' % (field, length))
+    return tuple(_finite(item, field) for item in value)
+
+def _validate_rigid_camera_matrix(value):
+    matrix = _camera_metadata_sequence(value, 'camera_to_world', 16)
+    if (abs(matrix[12]) > 1e-6 or abs(matrix[13]) > 1e-6 or
+            abs(matrix[14]) > 1e-6 or abs(matrix[15] - 1.0) > 1e-6):
+        raise ValueError('camera_to_world must be homogeneous row-major')
+    basis = (matrix[0:3], matrix[4:7], matrix[8:11])
+    for index, axis in enumerate(basis):
+        length_squared = sum(component * component for component in axis)
+        if abs(length_squared - 1.0) > TRANSFORM_TOLERANCE:
+            raise ValueError(
+                'camera_to_world spatial basis axis %d must have unit length' % index)
+    for first, second in ((0, 1), (0, 2), (1, 2)):
+        dot = sum(basis[first][component] * basis[second][component]
+                  for component in range(3))
+        if abs(dot) > TRANSFORM_TOLERANCE:
+            raise ValueError('camera_to_world spatial basis must be orthonormal')
+    determinant = (
+        matrix[0] * (matrix[5] * matrix[10] - matrix[6] * matrix[9]) -
+        matrix[1] * (matrix[4] * matrix[10] - matrix[6] * matrix[8]) +
+        matrix[2] * (matrix[4] * matrix[9] - matrix[5] * matrix[8]))
+    if (determinant <= 0.0 or
+            abs(determinant - 1.0) > TRANSFORM_TOLERANCE * 4):
+        raise ValueError(
+            'camera_to_world must have a rigid right-handed spatial basis')
+    return matrix
+
+def _validate_camera_metadata(value, source_frame):
+    if not isinstance(value, dict):
+        raise ValueError('camera metadata must be an object')
+    required = {
+        'version', 'session_id', 'frame_id', 'timestamp_ns', 'width', 'height',
+        'generation_id', 'intrinsics_pixels', 'depth_scale_bias',
+        'camera_to_world', 'near_metres', 'far_metres', 'calibration_id',
+        'calibration_digest',
+    }
+    actual = set(value)
+    missing = sorted(required.difference(actual))
+    if missing:
+        raise ValueError('camera metadata is missing ' + missing[0])
+    if actual.difference(required):
+        raise ValueError('camera metadata contains an unsupported field')
+    if value.get('version') != CAMERA_METADATA_VERSION:
+        raise ValueError('unsupported camera-metadata version')
+
+    session_id = value.get('session_id')
+    calibration_id = value.get('calibration_id')
+    for field, identifier in (('session_id', session_id),
+                              ('calibration_id', calibration_id)):
+        if (not isinstance(identifier, str) or len(identifier) > 64 or
+                IDENTIFIER_PATTERN.fullmatch(identifier) is None):
+            raise ValueError(field + ' must be a conservative identifier')
+    generation_id = value.get('generation_id')
+    if (not isinstance(generation_id, str) or not generation_id or
+            len(generation_id.encode('utf-8')) > 256 or
+            any(ord(character) < 32 for character in generation_id)):
+        raise ValueError('generation_id must be a bounded non-empty string')
+    digest = value.get('calibration_digest')
+    if not isinstance(digest, str) or SHA256_PATTERN.fullmatch(digest) is None:
+        raise ValueError('calibration_digest must be lowercase SHA-256')
+
+    metadata = {
+        'version':CAMERA_METADATA_VERSION,
+        'session_id':session_id,
+        'frame_id':_strict_frame_integer(
+            value.get('frame_id'), 'frame_id', 0, 2 ** 63 - 1),
+        'timestamp_ns':_strict_frame_integer(
+            value.get('timestamp_ns'), 'timestamp_ns', 1, 2 ** 63 - 1),
+        'width':_strict_frame_integer(value.get('width'), 'width', 1, 16384),
+        'height':_strict_frame_integer(value.get('height'), 'height', 1, 16384),
+        'generation_id':generation_id,
+        'calibration_id':calibration_id,
+        'calibration_digest':digest,
+    }
+    intrinsics = _camera_metadata_sequence(
+        value.get('intrinsics_pixels'), 'intrinsics_pixels', 4)
+    fx, fy, cx, cy = intrinsics
+    width = metadata['width']
+    height = metadata['height']
+    if fx <= 0.0 or fy <= 0.0:
+        raise ValueError('intrinsics focal lengths must be greater than zero')
+    if fx > width * 100.0 or fy > height * 100.0:
+        raise ValueError('intrinsics focal lengths are outside supported bounds')
+    if not (-width <= cx <= width * 2 and -height <= cy <= height * 2):
+        raise ValueError('intrinsics principal point is outside supported bounds')
+    depth = _camera_metadata_sequence(
+        value.get('depth_scale_bias'), 'depth_scale_bias', 2)
+    if depth[0] <= 0.0 or depth[0] > 1000.0:
+        raise ValueError('depth scale must be greater than zero and at most 1000')
+    if depth[1] < 0.0 or depth[1] > 1000.0:
+        raise ValueError('depth bias must be between zero and 1000')
+    near_metres = _finite(value.get('near_metres'), 'near_metres')
+    far_metres = _finite(value.get('far_metres'), 'far_metres')
+    if (near_metres <= 0.0 or far_metres <= near_metres or
+            far_metres > 1000.0):
+        raise ValueError('camera metadata contains an invalid depth range')
+    camera = _validate_rigid_camera_matrix(value.get('camera_to_world'))
+    metadata.update({
+        'intrinsics_pixels':intrinsics,
+        'depth_scale_bias':depth,
+        'camera_to_world':camera,
+        'near_metres':near_metres,
+        'far_metres':far_metres,
+    })
+
+    if not isinstance(source_frame, dict):
+        raise ValueError('new source frame is unavailable')
+    for field in ('session_id', 'frame_id', 'timestamp_ns', 'width', 'height'):
+        if source_frame.get(field) != metadata[field]:
+            raise ValueError('camera metadata %s does not match accepted frame' % field)
+    for field in ('calibration_id', 'calibration_digest'):
+        if source_frame.get(field) != metadata[field]:
+            raise ValueError('camera metadata %s does not match frame state' % field)
+    return metadata
+
+def _camera_calibration_signature(metadata):
+    return (
+        metadata['width'], metadata['height'],
+        tuple(metadata['intrinsics_pixels']), tuple(metadata['depth_scale_bias']),
+        tuple(metadata['camera_to_world']), metadata['near_metres'],
+        metadata['far_metres'], metadata['calibration_id'],
+        metadata['calibration_digest'],
+    )
+
+def _camera_metadata_node(root_comp, state):
+    path = state.get('source_camera_metadata_operator_path')
+    if not path:
+        path = _mapping(state.get('source')).get('camera_metadata_operator')
+    if not path:
+        return None
+    try:
+        return root_comp.op(str(path))
+    except Exception:
+        return None
+
+def _camera_frame_identity(source_frame):
+    return tuple(source_frame.get(field) for field in (
+        'session_id', 'frame_id', 'timestamp_ns', 'width', 'height'))
+
+def _reject_source_camera_metadata(root_comp, runtime, source_frame, error):
+    message = str(error).strip()[:160] or 'camera metadata was rejected'
+    state = runtime['state']
+    state['source_camera_metadata_status'] = 'rejected'
+    state['source_camera_metadata_error'] = message
+    runtime['source_camera_rejected_identity'] = _camera_frame_identity(source_frame)
+    runtime['source_camera_rejected_error'] = message
+    source_frame.update({
+        'new_frame':False, 'valid':False,
+        'decision':'camera_metadata_rejected', 'error':message,
+    })
+    sources = root_comp.op('WORKING_PIPELINE/SOURCES')
+    temporal = root_comp.op('WORKING_PIPELINE/TEMPORAL_WORLD')
+    bridge = root_comp.op('WORKING_PIPELINE/ROLE_BRIDGE')
+    _set(sources, 'Newframe', False)
+    _set(sources, 'Sourcevalid', False)
+    _set(temporal, 'Newframe', False)
+    _set(temporal, 'Sourcevalid', False)
+    _set(bridge, 'Framevalid', False)
+    state['source_frame_decision'] = 'camera_metadata_rejected'
+    return False
+
+def _apply_camera_metadata_contract(root_comp, runtime, metadata):
+    state = runtime['state']
+    reconstruction = root_comp.op('WORKING_PIPELINE/RECONSTRUCTION')
+    width = float(metadata['width'])
+    height = float(metadata['height'])
+    fx, fy, cx, cy = metadata['intrinsics_pixels']
+    _set(reconstruction, 'Depthmode', 'metric')
+    # The bridge unpacker has already converted packed uint16 depth to metres.
+    _set(reconstruction, 'Depthscale', 1.0)
+    _set(reconstruction, 'Depthbias', 0.0)
+    _set(reconstruction, 'Nearmetres', metadata['near_metres'])
+    _set(reconstruction, 'Farmetres', metadata['far_metres'])
+    _set(reconstruction, 'Fxnormalized', fx / width)
+    _set(reconstruction, 'Fynormalized', fy / height)
+    _set(reconstruction, 'Cxnormalized', cx / width)
+    _set(reconstruction, 'Cynormalized', cy / height)
+    camera = metadata['camera_to_world']
+    for index in range(4):
+        _set(reconstruction, 'Cameratoworld%d' % index, ' '.join(
+            '%.12g' % item for item in camera[index * 4:index * 4 + 4]))
+    epoch = int(metadata['calibration_digest'][:8], 16) % 2147483647
+    _set(reconstruction, 'Calibrationepoch', epoch)
+    state['source_calibration_id'] = metadata['calibration_id']
+    state['source_calibration_digest'] = metadata['calibration_digest']
+    state['source_calibration_status'] = 'ready'
+    state.pop('source_calibration_error', None)
+    # Compatibility alias for callers and saved projects that predate the
+    # source/sensor identity split. It always describes reconstruction input.
+    state['calibration_id'] = metadata['calibration_id']
+    state['calibration_digest'] = metadata['calibration_digest']
+    state['calibration_status'] = 'ready'
+    state['source_camera_session_id'] = metadata['session_id']
+    state['source_generation_id'] = metadata['generation_id']
+    state['source_depth_scale_bias'] = list(metadata['depth_scale_bias'])
+    state['source_camera_metadata_status'] = 'accepted'
+    state.pop('source_camera_metadata_error', None)
+    runtime['source_camera_contract'] = dict(metadata)
+    runtime.pop('source_camera_rejected_identity', None)
+    runtime.pop('source_camera_rejected_error', None)
+
+def _sample_source_camera_metadata(root_comp, runtime):
+    state = runtime['state']
+    source_config = _mapping(state.get('source'))
+    if not source_config.get('camera_metadata_operator'):
+        return False
+    source_frame = _lifecycle_slot(runtime, 'source')
+    identity = _camera_frame_identity(source_frame)
+    if not source_frame.get('new_frame'):
+        if runtime.get('source_camera_rejected_identity') == identity:
+            return _reject_source_camera_metadata(
+                root_comp, runtime, source_frame,
+                runtime.get('source_camera_rejected_error',
+                            'camera metadata was rejected'))
+        previous = runtime.get('source_camera_contract')
+        if (isinstance(previous, dict) and
+                _camera_frame_identity(previous) == identity):
+            state['source_camera_metadata_status'] = 'held'
+            state.pop('source_camera_metadata_error', None)
+        else:
+            state['source_camera_metadata_status'] = 'waiting_for_new_frame'
+        return False
+    if not source_frame.get('valid'):
+        return _reject_source_camera_metadata(
+            root_comp, runtime, source_frame,
+            'camera metadata requires a valid newly accepted source frame')
+    if source_frame.get('metadata_mode') != 'explicit':
+        return _reject_source_camera_metadata(
+            root_comp, runtime, source_frame,
+            'camera metadata requires explicit source frame state')
+    try:
+        metadata = _validate_camera_metadata(
+            _operator_mapping(_camera_metadata_node(root_comp, state)), source_frame)
+        previous = runtime.get('source_camera_contract')
+        if (isinstance(previous, dict) and
+                previous.get('session_id') == metadata['session_id'] and
+                _camera_calibration_signature(previous) !=
+                _camera_calibration_signature(metadata)):
+            raise ValueError(
+                'camera calibration drift is forbidden within a source session')
+        static_identity = bool(source_config.get('calibration_path'))
+        if static_identity:
+            expected_id, expected_digest = _calibration_identity(state, 'source')
+            if expected_id and metadata['calibration_id'] != expected_id:
+                raise ValueError(
+                    'camera metadata does not match file calibration_id')
+            if (expected_digest and
+                    metadata['calibration_digest'] != expected_digest):
+                raise ValueError(
+                    'camera metadata does not match file calibration_digest')
+        _apply_camera_metadata_contract(root_comp, runtime, metadata)
+        source_frame['generation_id'] = metadata['generation_id']
+        source_frame.pop('error', None)
+        return True
+    except Exception as exc:
+        return _reject_source_camera_metadata(
+            root_comp, runtime, source_frame, exc)
 
 def _lifecycle_slot(runtime, label):
     lifecycle = runtime.setdefault('frame_lifecycle', {})
@@ -1379,6 +1736,20 @@ def _accept_explicit_frame(runtime, label, metadata, now_ns, now_monotonic,
         return slot
     previous_session = slot.get('session_id')
     session_changed = previous_session not in (None, session_id)
+    if label == 'sensor' and previous_session == session_id:
+        locked_identity = (
+            slot.get('calibration_id'), slot.get('calibration_digest'))
+        incoming_identity = (
+            metadata.get('calibration_id'), metadata.get('calibration_digest'))
+        if (all(locked_identity) and incoming_identity != locked_identity):
+            slot.update({
+                'new_frame':False, 'valid':False, 'age_ms':age_ms,
+                'decision':'calibration_drift_rejected',
+                'metadata_mode':'explicit',
+                'error':('sensor calibration identity changed within the '
+                         'producer session'),
+            })
+            return slot
     if session_changed:
         retired = list(slot.get('retired_sessions', []))
         retired.append(previous_session)
@@ -1401,13 +1772,15 @@ def _accept_explicit_frame(runtime, label, metadata, now_ns, now_monotonic,
                          'decision':('held' if age_ms <= stale_timeout_ms
                                      else 'stale'),
                          'metadata_mode':'explicit'})
+            slot.pop('error', None)
             return slot
     slot.update(metadata)
     slot['accepted_count'] = int(slot.get('accepted_count', 0)) + 1
     slot.update({'new_frame':True, 'valid':age_ms <= stale_timeout_ms,
-                 'age_ms':age_ms, 'arrival_monotonic':now_monotonic,
-                 'decision':('new_session' if session_changed else 'accepted'),
-                 'metadata_mode':'explicit'})
+                  'age_ms':age_ms, 'arrival_monotonic':now_monotonic,
+                  'decision':('new_session' if session_changed else 'accepted'),
+                  'metadata_mode':'explicit'})
+    slot.pop('error', None)
     return slot
 
 def _operator_cook_token(node):
@@ -1582,6 +1955,35 @@ def _frame_state_node(root_comp, state, label):
     except Exception:
         return None
 
+def _sensor_route_mode(state, frame_valid=None):
+    """Gate strict sensor routes until their explicit frame state is valid."""
+    if 'sensor' not in state:
+        return None
+    active = str(state.get('sensor_mode_active', 'simulated')).lower()
+    configured = bool(_mapping(state.get('sensor')).get('frame_state_operator'))
+    strict = configured and active in ('depth_sensor', 'replay')
+    if strict and frame_valid is not True:
+        return 'disabled'
+    return active if active != 'inactive' else 'disabled'
+
+def _publish_sensor_frame_identity(state, sensor_frame):
+    """Expose only an accepted session lock, never an untrusted drift value."""
+    keys = ('sensor_frame_session_id', 'sensor_frame_calibration_id',
+            'sensor_frame_calibration_digest')
+    has_lock = (
+        sensor_frame.get('metadata_mode') == 'explicit' and
+        int(sensor_frame.get('accepted_count', 0)) > 0 and
+        bool(sensor_frame.get('session_id')) and
+        bool(sensor_frame.get('calibration_id')) and
+        bool(sensor_frame.get('calibration_digest')))
+    if not has_lock:
+        for key in keys:
+            state.pop(key, None)
+        return
+    state['sensor_frame_session_id'] = sensor_frame['session_id']
+    state['sensor_frame_calibration_id'] = sensor_frame['calibration_id']
+    state['sensor_frame_calibration_digest'] = sensor_frame['calibration_digest']
+
 def _fallback_frame_node(root_comp, state, label):
     if label == 'source':
         if state.get('transport_receiver_active'):
@@ -1611,7 +2013,7 @@ def _sample_frame_lifecycle(root_comp, runtime, now_ns, now_monotonic):
             try:
                 metadata = _validate_frame_state(
                     _operator_mapping(_frame_state_node(root_comp, state, label)),
-                    state)
+                    state, label)
                 result = _accept_explicit_frame(
                     runtime, label, metadata, now_ns, now_monotonic, timeout)
             except Exception as exc:
@@ -1636,8 +2038,13 @@ def _sample_frame_lifecycle(root_comp, runtime, now_ns, now_monotonic):
         results[label] = result
     source = results['source']
     sensor = results['sensor']
+    _publish_sensor_frame_identity(state, sensor)
     sources_comp = root_comp.op('WORKING_PIPELINE/SOURCES')
     sensor_comp = root_comp.op('WORKING_PIPELINE/SENSOR_INTERACTION')
+    sensor_route = _sensor_route_mode(state, bool(sensor.get('valid', False)))
+    if sensor_route is not None:
+        _set(sensor_comp, 'Mode', sensor_route)
+        state['sensor_route_active'] = sensor_route
     temporal = root_comp.op('WORKING_PIPELINE/TEMPORAL_WORLD')
     _set(sources_comp, 'Newframe', source['new_frame'])
     _set(sources_comp, 'Sourcevalid', source['valid'])
@@ -1665,9 +2072,11 @@ def _sample_frame_lifecycle(root_comp, runtime, now_ns, now_monotonic):
     _set(bridge, 'Frameid', source.get('frame_id', -1))
     _set(bridge, 'Frametimestampns', str(source.get('timestamp_ns', -1)))
     _set(bridge, 'Calibrationid', source.get(
-        'calibration_id', state.get('calibration_id', '')))
+        'calibration_id', state.get(
+            'source_calibration_id', state.get('calibration_id', ''))))
     _set(bridge, 'Calibrationdigest', source.get(
-        'calibration_digest', state.get('calibration_digest', '')))
+        'calibration_digest', state.get(
+            'source_calibration_digest', state.get('calibration_digest', ''))))
     _set(bridge, 'Framevalid', source['valid'])
     state['source_frame_decision'] = source['decision']
     state['source_metadata_mode'] = source['metadata_mode']
@@ -1702,7 +2111,8 @@ def _apply_working_pipeline(root_comp, state):
                              else 'inactive')
             calibration_path = source.get('calibration_path')
             if (calibration_path and
-                    not _load_calibration(root_comp, state, calibration_path)):
+                    not _load_calibration(
+                        root_comp, state, calibration_path, 'source')):
                 state['source_contract_error'] = (
                     'remote reconstruction disabled: calibration is invalid')
                 state['world_active'] = False
@@ -1719,6 +2129,7 @@ def _apply_working_pipeline(root_comp, state):
         state['source_mode_active'] = active_source
         if owns_source and active_source != requested_source:
             reason = state.get('source_adapter_error') or state.get(
+                'source_calibration_error') or state.get(
                 'calibration_error') or 'adapter for %s is not installed' % requested_source
             state['source_fallback'] = 'demo (%s)' % reason
 
@@ -1796,11 +2207,12 @@ def _apply_working_pipeline(root_comp, state):
             # AI-only and contract-failed processes must not import a local
             # sensor SDK/.tox or resolve its operators.
             active_sensor = 'inactive'
-        _set(root_comp.op('WORKING_PIPELINE/SENSOR_INTERACTION'), 'Mode',
-             active_sensor if active_sensor != 'inactive' else 'disabled')
         state['sensor_mode_active'] = (
             'inactive' if not owns_sensor else
             'disabled' if sensor_mode == 'disabled' else active_sensor)
+        sensor_route = _sensor_route_mode(state)
+        _set(root_comp.op('WORKING_PIPELINE/SENSOR_INTERACTION'), 'Mode', sensor_route)
+        state['sensor_route_active'] = sensor_route
         _set(root_comp.op(
             'WORKING_PIPELINE/SENSOR_INTERACTION/DEPTH_SENSOR_ADAPTER'),
             'Enabled', active_sensor == 'depth_sensor')
@@ -1812,6 +2224,7 @@ def _apply_working_pipeline(root_comp, state):
                  'Forcegain', sensor.get('force_gain'))
         if owns_sensor and active_sensor != sensor_mode and sensor_mode != 'disabled':
             reason = state.get('sensor_adapter_error') or state.get(
+                'sensor_calibration_error') or state.get(
                 'calibration_error') or 'depth-sensor adapter is not installed'
             state['sensor_fallback'] = 'simulated (%s)' % reason
 
@@ -2156,7 +2569,10 @@ def _heartbeat_identity(state):
     safe = dict((key, state.get(key)) for key in (
         'role', 'topology', 'experience', 'completion', 'tier',
         'diffusion_resolution', 'geometry_resolution', 'point_budget',
-        'calibration_id', 'calibration_digest', 'worldbus_version'))
+        'calibration_id', 'calibration_digest',
+        'source_calibration_id', 'source_calibration_digest',
+        'sensor_calibration_id', 'sensor_calibration_digest',
+        'worldbus_version'))
     encoded = json.dumps(safe, sort_keys=True, separators=(',', ':'),
                          ensure_ascii=True, allow_nan=False).encode('utf-8')
     return hashlib.sha256(encoded).hexdigest()
@@ -2562,7 +2978,9 @@ def _application_readiness(root_comp, runtime, managed_health=None):
         hard_failure = True
     if (state.get('source_contract_error') or
             state.get('sensor_contract_error') or
-            state.get('calibration_error')):
+            state.get('calibration_error') or
+            state.get('source_calibration_error') or
+            state.get('sensor_calibration_error')):
         reasons.append('source_contract_error')
         hard_failure = True
     if not identity['build_matches']:
@@ -2759,6 +3177,9 @@ def tick(root_comp=None):
     _set(root_comp.op('WORKING_PIPELINE/TEMPORAL_WORLD'),
          'Deltaseconds', delta_seconds)
     _sample_frame_lifecycle(root_comp, runtime, now_ns, now)
+    camera_contract_accepted = _sample_source_camera_metadata(root_comp, runtime)
+    if camera_contract_accepted:
+        _apply_calibrated_contracts(root_comp, runtime['state'])
     signature_changed = _check_temporal_signature(
         root_comp, runtime['state'], 'manual source/session/calibration contract changed')
     _update_readiness_progress(root_comp, runtime, now, previous)

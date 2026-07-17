@@ -13,6 +13,8 @@ contract remains unchanged.
 
 from __future__ import print_function
 
+import os
+
 
 BUILD_VERSION = "1.2.1"
 ROOT_PATH = "/project1/flexgpu"
@@ -542,7 +544,184 @@ void main()
     fragColor = TDOutputSwizzle(vec4(mask, mask, mask, 1.0));
 }
 ''',
+    "moge2_unpack_rgb": r'''// CONTRACT: flexgpu-moge2-atlas/v1 -> exact inference RGB (left half)
+out vec4 fragColor;
+
+void main()
+{
+    vec2 sourceUV = vec2(vUV.st.x * 0.5, vUV.st.y);
+    vec4 color = texture(sTD2DInputs[0], sourceUV);
+    fragColor = TDOutputSwizzle(vec4(color.rgb, color.a));
 }
+''',
+    "moge2_unpack_depth": r'''// CONTRACT: flexgpu-moge2-atlas/v1 -> metric optical-Z DEPTH
+out vec4 fragColor;
+
+void main()
+{
+    vec2 sourceUV = vec2(0.5 + vUV.st.x * 0.5, vUV.st.y);
+    vec4 packed = texture(sTD2DInputs[0], sourceUV);
+    vec2 scaleBias = texelFetch(sTD2DInputs[1], ivec2(0, 0), 0).rg;
+    float highByte = floor(clamp(packed.r, 0.0, 1.0) * 255.0 + 0.5);
+    float lowByte = floor(clamp(packed.g, 0.0, 1.0) * 255.0 + 0.5);
+    float uint16Depth = highByte * 256.0 + lowByte;
+    float valid = float(uint16Depth > 0.0 && packed.b >= 0.5 && packed.a >= 0.5);
+    float metres = (uint16Depth * scaleBias.r + scaleBias.g) * valid;
+    fragColor = TDOutputSwizzle(vec4(metres, metres, metres, 1.0));
+}
+''',
+    "moge2_unpack_mask": r'''// CONTRACT: flexgpu-moge2-atlas/v1 -> binary validity MASK (right B)
+out vec4 fragColor;
+
+void main()
+{
+    vec2 sourceUV = vec2(0.5 + vUV.st.x * 0.5, vUV.st.y);
+    float mask = texture(sTD2DInputs[0], sourceUV).b >= 0.5 ? 1.0 : 0.0;
+    fragColor = TDOutputSwizzle(vec4(mask, mask, mask, 1.0));
+}
+''',
+    "moge2_unpack_confidence": r'''// CONTRACT: flexgpu-moge2-atlas/v1 -> binary confidence proxy (right A)
+out vec4 fragColor;
+
+void main()
+{
+    vec2 sourceUV = vec2(0.5 + vUV.st.x * 0.5, vUV.st.y);
+    float confidence = texture(sTD2DInputs[0], sourceUV).a >= 0.5 ? 1.0 : 0.0;
+    fragColor = TDOutputSwizzle(vec4(confidence, confidence, confidence, 1.0));
+}
+''',
+    "depth_anything_sensor_position": r'''// CONTRACT: packed sensor depth -> sensor-local XYZ metres
+out vec4 fragColor;
+
+void main()
+{
+    vec2 uv = vUV.st;
+    vec4 packed = texture(sTD2DInputs[0], uv);
+    vec4 depthCalibration = texelFetch(sTD2DInputs[1], ivec2(0, 0), 0);
+    vec4 normalizedIntrinsics = texelFetch(sTD2DInputs[2], ivec2(0, 0), 0);
+    float highByte = floor(clamp(packed.r, 0.0, 1.0) * 255.0 + 0.5);
+    float lowByte = floor(clamp(packed.g, 0.0, 1.0) * 255.0 + 0.5);
+    float uint16Depth = highByte * 256.0 + lowByte;
+    float metres = uint16Depth * depthCalibration.r + depthCalibration.g;
+    float valid = float(uint16Depth > 0.0 && packed.b >= 0.5 && packed.a > 0.0 &&
+                        metres >= depthCalibration.b && metres <= depthCalibration.a);
+    vec2 imageSize = vec2(textureSize(sTD2DInputs[0], 0));
+    float fx = max(1e-6, normalizedIntrinsics.r * imageSize.x);
+    float fy = max(1e-6, normalizedIntrinsics.g * imageSize.y);
+    float cx = normalizedIntrinsics.b * imageSize.x;
+    float cy = normalizedIntrinsics.a * imageSize.y;
+    // The Script TOP flips top-left worker bytes for TD. Convert vUV back to
+    // top-left image pixels for pinhole unprojection, then publish the stable
+    // FlexGPU camera convention: X right, Y up, Z backward.
+    vec2 pixel = vec2(uv.x * imageSize.x, (1.0 - uv.y) * imageSize.y);
+    vec3 sensorLocal = vec3((pixel.x - cx) * metres / fx,
+                            (cy - pixel.y) * metres / fy,
+                            -metres);
+    // A is binary occupancy here. OUT_MASK and OUT_CONFIDENCE are multiplied
+    // exactly once by the existing SENSOR_VALIDITY stage downstream.
+    fragColor = TDOutputSwizzle(vec4(sensorLocal * valid, valid));
+}
+''',
+    "depth_anything_sensor_mask": r'''// CONTRACT: packed sensor B -> binary mask
+out vec4 fragColor;
+
+void main()
+{
+    vec4 packed = texture(sTD2DInputs[0], vUV.st);
+    float highByte = floor(clamp(packed.r, 0.0, 1.0) * 255.0 + 0.5);
+    float lowByte = floor(clamp(packed.g, 0.0, 1.0) * 255.0 + 0.5);
+    float depth = highByte * 256.0 + lowByte;
+    float mask = (depth > 0.0 && packed.b >= 0.5 && packed.a > 0.0) ? 1.0 : 0.0;
+    fragColor = TDOutputSwizzle(vec4(mask, mask, mask, 1.0));
+}
+''',
+    "depth_anything_sensor_confidence": r'''// CONTRACT: packed sensor A -> confidence
+out vec4 fragColor;
+
+void main()
+{
+    vec4 packed = texture(sTD2DInputs[0], vUV.st);
+    float highByte = floor(clamp(packed.r, 0.0, 1.0) * 255.0 + 0.5);
+    float lowByte = floor(clamp(packed.g, 0.0, 1.0) * 255.0 + 0.5);
+    float depth = highByte * 256.0 + lowByte;
+    float valid = (depth > 0.0 && packed.b >= 0.5) ? 1.0 : 0.0;
+    float confidence = clamp(packed.a, 0.0, 1.0) * valid;
+    fragColor = TDOutputSwizzle(vec4(confidence, confidence, confidence, 1.0));
+}
+''',
+}
+
+
+MOGE2_SCRIPT_TOP_CALLBACKS = r'''# Script TOP callbacks; OP access stays on TouchDesigner's main thread.
+def onSetupParameters(scriptOp):
+    return
+
+def onPulse(par):
+    return
+
+def onCook(scriptOp):
+    module_dat = parent().op('bridge_runtime')
+    if module_dat is not None:
+        module_dat.module.on_script_top_cook(scriptOp)
+    return
+'''
+
+
+MOGE2_EXECUTE_CALLBACKS = r'''# Execute DAT callbacks; the runtime owns only this bridge.
+def onStart():
+    return
+
+def onCreate():
+    return
+
+def onFrameStart(frame):
+    module_dat = me.parent().op('bridge_runtime')
+    if module_dat is not None:
+        module_dat.module.tick(me.parent())
+    return
+
+def onExit():
+    module_dat = me.parent().op('bridge_runtime')
+    if module_dat is not None:
+        module_dat.module.stop(me.parent())
+    return
+'''
+
+
+DEPTH_ANYTHING_SCRIPT_TOP_CALLBACKS = r'''# Script TOP callback; OP access is main-thread only.
+def onSetupParameters(scriptOp):
+    return
+
+def onPulse(par):
+    return
+
+def onCook(scriptOp):
+    module_dat = parent().op('sensor_runtime')
+    if module_dat is not None:
+        module_dat.module.on_script_top_cook(scriptOp)
+    return
+'''
+
+
+DEPTH_ANYTHING_EXECUTE_CALLBACKS = r'''# Execute DAT callbacks for the replaceable sensor bridge.
+def onStart():
+    return
+
+def onCreate():
+    return
+
+def onFrameStart(frame):
+    module_dat = me.parent().op('sensor_runtime')
+    if module_dat is not None:
+        module_dat.module.tick(me.parent())
+    return
+
+def onExit():
+    module_dat = me.parent().op('sensor_runtime')
+    if module_dat is not None:
+        module_dat.module.stop(me.parent())
+    return
+'''
 
 
 class BuildReport(object):
@@ -901,6 +1080,343 @@ def _set_resolution(node, width, height):
     _set(node, ("resolutionh", "resh"), height)
 
 
+def _moge2_runtime_source(report):
+    """Load the import-safe bridge module that will be embedded in a Text DAT."""
+
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "moge2_bridge_runtime.py")
+    try:
+        size = os.path.getsize(path)
+        if size < 1 or size > 512 * 1024:
+            raise ValueError("bridge runtime source is outside the size limit")
+        with open(path, "r", encoding="utf-8") as stream:
+            return stream.read()
+    except Exception as exc:
+        report.warn("MoGe-2 bridge runtime could not be embedded: %s" % exc)
+        return ("def tick(bridge_comp=None):\n    return None\n\n"
+                "def stop(bridge_comp=None):\n    return None\n\n"
+                "def on_script_top_cook(script_op):\n    return None\n")
+
+
+def _build_moge2_bridge(adapter, input_rgb, report):
+    """Build a default-off, external-worker bridge without loading PyTorch in TD."""
+
+    comp = _ensure(adapter, "baseCOMP", "MOGE2_BRIDGE", report)
+    _style(comp, 360, 180, (0.20, 0.39, 0.56),
+           "Opt-in MoGe-2 worker: newest RGB -> synchronized RGB/metric depth",
+           310, 135)
+    page = _page(comp, "MoGe-2 Bridge")
+    _custom(comp, page, "Toggle", "Enabled", False)
+    _custom(comp, page, "Menu", "Profile", "3080ti_16gb",
+            ("3080ti_16gb", "4090", "5090"))
+    _custom(comp, page, "Str", "Workerhost", "127.0.0.1",
+            label="Worker Host")
+    _custom(comp, page, "Int", "Workerinputtcp", 9211,
+            label="Worker Input TCP")
+    _custom(comp, page, "Int", "Workerinputudp", 9210,
+            label="Worker Input UDP")
+    _custom(comp, page, "Str", "Resultbindhost", "127.0.0.1",
+            label="Result Bind Host")
+    _custom(comp, page, "Int", "Resulttcp", 9221,
+            label="Result TCP")
+    _custom(comp, page, "Int", "Resultudp", 9220,
+            label="Result UDP")
+    _custom(comp, page, "Int", "Capturefps", 5,
+            label="Geometry Capture FPS")
+    _custom(comp, page, "Toggle", "Flipvertical", True,
+            label="TD / Image Vertical Flip")
+    _custom(comp, page, "Toggle", "Resultvalid", False,
+            label="Synchronized Result Valid")
+    _custom(comp, page, "Str", "Generationid", "streamdiffusion",
+            label="Prompt Generation ID")
+    _custom(comp, page, "Int", "Sourceframeid", 0,
+            label="Source Frame ID")
+
+    rgb_in = _in_top(comp, "IN_RGB", 0, report)
+    _connect(input_rgb, comp, 0, 0, report, replace=False)
+
+    runtime_dat = _text(comp, "bridge_runtime", _moge2_runtime_source(report), report)
+    script_callbacks = _text(
+        comp, "script_top_callbacks", MOGE2_SCRIPT_TOP_CALLBACKS, report)
+    atlas = _ensure(comp, "scriptTOP", "RESULT_ATLAS", report)
+    _set(atlas, ("callbacks", "callbacksdat"), script_callbacks.path)
+    # Script TOPs in TouchDesigner 2025.32820 do not expose ``alwayscook``.
+    # The Execute DAT stages each immutable result and calls cook(force=True);
+    # its callback must confirm the exact uploaded key before routes go valid.
+    _set_resolution(atlas, 2, 1)
+    _set(atlas, "format", "rgba8fixed")
+
+    execute = _ensure(comp, "executeDAT", "bridge_callbacks", report,
+                      optional=True)
+    if execute is not None:
+        try:
+            execute.text = MOGE2_EXECUTE_CALLBACKS
+        except Exception:
+            pass
+        _set(execute, ("start", "onstart"), True)
+        _set(execute, ("create", "oncreate"), True)
+        _set(execute, ("framestart", "onframestart"), True)
+        _set(execute, ("exit", "onexit"), True)
+        _set(execute, "active", True)
+    else:
+        _text(comp, "bridge_callbacks_SOURCE", MOGE2_EXECUTE_CALLBACKS, report)
+
+    scale_bias = _ensure(comp, "constantTOP", "DEPTH_SCALE_BIAS", report)
+    _set_resolution(scale_bias, 1, 1)
+    _set(scale_bias, "format", "rgba32float")
+    _set(scale_bias, ("colorr", "color1r"), 0.001)
+    _set(scale_bias, ("colorg", "color1g"), 0.0)
+    _set(scale_bias, ("colorb", "color1b"), 0.0)
+    _set(scale_bias, ("colora", "color1a", "alpha"), 1.0)
+
+    rgb = _glsl(comp, "UNPACK_RGB", "moge2_unpack_rgb", [atlas], report)
+    depth = _glsl(comp, "UNPACK_DEPTH_METRES", "moge2_unpack_depth",
+                  [atlas, scale_bias], report, True)
+    mask = _glsl(comp, "UNPACK_MASK", "moge2_unpack_mask", [atlas], report)
+    confidence = _glsl(comp, "UNPACK_CONFIDENCE",
+                       "moge2_unpack_confidence", [atlas], report)
+    for node in (rgb, depth, mask, confidence):
+        _set(node, "outputresolution", "custom")
+        _set(node, "resmult", False)
+        _expr(node, ("resolutionw", "resw"),
+              "max(1, int(op('RESULT_ATLAS').width) // 2)")
+        _expr(node, ("resolutionh", "resh"),
+              "max(1, int(op('RESULT_ATLAS').height))")
+    _set(rgb, "format", "rgba16float")
+    _set(depth, "format", "mono32float")
+    _set(mask, "format", "mono8fixed")
+    _set(confidence, "format", "mono8fixed")
+
+    _out_top(comp, "OUT_RGB", rgb, 0, report)
+    _out_top(comp, "OUT_DEPTH", depth, 1, report)
+    _out_top(comp, "OUT_CONFIDENCE", confidence, 2, report)
+    _out_top(comp, "OUT_MASK", mask, 3, report)
+    _text(comp, "FRAME_STATE", "{}\n", report)
+    _text(comp, "CAMERA_METADATA", "{}\n", report)
+    _table(comp, "STATUS", [["metric", "value"],
+                             ["state", "disabled"],
+                             ["detail", "enable only after the worker is listening"]],
+           report)
+    _text(comp, "README_FIRST",
+          "MOGE-2 LIVE BRIDGE (DEFAULT OFF)\n\n"
+          "IN_RGB must be the exact StreamDiffusionTD image. The external worker "
+          "owns PyTorch/MoGe and returns a WorldBus rgba8_atlas. This COMP publishes "
+          "the returned RGB with its metric depth/mask/confidence so frames cannot "
+          "cross. TD operator access remains on the main thread; socket threads move "
+          "bounded immutable bytes only. FRAME_STATE and CAMERA_METADATA describe "
+          "the same confirmed atlas upload. Resultvalid stays false until a forced "
+          "Script TOP cook copies the exact staged key. Do not put secrets or prompt "
+          "text in metadata.",
+          report)
+    try:
+        comp.store("moge2_bridge_runtime_dat", runtime_dat.path)
+    except Exception:
+        pass
+    return comp
+
+
+def _wire_moge2_routes(adapter, moge2, fallbacks, report):
+    """Route a complete synchronized result only after the bridge marks it valid."""
+
+    if len(fallbacks) != 4 or any(node is None for node in fallbacks):
+        raise RuntimeError("MoGe-2 route requires existing RGB/depth/confidence/mask fallbacks")
+    route_specs = (
+        ("MOGE2_RGB_ROUTE", fallbacks[0], 0),
+        ("MOGE2_DEPTH_ROUTE", fallbacks[1], 1),
+        ("MOGE2_CONFIDENCE_ROUTE", fallbacks[2], 2),
+        ("MOGE2_MASK_ROUTE", fallbacks[3], 3),
+    )
+    routes = []
+    for name, fallback, output_index in route_specs:
+        route = _ensure(adapter, "switchTOP", name, report)
+        _connect(fallback, route, 0, 0, report, replace=True)
+        _connect(moge2, route, 1, output_index, report, replace=True)
+        _expr(route, "index",
+              "1 if (op('MOGE2_BRIDGE').par.Enabled and "
+              "op('MOGE2_BRIDGE').par.Resultvalid) else 0")
+        routes.append(route)
+    for index, (name, route) in enumerate(zip(
+        ("OUT_RGB", "OUT_DEPTH", "OUT_CONFIDENCE", "OUT_MASK"), routes)):
+        _out_top(adapter, name, route, index, report)
+    return tuple(routes)
+
+
+def _depth_anything_runtime_source(report):
+    """Load the import-safe sensor receiver for embedding in a Text DAT."""
+
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "depth_anything_sensor_runtime.py")
+    try:
+        size = os.path.getsize(path)
+        if size < 1 or size > 512 * 1024:
+            raise ValueError("sensor runtime source is outside the size limit")
+        with open(path, "r", encoding="utf-8") as stream:
+            return stream.read()
+    except Exception as exc:
+        report.warn("Depth Anything sensor runtime could not be embedded: %s" % exc)
+        return ("def tick(bridge_comp=None):\n    return None\n\n"
+                "def stop(bridge_comp=None):\n    return None\n\n"
+                "def on_script_top_cook(script_op):\n    return None\n")
+
+
+def _build_depth_anything_sensor_bridge(adapter, report):
+    """Build a backend-replaceable, result-only audience sensor receiver."""
+
+    comp = _ensure(adapter, "baseCOMP", "DEPTH_ANYTHING_BRIDGE", report)
+    _style(comp, 390, 120, (0.20, 0.48, 0.42),
+           "Replaceable no-RGB sensor bridge: packed depth/mask/confidence",
+           320, 140)
+    page = _page(comp, "Depth Anything Sensor")
+    _custom(comp, page, "Toggle", "Enabled", False,
+            label="Follow Adapter Enabled")
+    # DEPTH_SENSOR_ADAPTER.Enabled is the existing stable control surface used
+    # by runtime_helpers. The nested bridge remains default-off and follows it.
+    _expr(comp, "Enabled", "parent().par.Enabled")
+    _custom(comp, page, "Str", "Resultbindhost", "127.0.0.1",
+            label="Result Bind Host")
+    _custom(comp, page, "Int", "Resulttcp", 9241, label="Result TCP")
+    _custom(comp, page, "Int", "Resultudp", 9240,
+            label="Reserved UDP (unused)")
+    _custom(comp, page, "Toggle", "Allowtrustednetwork", False,
+            label="Allow Trusted Network Bind")
+    _custom(comp, page, "Float", "Stalems", 800.0,
+            label="Capture Freshness (ms)")
+    _custom(comp, page, "Toggle", "Flipvertical", True,
+            label="Worker / TD Vertical Flip")
+    _custom(comp, page, "Toggle", "Resultvalid", False,
+            label="Fresh Correlated Result")
+
+    runtime_dat = _text(
+        comp, "sensor_runtime", _depth_anything_runtime_source(report), report)
+    script_callbacks = _text(
+        comp, "script_top_callbacks", DEPTH_ANYTHING_SCRIPT_TOP_CALLBACKS, report)
+    packed = _ensure(comp, "scriptTOP", "RESULT_PACKED", report)
+    _set(packed, ("callbacks", "callbacksdat"), script_callbacks.path)
+    # TD 2025 Script TOP has no alwayscook. Execute DAT stages immutable bytes,
+    # force-cooks this TOP, and requires the callback to confirm the exact key.
+    _set_resolution(packed, 256, 144)
+    _set(packed, "format", "rgba8fixed")
+
+    execute = _ensure(comp, "executeDAT", "sensor_callbacks", report,
+                      optional=True)
+    if execute is not None:
+        try:
+            execute.text = DEPTH_ANYTHING_EXECUTE_CALLBACKS
+        except Exception:
+            pass
+        _set(execute, ("start", "onstart"), True)
+        _set(execute, ("create", "oncreate"), True)
+        _set(execute, ("framestart", "onframestart"), True)
+        _set(execute, ("exit", "onexit"), True)
+        _set(execute, "active", True)
+    else:
+        _text(comp, "sensor_callbacks_SOURCE",
+              DEPTH_ANYTHING_EXECUTE_CALLBACKS, report)
+
+    depth_calibration = _ensure(comp, "constantTOP", "DEPTH_CALIBRATION", report)
+    _set_resolution(depth_calibration, 1, 1)
+    _set(depth_calibration, "format", "rgba32float")
+    for names, value in (
+        (("colorr", "color1r"), 0.001),
+        (("colorg", "color1g"), 0.0),
+        (("colorb", "color1b"), 0.5),
+        (("colora", "color1a", "alpha"), 4.0),
+    ):
+        _set(depth_calibration, names, value)
+    intrinsics = _ensure(comp, "constantTOP", "INTRINSICS_NORMALIZED", report)
+    _set_resolution(intrinsics, 1, 1)
+    _set(intrinsics, "format", "rgba32float")
+    for names, value in (
+        (("colorr", "color1r"), 0.8660254),
+        (("colorg", "color1g"), 1.5396007),
+        (("colorb", "color1b"), 0.5),
+        (("colora", "color1a", "alpha"), 0.5),
+    ):
+        _set(intrinsics, names, value)
+
+    position = _glsl(
+        comp, "UNPACK_SENSOR_POSITION", "depth_anything_sensor_position",
+        [packed, depth_calibration, intrinsics], report, True)
+    mask = _glsl(comp, "UNPACK_SENSOR_MASK", "depth_anything_sensor_mask",
+                 [packed], report)
+    confidence = _glsl(
+        comp, "UNPACK_SENSOR_CONFIDENCE", "depth_anything_sensor_confidence",
+        [packed], report)
+    for node in (position, mask, confidence):
+        _set(node, "outputresolution", "custom")
+        _set(node, "resmult", False)
+        _expr(node, ("resolutionw", "resw"),
+              "max(1, int(op('RESULT_PACKED').width))")
+        _expr(node, ("resolutionh", "resh"),
+              "max(1, int(op('RESULT_PACKED').height))")
+    _set(position, "format", "rgba32float")
+    _set(mask, "format", "mono8fixed")
+    _set(confidence, "format", "mono8fixed")
+
+    _out_top(comp, "OUT_POSITION", position, 0, report)
+    _out_top(comp, "OUT_MASK", mask, 1, report)
+    _out_top(comp, "OUT_CONFIDENCE", confidence, 2, report)
+    _text(comp, "FRAME_STATE", "{}\n", report)
+    _table(comp, "STATUS", [
+        ["metric", "value"],
+        ["state", "disabled"],
+        ["detail", "enable adapter, then start an external sensor producer"],
+    ], report)
+    _text(comp, "README_FIRST",
+          "REPLACEABLE AUDIENCE SENSOR BRIDGE (DEFAULT OFF)\n\n"
+          "The temporary worker receives the laptop webcam locally and sends "
+          "only uint16 pseudo-metre depth, mask, confidence, and bounded "
+          "metadata. No RGB enters this COMP. A paid Depth Anything app or a "
+          "future hardware depth sensor may replace that worker by mapping "
+          "Spout, NDI, TOP, or API output to the same OUT_POSITION, OUT_MASK, "
+          "OUT_CONFIDENCE, and FRAME_STATE contracts. OUT_POSITION is strictly "
+          "sensor-local XYZ; the parent CALIBRATE_SENSOR_POSITION applies the "
+          "independent sensor_to_world transform. Socket threads retain bytes "
+          "only. Stale, malformed, disconnected, or calibration-changing input "
+          "sets Resultvalid false; enabled routes then publish zero occupancy. "
+          "TCP binds to loopback unless Allow Trusted Network Bind is explicitly "
+          "enabled; reserved UDP 9240 is metadata only and is not opened.",
+          report)
+    try:
+        comp.store("depth_anything_sensor_runtime_dat", runtime_dat.path)
+    except Exception:
+        pass
+    return comp
+
+
+def _wire_depth_anything_sensor_routes(adapter, bridge, fallbacks, report):
+    """Preserve disabled fallbacks but fail closed while the bridge is enabled."""
+
+    if len(fallbacks) != 3 or any(node is None for node in fallbacks):
+        raise RuntimeError("Depth Anything routes require three adapter fallbacks")
+    zero = _ensure(adapter, "constantTOP", "DEPTH_ANYTHING_FAIL_CLOSED_ZERO", report)
+    _set_resolution(zero, 256, 144)
+    _set(zero, "format", "rgba32float")
+    for names in (("colorr", "color1r"), ("colorg", "color1g"),
+                  ("colorb", "color1b"), ("colora", "color1a", "alpha")):
+        _set(zero, names, 0.0)
+    route_specs = (
+        ("DEPTH_ANYTHING_POSITION_ROUTE", fallbacks[0], 0),
+        ("DEPTH_ANYTHING_MASK_ROUTE", fallbacks[1], 1),
+        ("DEPTH_ANYTHING_CONFIDENCE_ROUTE", fallbacks[2], 2),
+    )
+    routes = []
+    for name, fallback, output_index in route_specs:
+        route = _ensure(adapter, "switchTOP", name, report)
+        _connect(fallback, route, 0, 0, report, replace=True)
+        _connect(zero, route, 1, 0, report, replace=True)
+        _connect(bridge, route, 2, output_index, report, replace=True)
+        _expr(route, "index",
+              "2 if (op('DEPTH_ANYTHING_BRIDGE').par.Enabled and "
+              "op('DEPTH_ANYTHING_BRIDGE').par.Resultvalid) else "
+              "(1 if op('DEPTH_ANYTHING_BRIDGE').par.Enabled else 0)")
+        routes.append(route)
+    for index, (name, route) in enumerate(zip(
+        ("OUT_POSITION", "OUT_MASK", "OUT_CONFIDENCE"), routes)):
+        _out_top(adapter, name, route, index, report)
+    return tuple(routes)
+
+
 def _build_sources(parent, report):
     comp = _ensure(parent, "baseCOMP", "SOURCES", report)
     _style(comp, -1320, 300, (0.42, 0.22, 0.54),
@@ -963,16 +1479,15 @@ def _build_sources(parent, report):
     _set(tox_mask, ("colorr", "color1r"), 1.0)
     _set(tox_mask, ("colorg", "color1g"), 1.0)
     _set(tox_mask, ("colorb", "color1b"), 1.0)
-    _out_top(adapter, "OUT_RGB", tox_rgb, 0, report)
-    _out_top(adapter, "OUT_DEPTH", tox_depth, 1, report)
-    _out_top(adapter, "OUT_CONFIDENCE", tox_confidence, 2, report)
-    _out_top(adapter, "OUT_MASK", tox_mask, 3, report)
+    moge2 = _build_moge2_bridge(adapter, tox_rgb, report)
+    _wire_moge2_routes(
+        adapter, moge2, (tox_rgb, tox_depth, tox_confidence, tox_mask), report)
     _table(adapter, "ADAPTER_CONTRACT", [
         ["output", "required contract", "replace node"],
-        ["OUT_RGB", TOP_CONTRACTS["RGB"], "REPLACE_WITH_STREAMDIFFUSION_RGB"],
-        ["OUT_DEPTH", TOP_CONTRACTS["DEPTH"], "REPLACE_WITH_DEPTH_ESTIMATE"],
-        ["OUT_CONFIDENCE", TOP_CONTRACTS["CONFIDENCE"], "REPLACE_WITH_CONFIDENCE"],
-        ["OUT_MASK", "R valid mask normalized 0..1", "REPLACE_WITH_VALID_MASK"],
+        ["OUT_RGB", TOP_CONTRACTS["RGB"], "MOGE2_RGB_ROUTE"],
+        ["OUT_DEPTH", TOP_CONTRACTS["DEPTH"], "MOGE2_DEPTH_ROUTE"],
+        ["OUT_CONFIDENCE", TOP_CONTRACTS["CONFIDENCE"], "MOGE2_CONFIDENCE_ROUTE"],
+        ["OUT_MASK", "R valid mask normalized 0..1", "MOGE2_MASK_ROUTE"],
     ], report)
     _text(adapter, "README_FIRST", "STREAMDIFFUSIONTD ADAPTER BOUNDARY\n\n"
           "Demo mode works without this branch. Later place StreamDiffusionTD.tox here, "
@@ -1373,6 +1888,14 @@ def _build_sensor(parent, report):
     _set(adapter_confidence, ("colorg", "color1g"), 1.0)
     _set(adapter_confidence, ("colorb", "color1b"), 1.0)
     _out_top(sensor_adapter, "OUT_CONFIDENCE", adapter_confidence, 2, report)
+    depth_anything_bridge = _build_depth_anything_sensor_bridge(
+        sensor_adapter, report)
+    _wire_depth_anything_sensor_routes(
+        sensor_adapter,
+        depth_anything_bridge,
+        (adapter_position, adapter_mask, adapter_confidence),
+        report,
+    )
     calibrated_adapter_position = _glsl(
         comp, "CALIBRATE_SENSOR_POSITION", "sensor_to_world",
         [sensor_adapter], report, True)
@@ -1850,6 +2373,139 @@ def _build_experimental(parent, report):
           "They intentionally do not cook. Enable only after a supervised external "
           "worker and a fresh-frame transport have been configured.", report)
     return comp
+
+
+def _first_input(node):
+    try:
+        inputs = node.inputs
+        return inputs[0] if inputs else None
+    except Exception:
+        return None
+
+
+def install_depth_anything_sensor_bridge(root=None):
+    """Install only the default-off, replaceable sensor bridge and routes.
+
+    This bounded local-project installer never rebuilds ``WORKING_PIPELINE``.
+    It preserves the adapter's current outputs as disabled fallbacks, refreshes
+    only ``DEPTH_ANYTHING_BRIDGE`` plus three named route switches, and does
+    not delete operators or load a model/camera SDK inside TouchDesigner.
+    """
+
+    global LAST_REPORT
+    report = BuildReport()
+    LAST_REPORT = report
+    if root is None:
+        root = _op(ROOT_PATH)
+    elif isinstance(root, str):
+        root = _op(root)
+    if root is None:
+        raise RuntimeError("FlexGPU root %s does not exist" % ROOT_PATH)
+    adapter = root.op(
+        "WORKING_PIPELINE/SENSOR_INTERACTION/DEPTH_SENSOR_ADAPTER")
+    if adapter is None:
+        raise RuntimeError(
+            "depth sensor adapter is missing; build the working pipeline first")
+
+    existing_runtime = adapter.op("DEPTH_ANYTHING_BRIDGE/sensor_runtime")
+    if existing_runtime is not None:
+        try:
+            existing_runtime.module.stop(adapter.op("DEPTH_ANYTHING_BRIDGE"))
+        except Exception:
+            pass
+
+    fallback_names = (
+        ("OUT_POSITION", "DEPTH_ANYTHING_POSITION_ROUTE",
+         "REPLACE_WITH_CALIBRATED_SENSOR_POSITION"),
+        ("OUT_MASK", "DEPTH_ANYTHING_MASK_ROUTE", "REPLACE_WITH_SENSOR_MASK"),
+        ("OUT_CONFIDENCE", "DEPTH_ANYTHING_CONFIDENCE_ROUTE",
+         "REPLACE_WITH_SENSOR_CONFIDENCE"),
+    )
+    fallbacks = []
+    for output_name, route_name, placeholder_name in fallback_names:
+        output = adapter.op(output_name)
+        source = _first_input(output)
+        if source is not None and str(getattr(source, "name", "")) == route_name:
+            source = _first_input(source)
+        if source is None:
+            source = adapter.op(placeholder_name)
+        if source is None:
+            raise RuntimeError(
+                "could not preserve sensor fallback source for " + output_name)
+        fallbacks.append(source)
+
+    bridge = _build_depth_anything_sensor_bridge(adapter, report)
+    _wire_depth_anything_sensor_routes(adapter, bridge, tuple(fallbacks), report)
+    try:
+        bridge.store("depth_anything_bridge_install_report", report.as_dict())
+    except Exception:
+        pass
+    print("[FlexGPU runtime] Depth Anything sensor bridge installed disabled: %s "
+          "(%d created, %d reused, %d warnings)" %
+          (bridge.path, len(report.created), len(report.reused),
+           len(report.warnings)))
+    return bridge
+
+
+def install_moge2_bridge(root=None):
+    """Install only the opt-in MoGe-2 branch into an existing working adapter.
+
+    This bounded installer is intended for an artist's local saved project. It
+    preserves the four current adapter sources as disabled fallbacks, creates
+    or refreshes only ``MOGE2_BRIDGE`` and its route switches, and never rebuilds
+    the rest of ``WORKING_PIPELINE``.
+    """
+
+    global LAST_REPORT
+    report = BuildReport()
+    LAST_REPORT = report
+    if root is None:
+        root = _op(ROOT_PATH)
+    elif isinstance(root, str):
+        root = _op(root)
+    if root is None:
+        raise RuntimeError("FlexGPU root %s does not exist" % ROOT_PATH)
+    adapter = root.op(
+        "WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER")
+    if adapter is None:
+        raise RuntimeError("StreamDiffusion adapter is missing; build the working pipeline first")
+
+    existing_runtime = adapter.op("MOGE2_BRIDGE/bridge_runtime")
+    if existing_runtime is not None:
+        try:
+            existing_runtime.module.stop(adapter.op("MOGE2_BRIDGE"))
+        except Exception:
+            pass
+
+    fallback_names = (
+        ("OUT_RGB", "MOGE2_RGB_ROUTE", "REPLACE_WITH_STREAMDIFFUSION_RGB"),
+        ("OUT_DEPTH", "MOGE2_DEPTH_ROUTE", "REPLACE_WITH_DEPTH_ESTIMATE"),
+        ("OUT_CONFIDENCE", "MOGE2_CONFIDENCE_ROUTE", "REPLACE_WITH_CONFIDENCE"),
+        ("OUT_MASK", "MOGE2_MASK_ROUTE", "REPLACE_WITH_VALID_MASK"),
+    )
+    fallbacks = []
+    for output_name, route_name, placeholder_name in fallback_names:
+        output = adapter.op(output_name)
+        source = _first_input(output)
+        if source is not None and str(getattr(source, "name", "")) == route_name:
+            source = _first_input(source)
+        if source is None:
+            source = adapter.op(placeholder_name)
+        if source is None:
+            raise RuntimeError("could not preserve fallback source for " + output_name)
+        fallbacks.append(source)
+
+    bridge = _build_moge2_bridge(adapter, fallbacks[0], report)
+    _wire_moge2_routes(adapter, bridge, tuple(fallbacks), report)
+    try:
+        bridge.store("moge2_bridge_install_report", report.as_dict())
+    except Exception:
+        pass
+    print("[FlexGPU runtime] MoGe-2 bridge installed disabled: %s "
+          "(%d created, %d reused, %d warnings)" %
+          (bridge.path, len(report.created), len(report.reused),
+           len(report.warnings)))
+    return bridge
 
 
 def build(root=None):
