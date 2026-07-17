@@ -33,6 +33,10 @@ class TouchDesignerValidationSourceTests(unittest.TestCase):
             module.REQUIRED_OPERATORS,
         )
         self.assertIn(
+            "/project1/flexgpu/WORKING_PIPELINE/OUT_DISPLAY_ACTIVE",
+            module.REQUIRED_OPERATORS,
+        )
+        self.assertIn(
             "/project1/flexgpu/WORKING_PIPELINE/TELEMETRY/LIVE_HEALTH",
             module.REQUIRED_OPERATORS,
         )
@@ -63,6 +67,9 @@ class TouchDesignerValidationSourceTests(unittest.TestCase):
             "installation_height": 720,
             "stereo_width": 2560,
             "stereo_height": 720,
+            "display_mode": "panoramic_wrap",
+            "triple_surface_width": 640,
+            "triple_surface_height": 360,
         }
         self.assertEqual(
             module._active_output_dimensions(state),
@@ -71,6 +78,15 @@ class TouchDesignerValidationSourceTests(unittest.TestCase):
                 "OUT_COLOR": (384, 384),
                 "OUT_INTERACTION": (384, 384),
                 "OUT_INSTALLATION": (1280, 720),
+                "OUT_TRIPLE_WRAP": (1920, 360),
+                "OUT_TRIPLE_ARTISTIC": (1920, 360),
+                "OUT_DISPLAY_ACTIVE": (1920, 360),
+                "OUT_TRIPLE_WRAP_LEFT": (640, 360),
+                "OUT_TRIPLE_WRAP_CENTER": (640, 360),
+                "OUT_TRIPLE_WRAP_RIGHT": (640, 360),
+                "OUT_TRIPLE_ARTISTIC_LEFT": (640, 360),
+                "OUT_TRIPLE_ARTISTIC_CENTER": (640, 360),
+                "OUT_TRIPLE_ARTISTIC_RIGHT": (640, 360),
                 "OUT_LEFT_EYE": (1280, 720),
                 "OUT_RIGHT_EYE": (1280, 720),
                 "OUT_STEREO_PREVIEW": (2560, 720),
@@ -80,6 +96,9 @@ class TouchDesignerValidationSourceTests(unittest.TestCase):
             module._active_signal_outputs(state),
             (
                 "OUT_INSTALLATION",
+                "OUT_TRIPLE_WRAP",
+                "OUT_TRIPLE_ARTISTIC",
+                "OUT_DISPLAY_ACTIVE",
                 "OUT_LEFT_EYE",
                 "OUT_RIGHT_EYE",
                 "OUT_STEREO_PREVIEW",
@@ -87,7 +106,13 @@ class TouchDesignerValidationSourceTests(unittest.TestCase):
         )
         self.assertEqual(
             module._active_capture_outputs(state),
-            ("OUT_INSTALLATION", "OUT_STEREO_PREVIEW"),
+            (
+                "OUT_INSTALLATION",
+                "OUT_TRIPLE_WRAP",
+                "OUT_TRIPLE_ARTISTIC",
+                "OUT_DISPLAY_ACTIVE",
+                "OUT_STEREO_PREVIEW",
+            ),
         )
 
     def test_active_dimension_contract_rejects_boolean_or_nonpositive_values(self) -> None:
@@ -161,6 +186,9 @@ class TouchDesignerValidationSourceTests(unittest.TestCase):
         self.assertIn('"invalid_parallel_eye_translation"', source)
         self.assertIn('"stereo_eye_difference"', source)
         self.assertIn("left/right eye images are identical", source)
+        self.assertIn('"triple_display_cameras"', source)
+        self.assertIn('"shared origin with different yaw"', source)
+        self.assertIn('"translated and rotated side cameras"', source)
 
     def test_atomic_report_writer_replaces_complete_json(self) -> None:
         module = load_module()

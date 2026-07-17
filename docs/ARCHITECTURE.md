@@ -83,9 +83,20 @@ If those operators are unavailable it uses an honest non-normalizing mono
 fallback instead of fake toe-in stereo.
 
 Stable outputs are `OUT_POSITION`, `OUT_COLOR`, `OUT_INTERACTION`,
-`OUT_INSTALLATION`, `OUT_LEFT_EYE`, `OUT_RIGHT_EYE`, and
-`OUT_STEREO_PREVIEW`. These are textures, not a promise that projection
-mapping or a headset compositor is configured.
+`OUT_INSTALLATION`, `OUT_TRIPLE_WRAP_LEFT/CENTER/RIGHT`,
+`OUT_TRIPLE_WRAP`, `OUT_TRIPLE_ARTISTIC_LEFT/CENTER/RIGHT`,
+`OUT_TRIPLE_ARTISTIC`, `OUT_DISPLAY_ACTIVE`, `OUT_LEFT_EYE`,
+`OUT_RIGHT_EYE`, and `OUT_STEREO_PREVIEW`. These are textures, not a promise
+that projection mapping or a headset compositor is configured.
+
+The original single output is unchanged. Panoramic wrap uses three cameras at
+one common origin with yaw `-A / 0 / +A`; its FOV and yaw must be calibrated to
+the physical surfaces for continuous seams. Artistic multi-angle moves and
+turns the side cameras, intentionally trading seam continuity for parallax.
+Both modes expose independent surface feeds and a horizontal mosaic. A root
+switch selects one of the three installation modes for `OUT_DISPLAY_ACTIVE`;
+fixed outputs stay addressable. Render TOPs remain demand-driven, so retaining
+all modes does not require every view to cook during ordinary playback.
 
 The StreamDiffusionTD replacement is intentionally narrow:
 

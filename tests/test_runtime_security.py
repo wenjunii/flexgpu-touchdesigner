@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -22,6 +23,7 @@ from flexgpu.runtime import (  # noqa: E402
     TOUCHDESIGNER_BUILD_VERSION,
     _config_identity,
     _inspect_process,
+    _inspect_windows_process_handle,
     _launch_environment,
     manifest_path,
     recover_managed,
@@ -150,6 +152,60 @@ def make_ai_config(directory: str, script: str):
 
 
 class RuntimeSecurityTests(unittest.TestCase):
+    def test_windows_handle_identity_prefers_native_command_line(self) -> None:
+        core = {
+            "creation_token": "123",
+            "executable": r"C:\Program Files\App\app.exe",
+        }
+        with (
+            mock.patch(
+                "flexgpu.runtime._windows_process_core_from_handle",
+                side_effect=[dict(core), dict(core)],
+            ),
+            mock.patch(
+                "flexgpu.runtime._windows_command_line_from_handle",
+                return_value='"app.exe" --native',
+            ) as native,
+            mock.patch(
+                "flexgpu.runtime._windows_command_line",
+            ) as compatibility,
+        ):
+            identity = _inspect_windows_process_handle(42, "handle")
+        self.assertEqual(
+            identity,
+            {
+                **core,
+                "command_line_sha256": hashlib.sha256(
+                    b'"app.exe" --native'
+                ).hexdigest(),
+            },
+        )
+        native.assert_called_once_with("handle")
+        compatibility.assert_not_called()
+
+    def test_windows_handle_identity_falls_back_to_wmi_command_line(self) -> None:
+        core = {
+            "creation_token": "123",
+            "executable": r"C:\Program Files\App\app.exe",
+        }
+        with (
+            mock.patch(
+                "flexgpu.runtime._windows_process_core_from_handle",
+                side_effect=[dict(core), dict(core)],
+            ),
+            mock.patch(
+                "flexgpu.runtime._windows_command_line_from_handle",
+                return_value=None,
+            ),
+            mock.patch(
+                "flexgpu.runtime._windows_command_line",
+                return_value='"app.exe" --compatibility',
+            ) as compatibility,
+        ):
+            identity = _inspect_windows_process_handle(42, "handle")
+        self.assertIsNotNone(identity)
+        compatibility.assert_called_once_with(42)
+
     def _stop(self, config) -> None:
         with (
             mock.patch("flexgpu.runtime.GRACEFUL_STOP_SECONDS", 0.0),
@@ -326,7 +382,15 @@ class RuntimeSecurityTests(unittest.TestCase):
 
     def test_touchdesigner_readiness_requires_expected_build_and_config(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            config = make_config(directory, READY_IDENTITY_SCRIPT)
+            # This test exercises immutable build/config identity, not the
+            # production freshness threshold. Windows process inspection can
+            # consume most of the 5-second default on a busy CI runner, so use
+            # a bounded wider window and keep the production default unchanged.
+            config = make_config(
+                directory,
+                READY_IDENTITY_SCRIPT,
+                supervisor={"heartbeat_timeout_ms": 10000},
+            )
             original = build_process_plan(config, [GPU])
             process = replace(
                 original.processes[0],
@@ -398,10 +462,19 @@ class RuntimeSecurityTests(unittest.TestCase):
             plan = build_process_plan(config, [GPU])
             start_plan(plan, config, execute=True)
             try:
-                heartbeat = Path(manifest_path(config)).parent / next(
-                    path.name
-                    for path in Path(manifest_path(config)).parent.glob("flexgpu-heartbeat-*.json")
-                )
+                runtime_directory = Path(manifest_path(config)).parent
+                heartbeat = None
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline:
+                    heartbeat = next(
+                        runtime_directory.glob("flexgpu-heartbeat-*.json"),
+                        None,
+                    )
+                    if heartbeat is not None:
+                        break
+                    time.sleep(0.01)
+                self.assertIsNotNone(heartbeat)
+                assert heartbeat is not None
                 self.assertTrue(heartbeat.exists())
                 self.assertEqual(runtime_status(config)["processes"][0]["status"], "stale")
             finally:

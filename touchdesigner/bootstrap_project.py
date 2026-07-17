@@ -359,9 +359,48 @@ def _materialize(state):
     state['stereo_height'] = _bounded_integer(
         render.get('stereo_height', 720), 720, 64, 16384,
         'render.stereo_height', runtime_errors)
+    triple_defaults = {
+        '3080ti_16gb':(640, 360),
+        '4090':(960, 540),
+        '5090':(1280, 720),
+        'custom':(640, 360),
+    }
+    triple_default_width, triple_default_height = triple_defaults.get(
+        state['tier'], triple_defaults['custom'])
+    state['triple_surface_width'] = _bounded_integer(
+        render.get('triple_surface_width', triple_default_width),
+        triple_default_width, 64, 8192,
+        'render.triple_surface_width', runtime_errors)
+    state['triple_surface_height'] = _bounded_integer(
+        render.get('triple_surface_height', triple_default_height),
+        triple_default_height, 64, 8192,
+        'render.triple_surface_height', runtime_errors)
+    display_mode = str(render.get('display_mode', 'single')).strip().lower()
+    permitted_display_modes = (
+        'single', 'panoramic_wrap', 'artistic_multi_angle')
+    if display_mode not in permitted_display_modes:
+        runtime_errors.append(
+            'render.display_mode has unsupported value %r' % display_mode)
+        display_mode = 'single'
+    state['display_mode'] = display_mode
+    state['surface_fov_degrees'] = _bounded_number(
+        render.get('surface_fov_degrees', 60.0), 60.0, 10.0, 140.0,
+        'render.surface_fov_degrees', runtime_errors)
+    state['triple_wrap_yaw_degrees'] = _bounded_number(
+        render.get('triple_wrap_yaw_degrees', 45.0), 45.0, 0.0, 120.0,
+        'render.triple_wrap_yaw_degrees', runtime_errors)
+    state['triple_artistic_yaw_degrees'] = _bounded_number(
+        render.get('triple_artistic_yaw_degrees', 18.0), 18.0, 0.0, 90.0,
+        'render.triple_artistic_yaw_degrees', runtime_errors)
+    state['triple_artistic_offset_metres'] = _bounded_number(
+        render.get('triple_artistic_offset_metres', 0.45), 0.45, 0.0, 10.0,
+        'render.triple_artistic_offset_metres', runtime_errors)
     state['point_size_px'] = _bounded_number(
         render.get('point_size_px', 3.0), 3.0, 0.0, 128.0,
         'render.point_size_px', runtime_errors, True)
+    state['point_keep_fraction'] = _bounded_number(
+        render.get('point_keep_fraction', 0.68), 0.68, 0.0, 1.0,
+        'render.point_keep_fraction', runtime_errors)
     state['fog_density'] = _bounded_number(
         render.get('fog_density', 0.35), 0.35, 0.0, 10.0,
         'render.fog_density', runtime_errors)
@@ -507,7 +546,11 @@ def _public_state(state):
         'diffusion_resolution', 'diffusion_fps', 'geometry_resolution',
         'geometry_fps', 'point_budget', 'vr_fps', 'installation_fps',
         'installation_width', 'installation_height', 'stereo_width',
-        'stereo_height', 'point_size_px', 'fog_density', 'procedural_mix',
+        'stereo_height', 'triple_surface_width', 'triple_surface_height',
+        'display_mode', 'surface_fov_degrees',
+        'triple_wrap_yaw_degrees', 'triple_artistic_yaw_degrees',
+        'triple_artistic_offset_metres',
+        'point_size_px', 'fog_density', 'procedural_mix',
         'ai_active', 'world_active', 'installation_active', 'vr_active',
         'transport_type', 'transport_fps', 'transport_atlas_width',
         'transport_atlas_height', 'bridge_mode', 'adaptive_enabled',
@@ -699,9 +742,16 @@ def _apply_calibrated_contracts(root_comp, state):
     fog_density = max(0.0, _number(
         _value(completion, 'Fogdensity', state.get('fog_density', 0.35)), 0.35))
     installation = root_comp.op('WORKING_PIPELINE/INSTALLATION_OUTPUT')
+    triple = root_comp.op('WORKING_PIPELINE/TRIPLE_DISPLAY')
     stereo = root_comp.op('WORKING_PIPELINE/STEREO_PREVIEW')
     for path, view_comp in (
         ('WORKING_PIPELINE/INSTALLATION_OUTPUT/installation_grade_PIXEL', installation),
+        ('WORKING_PIPELINE/TRIPLE_DISPLAY/GRADE_WRAP_LEFT_PIXEL', triple),
+        ('WORKING_PIPELINE/TRIPLE_DISPLAY/GRADE_WRAP_CENTER_PIXEL', triple),
+        ('WORKING_PIPELINE/TRIPLE_DISPLAY/GRADE_WRAP_RIGHT_PIXEL', triple),
+        ('WORKING_PIPELINE/TRIPLE_DISPLAY/GRADE_ARTISTIC_LEFT_PIXEL', triple),
+        ('WORKING_PIPELINE/TRIPLE_DISPLAY/GRADE_ARTISTIC_CENTER_PIXEL', triple),
+        ('WORKING_PIPELINE/TRIPLE_DISPLAY/GRADE_ARTISTIC_RIGHT_PIXEL', triple),
         ('WORKING_PIPELINE/STEREO_PREVIEW/GRADE_LEFT_EYE_PIXEL', stereo),
         ('WORKING_PIPELINE/STEREO_PREVIEW/GRADE_RIGHT_EYE_PIXEL', stereo),
     ):
@@ -2156,6 +2206,13 @@ def _apply_working_pipeline(root_comp, state):
     render = root_comp.op('WORKING_PIPELINE/POINT_RENDER')
     _set(render, 'Maxpoints', state['point_budget'])
     _set(render, 'Pointsize', state['point_size_px'])
+    _set(render, 'Pointkeep', state['point_keep_fraction'])
+    _set(render, 'Surfacefovdegrees', state['surface_fov_degrees'])
+    _set(render, 'Wrapyawdegrees', state['triple_wrap_yaw_degrees'])
+    _set(render, 'Artisticyawdegrees', state['triple_artistic_yaw_degrees'])
+    _set(render, 'Artisticoffsetmetres',
+         state['triple_artistic_offset_metres'])
+    _set(pipeline, 'Displaymode', state['display_mode'])
     completion = root_comp.op('WORKING_PIPELINE/COMPLETION')
     _set(completion, 'Mode', state['completion'])
     render_config = _mapping(state.get('render'))
@@ -2166,6 +2223,8 @@ def _apply_working_pipeline(root_comp, state):
             'WORKING_PIPELINE/COMPLETION/fog_completion_PIXEL',
             'fogDensity', 'FLEXGPU_FOG_DENSITY', state['fog_density'])
         _set(root_comp.op('WORKING_PIPELINE/INSTALLATION_OUTPUT'),
+             'Fogdensity', state['fog_density'])
+        _set(root_comp.op('WORKING_PIPELINE/TRIPLE_DISPLAY'),
              'Fogdensity', state['fog_density'])
         _set(root_comp.op('WORKING_PIPELINE/STEREO_PREVIEW'),
              'Fogdensity', state['fog_density'])
@@ -2182,6 +2241,22 @@ def _apply_working_pipeline(root_comp, state):
     _set_resolution(root_comp.op('WORKING_PIPELINE/POINT_RENDER/METRIC_MONO_FALLBACK'), width, height)
     _set_resolution(root_comp.op('WORKING_PIPELINE/INSTALLATION_OUTPUT/installation_grade'),
                     width, height)
+    triple_width = state['triple_surface_width']
+    triple_height = state['triple_surface_height']
+    for mode in ('WRAP', 'ARTISTIC'):
+        for side in ('LEFT', 'CENTER', 'RIGHT'):
+            _set_resolution(root_comp.op(
+                'WORKING_PIPELINE/POINT_RENDER/METRIC_RENDER_%s_%s' %
+                (mode, side)), triple_width, triple_height)
+            _set_resolution(root_comp.op(
+                'WORKING_PIPELINE/TRIPLE_DISPLAY/GRADE_%s_%s' %
+                (mode, side)), triple_width, triple_height)
+        _set_resolution(root_comp.op(
+            'WORKING_PIPELINE/TRIPLE_DISPLAY/%s_MOSAIC' % mode),
+            triple_width * 3, triple_height)
+        _set_resolution(root_comp.op(
+            'WORKING_PIPELINE/TRIPLE_DISPLAY/%s_MOSAIC_FALLBACK' % mode),
+            triple_width * 3, triple_height)
     stereo_width = state['stereo_width']
     stereo_height = state['stereo_height']
     eye_width = max(64, stereo_width // 2)
@@ -2280,7 +2355,8 @@ def _apply_working_pipeline(root_comp, state):
 
     _allow(sources, state['ai_active'])
     for path in ('RECONSTRUCTION', 'SENSOR_INTERACTION', 'TEMPORAL_WORLD',
-                 'COMPLETION', 'RENDER_CONTRACT', 'POINT_RENDER'):
+                 'COMPLETION', 'RENDER_CONTRACT', 'POINT_RENDER',
+                 'TRIPLE_DISPLAY'):
         _allow(root_comp.op('WORKING_PIPELINE/' + path), state['world_active'])
     _allow(root_comp.op('WORKING_PIPELINE/POINT_RENDER/METRIC_RENDER_CENTER'),
            state['installation_active'])
@@ -2762,7 +2838,7 @@ def _required_readiness_outputs(root_comp, state):
         ))
         if state.get('installation_active'):
             required.append(
-                ('installation', 'WORKING_PIPELINE/OUT_INSTALLATION'))
+                ('display_active', 'WORKING_PIPELINE/OUT_DISPLAY_ACTIVE'))
         if state.get('vr_active'):
             required.extend((
                 ('left_eye', 'WORKING_PIPELINE/OUT_LEFT_EYE'),
@@ -2876,7 +2952,8 @@ def _inspect_readiness_health(root_comp, runtime, now, force=False):
 def _readiness_output_node(root_comp, state):
     if state.get('world_active'):
         if state.get('installation_active'):
-            return root_comp.op('WORKING_PIPELINE/OUT_INSTALLATION'), 'installation'
+            return root_comp.op(
+                'WORKING_PIPELINE/OUT_DISPLAY_ACTIVE'), 'display_active'
         if state.get('vr_active'):
             return root_comp.op('WORKING_PIPELINE/OUT_LEFT_EYE'), 'left_eye'
         return None, 'world_output_inactive'
@@ -3710,7 +3787,7 @@ def _safe_build_profile(config):
             re.fullmatch(r"[0-9]+(?:\.[0-9]+){0,2}", worldbus)):
         safe["worldbus_version"] = worldbus
 
-    def section(name, numeric=(), boolean=(), enum=None):
+    def section(name, numeric=(), boolean=(), enums=()):
         raw = _lookup(config, name, None)
         if not isinstance(raw, dict):
             return
@@ -3725,8 +3802,7 @@ def _safe_build_profile(config):
             value = raw.get(key)
             if isinstance(value, bool):
                 result[key] = value
-        if enum is not None:
-            key, permitted = enum
+        for key, permitted in enums:
             value = raw.get(key)
             if isinstance(value, str) and value.lower() in permitted:
                 result[key] = value.lower()
@@ -3757,15 +3833,22 @@ def _safe_build_profile(config):
             safe.setdefault("adaptive", {})["thresholds"] = thresholds
     section(
         "render",
-        numeric=("point_size_px", "point_budget", "installation_width",
+        numeric=("point_size_px", "point_budget", "point_keep_fraction",
+                 "installation_width",
                  "installation_height", "installation_fps", "stereo_width",
-                 "stereo_height", "vr_fps", "fog_density",
+                 "stereo_height", "vr_fps", "triple_surface_width",
+                 "triple_surface_height", "surface_fov_degrees",
+                 "triple_wrap_yaw_degrees",
+                 "triple_artistic_yaw_degrees",
+                 "triple_artistic_offset_metres", "fog_density",
                  "procedural_mix"),
+        enums=(("display_mode", (
+            "single", "panoramic_wrap", "artistic_multi_angle")),),
     )
     section(
         "transport", numeric=("atlas_width", "atlas_height", "atlas_fps"),
         boolean=("drop_stale_frames", "hold_last_complete_frame"),
-        enum=("type", ("local", "shared_memory", "touch_tcp")),
+        enums=(("type", ("local", "shared_memory", "touch_tcp")),),
     )
     return safe
 

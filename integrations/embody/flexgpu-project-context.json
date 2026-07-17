@@ -1,0 +1,203 @@
+{
+  "schema_version": 1,
+  "project_id": "flexgpu-touchdesigner",
+  "overview": {
+    "title": "FlexGPU TouchDesigner 2D-to-3D installation and VR world",
+    "touchdesigner_build": "2025.32820",
+    "runtime_build": "1.2.1",
+    "gpu_baseline": "RTX 3080 Ti Laptop 16 GB",
+    "preferred_local_project": "projects/FlexShow-moge2-local.toe",
+    "tracked_synthetic_project": "projects/FlexShow.toe",
+    "source_of_truth": [
+      "touchdesigner/runtime_pipeline.py",
+      "touchdesigner/bootstrap_project.py",
+      "touchdesigner/validate_project.py"
+    ],
+    "intent": "StreamDiffusionTD RGB to synchronized MoGe-2 metric depth and a persistent interactive point world, with single, triple-surface, and later headset views."
+  },
+  "network": {
+    "root_operator": "/project1/flexgpu",
+    "managed_scope": "/project1/flexgpu/WORKING_PIPELINE",
+    "source_adapter": "/project1/flexgpu/WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER",
+    "moge2_bridge": "/project1/flexgpu/WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER/MOGE2_BRIDGE",
+    "sensor_adapter": "/project1/flexgpu/WORKING_PIPELINE/SENSOR_INTERACTION/DEPTH_SENSOR_ADAPTER",
+    "depth_anything_bridge": "/project1/flexgpu/WORKING_PIPELINE/SENSOR_INTERACTION/DEPTH_SENSOR_ADAPTER/DEPTH_ANYTHING_BRIDGE",
+    "completion": "/project1/flexgpu/WORKING_PIPELINE/COMPLETION",
+    "point_render": "/project1/flexgpu/WORKING_PIPELINE/POINT_RENDER",
+    "installation_output": "/project1/flexgpu/WORKING_PIPELINE/INSTALLATION_OUTPUT",
+    "triple_display": "/project1/flexgpu/WORKING_PIPELINE/TRIPLE_DISPLAY",
+    "discovery_rule": "Verify every path with query_network or get_op before mutation; never infer private component child names."
+  },
+  "outputs": {
+    "comparison_order": [
+      {
+        "name": "source_color",
+        "path": "/project1/flexgpu/WORKING_PIPELINE/OUT_SOURCE_COLOR",
+        "purpose": "Exact synchronized StreamDiffusionTD/MoGe source reference."
+      },
+      {
+        "name": "completed_color",
+        "path": "/project1/flexgpu/WORKING_PIPELINE/OUT_COLOR",
+        "purpose": "Geometry-aligned color after fog, procedural, or hybrid completion."
+      },
+      {
+        "name": "position",
+        "path": "/project1/flexgpu/WORKING_PIPELINE/OUT_POSITION",
+        "purpose": "Metric XYZ plus active/valid channel used to build the point world."
+      },
+      {
+        "name": "installation",
+        "path": "/project1/flexgpu/WORKING_PIPELINE/OUT_INSTALLATION",
+        "purpose": "Original single-surface installation view."
+      },
+      {
+        "name": "active_display",
+        "path": "/project1/flexgpu/WORKING_PIPELINE/OUT_DISPLAY_ACTIVE",
+        "purpose": "Currently selected single, panoramic-wrap, or artistic mosaic."
+      },
+      {
+        "name": "wrap_left",
+        "path": "/project1/flexgpu/WORKING_PIPELINE/OUT_TRIPLE_WRAP_LEFT",
+        "purpose": "Panoramic common-origin left-facing surface."
+      },
+      {
+        "name": "wrap_center",
+        "path": "/project1/flexgpu/WORKING_PIPELINE/OUT_TRIPLE_WRAP_CENTER",
+        "purpose": "Panoramic common-origin primary forward surface."
+      },
+      {
+        "name": "wrap_right",
+        "path": "/project1/flexgpu/WORKING_PIPELINE/OUT_TRIPLE_WRAP_RIGHT",
+        "purpose": "Panoramic common-origin right-facing surface."
+      },
+      {
+        "name": "wrap_mosaic",
+        "path": "/project1/flexgpu/WORKING_PIPELINE/OUT_TRIPLE_WRAP",
+        "purpose": "Left-center-right wrap preview or mapper input."
+      },
+      {
+        "name": "artistic_left",
+        "path": "/project1/flexgpu/WORKING_PIPELINE/OUT_TRIPLE_ARTISTIC_LEFT",
+        "purpose": "Translated and rotated sculptural left view."
+      },
+      {
+        "name": "artistic_center",
+        "path": "/project1/flexgpu/WORKING_PIPELINE/OUT_TRIPLE_ARTISTIC_CENTER",
+        "purpose": "Primary artistic forward view."
+      },
+      {
+        "name": "artistic_right",
+        "path": "/project1/flexgpu/WORKING_PIPELINE/OUT_TRIPLE_ARTISTIC_RIGHT",
+        "purpose": "Translated and rotated sculptural right view."
+      },
+      {
+        "name": "artistic_mosaic",
+        "path": "/project1/flexgpu/WORKING_PIPELINE/OUT_TRIPLE_ARTISTIC",
+        "purpose": "Left-center-right artistic preview or mapper input."
+      },
+      {
+        "name": "left_eye",
+        "path": "/project1/flexgpu/WORKING_PIPELINE/OUT_LEFT_EYE",
+        "purpose": "Desktop metric left-eye preview, not an OpenXR submission texture."
+      },
+      {
+        "name": "right_eye",
+        "path": "/project1/flexgpu/WORKING_PIPELINE/OUT_RIGHT_EYE",
+        "purpose": "Desktop metric right-eye preview, not an OpenXR submission texture."
+      },
+      {
+        "name": "stereo_preview",
+        "path": "/project1/flexgpu/WORKING_PIPELINE/OUT_STEREO_PREVIEW",
+        "purpose": "Side-by-side development preview only."
+      }
+    ],
+    "visual_failure_signals": [
+      "black or opaque rectangular point sprites",
+      "flat image plate instead of visible parallax",
+      "source image vertically inverted relative to completed color",
+      "blue/pink circular placeholder glyph or fog plate",
+      "dark stretched duplicate outside the center view",
+      "wrap side cameras visually identical to the center camera",
+      "blank, flat, non-finite, stale, or fully transparent output"
+    ]
+  },
+  "workflows": {
+    "read_only_live_audit": [
+      "Call get_td_info and confirm TouchDesigner 2025.32820.",
+      "Call query_network on / and then /project1/flexgpu; do not assume the active project instance.",
+      "Call get_op_errors on /project1/flexgpu with recurse enabled.",
+      "Inspect MOGE2_BRIDGE STATUS and parameters before starting or diagnosing the external worker.",
+      "Capture source_color, completed_color, position, installation, wrap left/center/right, and artistic left/center/right.",
+      "Use capture_top quality verdicts plus visual inspection; a pass verdict cannot establish correct depth or camera perspective.",
+      "Call get_project_performance with hotspots after visual correctness is established."
+    ],
+    "visual_change": [
+      "Confirm the user saved the current working TOE or create a new ignored local copy.",
+      "Claim /project1/flexgpu/WORKING_PIPELINE before making live changes when claims are available.",
+      "Query the target network and parameter state before editing.",
+      "Make the smallest reversible change; batch three or more repetitive operations.",
+      "Check recursive operator errors immediately after each logical change.",
+      "Capture the directly affected output and its reference output.",
+      "Compare all single and triple outputs after camera, render, completion, or shader changes.",
+      "Do not save the TOE until the user accepts the live visual, unless the user explicitly authorized saving."
+    ],
+    "moge2_start_order": [
+      "Open the saved FlexGPU working TOE and let frame callbacks compile.",
+      "Enable MOGE2_BRIDGE and confirm Result TCP 9221 is listening.",
+      "Start the MoGe-2 worker from a separate PowerShell.",
+      "Confirm Synchronized Result Valid is on, Source Frame ID increases, and STATUS says synchronized atlas uploaded and ready."
+    ],
+    "shutdown_order": [
+      "Stop or pause StreamDiffusionTD generation.",
+      "Stop the external MoGe-2 worker.",
+      "Save only after the live project has been visually accepted.",
+      "Close TouchDesigner normally; never force quit with unsaved work."
+    ]
+  },
+  "safety": {
+    "private_boundaries": [
+      "local-components/",
+      "StreamDiffusionTD.tox",
+      "paid Depth Anything components",
+      "model checkpoints and weights",
+      "runtime captures, calibration, recordings, logs, and local JSON profiles"
+    ],
+    "live_mutation_policy": [
+      "Treat Embody externalization as disabled unless the user explicitly enables it for reviewed public networks.",
+      "Never externalize, export, copy, inspect internal DAT contents from, or publish the private StreamDiffusionTD component.",
+      "Never use import_network with clear_first on the working pipeline without an accepted saved backup.",
+      "Never delete a component, replace a private adapter, force-quit TouchDesigner, or save over a working TOE without explicit authorization.",
+      "Keep Envoy on 127.0.0.1 and use the project-scoped MCP profile.",
+      "Preserve unknown and user-authored operators outside the managed builder scope."
+    ],
+    "git_policy": [
+      "Do not stage, commit, or push credentials, .env files, private or paid components, TOE working copies, model weights, captures, runtime state, or local configuration.",
+      "The tracked Python builders and validators are the public source of truth.",
+      "Run the repository publication-safety gate before any GitHub sync."
+    ]
+  },
+  "validation": {
+    "expected_touchdesigner_build": "2025.32820",
+    "expected_runtime_build": "1.2.1",
+    "in_process_validator": "touchdesigner/validate_project.py",
+    "source_release_gate": "scripts/Test-FlexShowRelease.ps1",
+    "cold_start_guard": "If recursive errors report ModuleNotFoundError for flexgpu in bridge_runtime or sensor_runtime, do not start the live worker. Re-run the approved FlexGPU runtime bootstrap, reload the generated DAT modules, and confirm the bridge compilation errors are gone first.",
+    "acceptance_order": [
+      "recursive operator and shader errors",
+      "MoGe synchronized frame freshness",
+      "source/completed-color orientation",
+      "position signal validity and metric depth behavior",
+      "single installation visual",
+      "panoramic left/center/right perspective relationship",
+      "artistic left/center/right perspective relationship",
+      "stereo preview comfort and separation",
+      "FPS, GPU/CPU cook hotspots, VRAM, temperature, and dropped frames",
+      "sustained thermal soak on the selected GPU topology"
+    ],
+    "claims_not_made": [
+      "A nonblack capture does not prove correct 3D geometry.",
+      "A desktop stereo preview is not a validated VR runtime.",
+      "Source tests do not validate physical sensors, projectors, LED processors, headset submission, or venue calibration."
+    ]
+  }
+}

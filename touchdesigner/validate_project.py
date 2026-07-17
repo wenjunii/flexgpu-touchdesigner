@@ -30,11 +30,21 @@ REQUIRED_OPERATORS = (
     PIPELINE_PATH + "/TEMPORAL_WORLD",
     PIPELINE_PATH + "/COMPLETION",
     PIPELINE_PATH + "/POINT_RENDER",
+    PIPELINE_PATH + "/TRIPLE_DISPLAY",
     PIPELINE_PATH + "/TELEMETRY/LIVE_HEALTH",
     PIPELINE_PATH + "/OUT_POSITION",
     PIPELINE_PATH + "/OUT_COLOR",
     PIPELINE_PATH + "/OUT_INTERACTION",
     PIPELINE_PATH + "/OUT_INSTALLATION",
+    PIPELINE_PATH + "/OUT_TRIPLE_WRAP",
+    PIPELINE_PATH + "/OUT_TRIPLE_ARTISTIC",
+    PIPELINE_PATH + "/OUT_DISPLAY_ACTIVE",
+    PIPELINE_PATH + "/OUT_TRIPLE_WRAP_LEFT",
+    PIPELINE_PATH + "/OUT_TRIPLE_WRAP_CENTER",
+    PIPELINE_PATH + "/OUT_TRIPLE_WRAP_RIGHT",
+    PIPELINE_PATH + "/OUT_TRIPLE_ARTISTIC_LEFT",
+    PIPELINE_PATH + "/OUT_TRIPLE_ARTISTIC_CENTER",
+    PIPELINE_PATH + "/OUT_TRIPLE_ARTISTIC_RIGHT",
     PIPELINE_PATH + "/OUT_LEFT_EYE",
     PIPELINE_PATH + "/OUT_RIGHT_EYE",
     PIPELINE_PATH + "/OUT_STEREO_PREVIEW",
@@ -45,6 +55,15 @@ OUTPUTS = (
     "OUT_COLOR",
     "OUT_INTERACTION",
     "OUT_INSTALLATION",
+    "OUT_TRIPLE_WRAP",
+    "OUT_TRIPLE_ARTISTIC",
+    "OUT_DISPLAY_ACTIVE",
+    "OUT_TRIPLE_WRAP_LEFT",
+    "OUT_TRIPLE_WRAP_CENTER",
+    "OUT_TRIPLE_WRAP_RIGHT",
+    "OUT_TRIPLE_ARTISTIC_LEFT",
+    "OUT_TRIPLE_ARTISTIC_CENTER",
+    "OUT_TRIPLE_ARTISTIC_RIGHT",
     "OUT_LEFT_EYE",
     "OUT_RIGHT_EYE",
     "OUT_STEREO_PREVIEW",
@@ -61,11 +80,21 @@ EXPECTED_OPERATOR_TYPES = {
     PIPELINE_PATH + "/TEMPORAL_WORLD": ("base",),
     PIPELINE_PATH + "/COMPLETION": ("base",),
     PIPELINE_PATH + "/POINT_RENDER": ("base",),
+    PIPELINE_PATH + "/TRIPLE_DISPLAY": ("base",),
     PIPELINE_PATH + "/TELEMETRY/LIVE_HEALTH": ("table",),
     PIPELINE_PATH + "/OUT_POSITION": ("null",),
     PIPELINE_PATH + "/OUT_COLOR": ("null",),
     PIPELINE_PATH + "/OUT_INTERACTION": ("null",),
     PIPELINE_PATH + "/OUT_INSTALLATION": ("null",),
+    PIPELINE_PATH + "/OUT_TRIPLE_WRAP": ("null",),
+    PIPELINE_PATH + "/OUT_TRIPLE_ARTISTIC": ("null",),
+    PIPELINE_PATH + "/OUT_DISPLAY_ACTIVE": ("null",),
+    PIPELINE_PATH + "/OUT_TRIPLE_WRAP_LEFT": ("null",),
+    PIPELINE_PATH + "/OUT_TRIPLE_WRAP_CENTER": ("null",),
+    PIPELINE_PATH + "/OUT_TRIPLE_WRAP_RIGHT": ("null",),
+    PIPELINE_PATH + "/OUT_TRIPLE_ARTISTIC_LEFT": ("null",),
+    PIPELINE_PATH + "/OUT_TRIPLE_ARTISTIC_CENTER": ("null",),
+    PIPELINE_PATH + "/OUT_TRIPLE_ARTISTIC_RIGHT": ("null",),
     PIPELINE_PATH + "/OUT_LEFT_EYE": ("null",),
     PIPELINE_PATH + "/OUT_RIGHT_EYE": ("null",),
     PIPELINE_PATH + "/OUT_STEREO_PREVIEW": ("null",),
@@ -229,10 +258,32 @@ def _active_output_dimensions(state):
         for name in ("OUT_POSITION", "OUT_COLOR", "OUT_INTERACTION"):
             expected[name] = (geometry, geometry)
         if _truthy(state.get("installation_active")):
+            surface_width = _positive_state_int(
+                state, "triple_surface_width")
+            surface_height = _positive_state_int(
+                state, "triple_surface_height")
+            mosaic_size = (surface_width * 3, surface_height)
             expected["OUT_INSTALLATION"] = (
                 _positive_state_int(state, "installation_width"),
                 _positive_state_int(state, "installation_height"),
             )
+            expected["OUT_TRIPLE_WRAP"] = mosaic_size
+            expected["OUT_TRIPLE_ARTISTIC"] = mosaic_size
+            display_mode = str(
+                state.get("display_mode", "single")).strip().casefold()
+            if display_mode == "single":
+                expected["OUT_DISPLAY_ACTIVE"] = expected["OUT_INSTALLATION"]
+            elif display_mode in (
+                    "panoramic_wrap", "artistic_multi_angle"):
+                expected["OUT_DISPLAY_ACTIVE"] = mosaic_size
+            else:
+                raise ValueError(
+                    "display_mode is unsupported: %r" % display_mode)
+            for mode in ("WRAP", "ARTISTIC"):
+                for side in ("LEFT", "CENTER", "RIGHT"):
+                    expected[
+                        "OUT_TRIPLE_%s_%s" % (mode, side)
+                    ] = (surface_width, surface_height)
         if _truthy(state.get("vr_active")):
             stereo_width = _positive_state_int(state, "stereo_width")
             stereo_height = _positive_state_int(state, "stereo_height")
@@ -270,7 +321,12 @@ def _experience_activation_contract(experience):
 def _active_signal_outputs(state):
     result = []
     if _truthy(state.get("installation_active")):
-        result.append("OUT_INSTALLATION")
+        result.extend((
+            "OUT_INSTALLATION",
+            "OUT_TRIPLE_WRAP",
+            "OUT_TRIPLE_ARTISTIC",
+            "OUT_DISPLAY_ACTIVE",
+        ))
     if _truthy(state.get("vr_active")):
         result.extend(("OUT_LEFT_EYE", "OUT_RIGHT_EYE", "OUT_STEREO_PREVIEW"))
     return tuple(result)
@@ -279,7 +335,12 @@ def _active_signal_outputs(state):
 def _active_capture_outputs(state):
     result = []
     if _truthy(state.get("installation_active")):
-        result.append("OUT_INSTALLATION")
+        result.extend((
+            "OUT_INSTALLATION",
+            "OUT_TRIPLE_WRAP",
+            "OUT_TRIPLE_ARTISTIC",
+            "OUT_DISPLAY_ACTIVE",
+        ))
     if _truthy(state.get("vr_active")):
         result.append("OUT_STEREO_PREVIEW")
     return tuple(result)
@@ -748,6 +809,74 @@ def validate(
             "metric_cameras": [name for name, node in metric_cameras.items() if node is not None],
             "mono_fallback": mono_fallback is not None,
             "camera_translations": camera_translations,
+        },
+    )
+
+    triple_failures = []
+    triple_camera_details = {}
+    if _truthy(state.get("installation_active")):
+        point_render = _op(PIPELINE_PATH + "/POINT_RENDER")
+        expected_wrap_yaw = float(
+            _value(point_render, "Wrapyawdegrees", 45.0) or 0.0)
+        expected_art_yaw = float(
+            _value(point_render, "Artisticyawdegrees", 18.0) or 0.0)
+        expected_art_offset = float(
+            _value(point_render, "Artisticoffsetmetres", 0.45) or 0.0)
+        for mode, expected_transforms in (
+            ("WRAP", {
+                # TouchDesigner positive camera Y rotation looks toward the
+                # audience's left while the camera faces -Z.
+                "LEFT":(0.0, expected_wrap_yaw),
+                "CENTER":(0.0, 0.0),
+                "RIGHT":(0.0, -expected_wrap_yaw),
+            }),
+            ("ARTISTIC", {
+                "LEFT":(-expected_art_offset, -expected_art_yaw),
+                "CENTER":(0.0, 0.0),
+                "RIGHT":(expected_art_offset, expected_art_yaw),
+            }),
+        ):
+            for side, (expected_tx, expected_ry) in expected_transforms.items():
+                camera_name = "CAMERA_%s_%s" % (mode, side)
+                render_name = "METRIC_RENDER_%s_%s" % (mode, side)
+                camera = _op(render_root + camera_name)
+                render_node = _op(render_root + render_name)
+                if camera is None or render_node is None:
+                    triple_failures.append({
+                        "missing_triple_view": {
+                            "camera":camera_name if camera is None else "",
+                            "render":render_name if render_node is None else "",
+                        },
+                    })
+                    continue
+                transform = tuple(float(
+                    _value(camera, axis, 0.0) or 0.0)
+                    for axis in ("tx", "ty", "tz", "rx", "ry", "rz"))
+                triple_camera_details[camera_name] = list(transform)
+                tolerance = 1e-4
+                expected = (
+                    expected_tx, 0.0, 0.0, 0.0, expected_ry, 0.0)
+                if (
+                    not all(math.isfinite(value) for value in transform)
+                    or any(
+                        abs(actual - target) > tolerance
+                        for actual, target in zip(transform, expected))
+                ):
+                    triple_failures.append({
+                        "invalid_triple_camera_transform": {
+                            "camera":camera_name,
+                            "expected":list(expected),
+                            "actual":list(transform),
+                        },
+                    })
+    check(
+        "triple_display_cameras",
+        not _truthy(state.get("installation_active")) or not triple_failures,
+        {
+            "failures":triple_failures,
+            "cameras":triple_camera_details,
+            "panoramic_contract":"shared origin with different yaw",
+            "artistic_contract":"translated and rotated side cameras",
         },
     )
 

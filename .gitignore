@@ -6,6 +6,9 @@ __pycache__/
 htmlcov/
 .vscode/
 .idea/
+.mcp.json
+.embody/*
+!.embody/project.json
 .env
 .env.*
 !.env.example
@@ -92,3 +95,10 @@ config/show-config.json
 config/local-*.json
 config/*-local.json
 config/presets/local-*.json
+
+# Embody / Envoy (auto-managed)
+CrashAutoSave*
+externalizations.tsv
+.claude/settings.local.json
+.claude/projects/
+.DS_Store

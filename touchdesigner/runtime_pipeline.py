@@ -34,6 +34,7 @@ TOP_CONTRACTS = {
     "SENSOR_POSITION": "RGBA32F TOP; RGB=sensor-local XYZ metres, A=occupancy/confidence",
     "INTERACTION": "RGBA16F TOP; RGB=force vector, A=occupancy",
     "INSTALLATION": "RGBA TOP; visually inspectable rendered point world",
+    "TRIPLE_DISPLAY": "three RGBA surface TOPs plus a horizontal calibration mosaic",
     "STEREO": "two eye RGBA TOPs plus a side-by-side preview",
 }
 
@@ -111,8 +112,10 @@ void main()
                    max(1.0, float(textureSize(sTD2DInputs[1], 0).y));
     float fx = fxNormalized > 1e-6 ? fxNormalized : 0.86602540378 / aspect;
     float fy = fyNormalized > 1e-6 ? fyNormalized : 0.86602540378;
+    // TouchDesigner TOP UVs increase from image bottom to image top. Preserve
+    // that orientation in camera/world Y so the rendered cloud matches RGB.
     vec3 cameraPosition = vec3((uv.x - cxNormalized) * z / fx,
-                               -(uv.y - cyNormalized) * z / fy,
+                               (uv.y - cyNormalized) * z / fy,
                                -z);
     vec4 homogeneous = vec4(cameraPosition, 1.0);
     vec3 worldPosition = vec3(dot(cameraToWorld0, homogeneous),
@@ -135,7 +138,7 @@ void main()
     vec2 uv = vUV.st;
     float occupancy = texture(sTD2DInputs[0], uv).r;
     vec3 position = vec3((uv.x - 0.5) * 3.0,
-                         (0.5 - uv.y) * 2.0,
+                         (uv.y - 0.5) * 2.0,
                          -1.15 - 0.20 * occupancy);
     fragColor = TDOutputSwizzle(vec4(position, occupancy));
 }
@@ -369,10 +372,20 @@ void main()
     float radius2 = dot(q, q);
     float shell = sqrt(max(0.0, 1.0 - min(radius2, 1.0)));
     float grain = hash21(floor(uv * 512.0));
-    vec3 generated = vec3(q.x * 1.35, -q.y, -1.45 - shell * 0.85);
+    // Vary depth while unprojecting from the same source UV. This keeps the
+    // procedural surface behind the missing pixel instead of sliding it into
+    // a different screen region and opening a second, artificial black hole.
+    float generatedDepth = 1.45 + shell * 0.85;
+    const float generatedFocal = 0.86602540378; // 60-degree vertical FOV
+    vec3 generated = vec3((uv.x - 0.5) * generatedDepth / generatedFocal,
+                          (uv.y - 0.5) * generatedDepth / generatedFocal,
+                          -generatedDepth);
     generated += (grain - 0.5) * vec3(0.035, 0.035, 0.12);
     generated += interaction.rgb * 0.035;
-    float generatedActive = (1.0 - step(1.0, radius2)) * step(0.16, grain);
+    // Invalid depth can occur anywhere in the rectangular source image,
+    // especially in sky and reflective areas. Keep the backfill rectangular;
+    // a circular activation mask creates a visible coloured dome in OUT_COLOR.
+    float generatedActive = 1.0;
     float useMeasured = step(0.5, measured.a);
     vec3 position = mix(generated, measured.rgb, useMeasured);
     float activity = max(measured.a, generatedActive * (1.0 - measured.a));
@@ -390,10 +403,10 @@ void main()
     vec4 source = texture(sTD2DInputs[2], uv);
     float generated = (1.0 - originalPosition.a) * position.a;
     float bands = 0.5 + 0.5 * sin(position.z * 7.0 + position.x * 3.0);
-    vec3 palette = mix(vec3(0.055, 0.12, 0.20), vec3(0.78, 0.30, 0.16), bands);
-    // Interaction is already folded into PROCEDURAL_POSITION upstream.
-    palette += min(length(position.rgb - originalPosition.rgb), 1.0) *
-               vec3(0.12, 0.22, 0.32);
+    // Preserve the generated image colour in invalid-depth regions. A subtle
+    // luminance modulation still identifies procedural geometry without
+    // painting a blue/pink overlay over the source image.
+    vec3 palette = source.rgb * mix(0.88, 1.0, bands);
     vec3 color = mix(source.rgb, palette, generated);
     fragColor = TDOutputSwizzle(vec4(color, position.a));
 }
@@ -444,9 +457,16 @@ void main()
     vec2 p = uv * 2.0 - 1.0;
     float vignette = smoothstep(1.35, 0.24, dot(p, p));
     vec3 edgeColor = mix(vec3(0.018, 0.045, 0.07), fog.rgb, 0.65);
-    vec3 color = points.rgb + fog.rgb * fog.a * 0.24 + edgeColor * viewFog;
+    // Never add the whole completion colour plate behind a camera render.
+    // That produced a stretched, dark duplicate of the source in every
+    // installation and triple-surface view. Use it only as the colour of
+    // local disocclusion fog around actual point silhouettes.
+    vec3 color = points.rgb + edgeColor * viewFog;
+    float ambientFog = (1.0 - points.a) * grain *
+                       clamp(viewFogDensity / 0.35, 0.0, 2.0) * 0.018;
+    color += vec3(0.025, 0.045, 0.070) * ambientFog;
     color = color / (1.0 + color); // inexpensive tone map
-    color *= mix(0.54, 1.0, vignette);
+    color *= mix(0.84, 1.0, vignette);
     fragColor = TDOutputSwizzle(vec4(color, 1.0));
 }
 ''',
@@ -1105,22 +1125,43 @@ def _set_resolution(node, width, height):
     _set(node, ("resolutionh", "resh"), height)
 
 
-def _moge2_runtime_source(report):
-    """Load the import-safe bridge module that will be embedded in a Text DAT."""
+def _embedded_runtime_source(filename, label, report):
+    """Load a runtime and bind this checkout's public ``src`` as a cold hint."""
 
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        "moge2_bridge_runtime.py")
+    touchdesigner_dir = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(touchdesigner_dir, filename)
     try:
         size = os.path.getsize(path)
         if size < 1 or size > 512 * 1024:
-            raise ValueError("bridge runtime source is outside the size limit")
+            raise ValueError("%s runtime source is outside the size limit" % label)
         with open(path, "r", encoding="utf-8") as stream:
-            return stream.read()
+            source = stream.read()
+        marker = '_EMBEDDED_FLEXGPU_SRC = ""'
+        if source.count(marker) != 1:
+            raise ValueError("%s runtime source hint marker is invalid" % label)
+        src_hint = os.path.abspath(os.path.join(touchdesigner_dir, "..", "src"))
+        if not os.path.isfile(os.path.join(src_hint, "flexgpu", "worldbus.py")):
+            raise ValueError("%s runtime source tree is incomplete" % label)
+        return source.replace(
+            marker,
+            "_EMBEDDED_FLEXGPU_SRC = %r" % src_hint,
+            1,
+        )
     except Exception as exc:
-        report.warn("MoGe-2 bridge runtime could not be embedded: %s" % exc)
+        report.warn("%s runtime could not be embedded: %s" % (label, exc))
         return ("def tick(bridge_comp=None):\n    return None\n\n"
                 "def stop(bridge_comp=None):\n    return None\n\n"
                 "def on_script_top_cook(script_op):\n    return None\n")
+
+
+def _moge2_runtime_source(report):
+    """Load the import-safe bridge module that will be embedded in a Text DAT."""
+
+    return _embedded_runtime_source(
+        "moge2_bridge_runtime.py",
+        "MoGe-2 bridge",
+        report,
+    )
 
 
 def _build_moge2_bridge(adapter, input_rgb, report):
@@ -1269,19 +1310,11 @@ def _wire_moge2_routes(adapter, moge2, fallbacks, report):
 def _depth_anything_runtime_source(report):
     """Load the import-safe sensor receiver for embedding in a Text DAT."""
 
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        "depth_anything_sensor_runtime.py")
-    try:
-        size = os.path.getsize(path)
-        if size < 1 or size > 512 * 1024:
-            raise ValueError("sensor runtime source is outside the size limit")
-        with open(path, "r", encoding="utf-8") as stream:
-            return stream.read()
-    except Exception as exc:
-        report.warn("Depth Anything sensor runtime could not be embedded: %s" % exc)
-        return ("def tick(bridge_comp=None):\n    return None\n\n"
-                "def stop(bridge_comp=None):\n    return None\n\n"
-                "def on_script_top_cook(script_op):\n    return None\n")
+    return _embedded_runtime_source(
+        "depth_anything_sensor_runtime.py",
+        "Depth Anything sensor",
+        report,
+    )
 
 
 def _build_depth_anything_sensor_bridge(adapter, report):
@@ -2019,7 +2052,7 @@ def _build_persistence(parent, report):
         [position, confidence, frame_control], report, False)
     temporal_state = _glsl(comp, "temporal_state", "temporal_state",
                            [observation, state_feedback], report, False)
-    _set(state_feedback, ("targettop", "target"), temporal_state.path)
+    _set(state_feedback, ("targettop", "target", "top"), temporal_state.path)
 
     feedback = _ensure(comp, "feedbackTOP", "POSITION_HISTORY", report)
     # Feedback TOP still needs a seed input even when its target is set.  The
@@ -2031,12 +2064,12 @@ def _build_persistence(parent, report):
         [feedback, interaction, frame_control], report, True)
     persistent = _glsl(comp, "temporal_persistence", "temporal_persistence",
                        [position, advected_history, temporal_state], report, True)
-    _set(feedback, ("targettop", "target"), persistent.path)
+    _set(feedback, ("targettop", "target", "top"), persistent.path)
     color_feedback = _ensure(comp, "feedbackTOP", "COLOR_HISTORY", report)
     _connect(color, color_feedback, 0, 0, report, replace=True)
     persistent_color = _glsl(comp, "temporal_color", "temporal_color",
                              [color, color_feedback, temporal_state], report, False)
-    _set(color_feedback, ("targettop", "target"), persistent_color.path)
+    _set(color_feedback, ("targettop", "target", "top"), persistent_color.path)
     shader_info = _ensure(comp, "infoDAT", "TEMPORAL_SHADER_INFO", report, optional=True)
     if shader_info is not None:
         _set(shader_info, ("op", "operator"), persistent.path)
@@ -2113,7 +2146,7 @@ def _build_render_contract(parent, report):
 def _build_point_render(parent, report):
     comp = _ensure(parent, "baseCOMP", "POINT_RENDER", report)
     _style(comp, 390, 350, (0.38, 0.49, 0.17),
-           "TOP-to-POP point cloud with center and stereo Render Simple views", 260, 115)
+           "Metric point cloud with single, triple-surface and stereo views", 270, 120)
     position = _in_top(comp, "POSITION_IN", 0, report)
     color = _in_top(comp, "COLOR_IN", 1, report)
     page = _page(comp, "Render")
@@ -2125,6 +2158,14 @@ def _build_point_render(parent, report):
             label="Point Opacity")
     _custom(comp, page, "Float", "Ipdmetres", 0.064,
             label="Preview Inter-Pupillary Distance (metres)")
+    _custom(comp, page, "Float", "Surfacefovdegrees", 60.0,
+            label="Triple Surface Camera FOV (degrees)")
+    _custom(comp, page, "Float", "Wrapyawdegrees", 30.0,
+            label="Panoramic Side Yaw (degrees)")
+    _custom(comp, page, "Float", "Artisticyawdegrees", 18.0,
+            label="Artistic Side Yaw (degrees)")
+    _custom(comp, page, "Float", "Artisticoffsetmetres", 0.45,
+            label="Artistic Side Offset (metres)")
 
     points = _ensure(comp, "toptoPOP", "POSITION_TO_POINTS", report, optional=True)
     point_glyph = _glsl(comp, "POINT_GLYPH", "point_glyph", [], report, False)
@@ -2145,11 +2186,15 @@ def _build_point_render(parent, report):
     render_center = None
     render_left = None
     render_right = None
+    triple_renders = {}
     if points is not None:
         _set(points, "rgba", "pactive")
         _set(points, "input0top", position.path)
         _set(points, "input0chanscope", "r g b a")
-        _set(points, "input0attrscope", "P P P P")
+        # TOP to POP maps one attribute component per sampled channel. Repeating
+        # a vector attribute name asks every channel to provide the whole
+        # vector, producing "More attribute values than channels specified".
+        _set(points, "input0attrscope", "P(0) P(1) P(2) active")
         _set(points, "input0filter", "nearest")
         # Store source color on each point. Using the full source image as the
         # Point Sprite MAT texture makes every point a tiny textured square and
@@ -2157,7 +2202,11 @@ def _build_point_render(parent, report):
         if _set_sequence_blocks(points, "input", 2):
             _set(points, "input1top", color.path)
             _set(points, "input1chanscope", "r g b a")
-            _set(points, "input1attrscope", "Color Color Color Color")
+            _set(
+                points,
+                "input1attrscope",
+                "Color(0) Color(1) Color(2) Color(3)",
+            )
             _set(points, "input1filter", "nearest")
         _set(points, "surftype", "points")
         _set(points, "texture", "point")
@@ -2228,7 +2277,10 @@ def _build_point_render(parent, report):
                 _set(camera, "rx", 0.0)
                 _set(camera, "ry", 0.0)
                 _set(camera, "rz", 0.0)
-                _set(camera, "fov", 55.0)
+                # Match the default 60-degree vertical reconstruction
+                # intrinsics so the center camera reprojects the source
+                # without an avoidable scale mismatch.
+                _set(camera, "fov", 60.0)
                 _set(camera, "near", 0.05)
                 _set(camera, "far", 100.0)
                 _set(camera, "ipdshift", 0.0)
@@ -2259,6 +2311,60 @@ def _build_point_render(parent, report):
         render_right = make_metric_render(
             "METRIC_RENDER_RIGHT_EYE", cameras.get("CAMERA_RIGHT_METRIC"))
 
+        # The panoramic cameras share exactly one origin. Their different yaw
+        # directions form a continuous surrounding view when the physical wall
+        # angles and camera FOV are calibrated together.
+        for side, yaw_expression in (
+            # TouchDesigner Camera COMP positive Y rotation looks toward the
+            # audience's left when the camera faces -Z.
+            ("LEFT", "parent().par.Wrapyawdegrees.eval()"),
+            ("CENTER", "0.0"),
+            ("RIGHT", "-parent().par.Wrapyawdegrees.eval()"),
+        ):
+            camera_name = "CAMERA_WRAP_" + side
+            camera = _ensure(comp, "cameraCOMP", camera_name, report,
+                             optional=True)
+            if camera is not None:
+                _set(camera, "tx", 0.0)
+                _set(camera, "ty", 0.0)
+                _set(camera, "tz", 0.0)
+                _set(camera, "rx", 0.0)
+                _expr(camera, "ry", yaw_expression)
+                _set(camera, "rz", 0.0)
+                _expr(camera, "fov", "parent().par.Surfacefovdegrees.eval()")
+                _set(camera, "near", 0.05)
+                _set(camera, "far", 100.0)
+                _set(camera, "ipdshift", 0.0)
+            triple_renders["WRAP_" + side] = make_metric_render(
+                "METRIC_RENDER_WRAP_" + side, camera)
+
+        # Artistic views intentionally move as well as turn the side cameras.
+        # This sacrifices seam continuity but exposes parallax and makes the
+        # image-derived surface read more clearly as a 3D sculpture.
+        for side, offset_expression, yaw_expression in (
+            ("LEFT", "-parent().par.Artisticoffsetmetres.eval()",
+             "-parent().par.Artisticyawdegrees.eval()"),
+            ("CENTER", "0.0", "0.0"),
+            ("RIGHT", "parent().par.Artisticoffsetmetres.eval()",
+             "parent().par.Artisticyawdegrees.eval()"),
+        ):
+            camera_name = "CAMERA_ARTISTIC_" + side
+            camera = _ensure(comp, "cameraCOMP", camera_name, report,
+                             optional=True)
+            if camera is not None:
+                _expr(camera, "tx", offset_expression)
+                _set(camera, "ty", 0.0)
+                _set(camera, "tz", 0.0)
+                _set(camera, "rx", 0.0)
+                _expr(camera, "ry", yaw_expression)
+                _set(camera, "rz", 0.0)
+                _expr(camera, "fov", "parent().par.Surfacefovdegrees.eval()")
+                _set(camera, "near", 0.05)
+                _set(camera, "far", 100.0)
+                _set(camera, "ipdshift", 0.0)
+            triple_renders["ARTISTIC_" + side] = make_metric_render(
+                "METRIC_RENDER_ARTISTIC_" + side, camera)
+
         # A stock Render Simple center view remains a safe pre-2025 fallback.
         # It deliberately produces mono eyes: fake toe-in stereo is worse than
         # an honest mono fallback. Metric geometry is never normalized.
@@ -2273,7 +2379,7 @@ def _build_point_render(parent, report):
                     _set(legacy, "mat", point_material.path)
                 _set(legacy, "normalizegeo", False)
                 _set(legacy, "ortho", False)
-                _set(legacy, "fov", 55.0)
+                _set(legacy, "fov", 60.0)
                 _set(legacy, "camdistance", 0.0)
                 _set(legacy, "geotranslatex", 0.0)
                 _set(legacy, "georotatey", 0.0)
@@ -2285,6 +2391,9 @@ def _build_point_render(parent, report):
             render_center = legacy
             render_left = legacy
             render_right = legacy
+            for mode in ("WRAP", "ARTISTIC"):
+                for side in ("LEFT", "CENTER", "RIGHT"):
+                    triple_renders[mode + "_" + side] = legacy
 
     # A valid color TOP fallback makes the project inspectable even if opened in
     # a pre-POP TouchDesigner build.  In 2025.32820 the switches select renders.
@@ -2303,6 +2412,21 @@ def _build_point_render(parent, report):
     _out_top(comp, "OUT_CENTER", center_switch, 0, report)
     _out_top(comp, "OUT_LEFT_EYE", left_switch, 1, report)
     _out_top(comp, "OUT_RIGHT_EYE", right_switch, 2, report)
+    output_index = 3
+    for mode in ("WRAP", "ARTISTIC"):
+        for side in ("LEFT", "CENTER", "RIGHT"):
+            key = mode + "_" + side
+            switch = _ensure(
+                comp, "switchTOP", key + "_OR_FALLBACK", report)
+            _connect(color, switch, 0, 0, report, replace=True)
+            rendered = triple_renders.get(key)
+            if rendered is not None:
+                _connect(rendered, switch, 1, 0, report, replace=True)
+                _set(switch, "index", 1)
+            else:
+                _set(switch, "index", 0)
+            _out_top(comp, "OUT_" + key, switch, output_index, report)
+            output_index += 1
     _table(comp, "RENDER_PATH", [
         ["stage", "operator", "contract"],
         ["unpack", "POSITION_TO_POINTS (TOP to POP)", "P + active plus aligned per-point Color"],
@@ -2311,6 +2435,10 @@ def _build_point_render(parent, report):
         ["thickness", "POINT_SPRITE_MATERIAL", "Pointsize and Pointopacity controls"],
         ["metric geometry", "POINT_WORLD_GEO/SELECT_POINT_WORLD", "no normalization; XYZ remain metres"],
         ["center", "METRIC_RENDER_CENTER + CAMERA_CENTER_METRIC", TOP_CONTRACTS["INSTALLATION"]],
+        ["panoramic wrap", "METRIC_RENDER_WRAP_* + CAMERA_WRAP_*",
+         "shared origin; side yaw follows Wrapyawdegrees"],
+        ["artistic multi-angle", "METRIC_RENDER_ARTISTIC_* + CAMERA_ARTISTIC_*",
+         "side translation plus toe-in; deliberate parallax"],
         ["stereo", "METRIC_RENDER_LEFT/RIGHT + parallel Camera COMPs", "+/- Ipdmetres/2; no toe-in"],
         ["fallback", "*_OR_FALLBACK input 0", "completed color TOP"],
     ], report)
@@ -2332,6 +2460,74 @@ def _build_installation(parent, report):
     output = _ensure(comp, "nullTOP", "OUT_INSTALLATION", report)
     _connect(grade, output, report=report, replace=True)
     _out_top(comp, "out1", output, 0, report)
+    return comp
+
+
+def _build_triple_display(parent, report):
+    comp = _ensure(parent, "baseCOMP", "TRIPLE_DISPLAY", report)
+    _style(comp, 690, 520, (0.43, 0.42, 0.12),
+           "Three-surface panoramic wrap and artistic multi-angle outputs", 285, 125)
+    page = _page(comp, "View Completion")
+    _custom(comp, page, "Float", "Fogdensity", 0.35,
+            label="Per-Surface Fog Density")
+    _custom(comp, page, "Float", "Fogradius", 2.0,
+            label="Per-Surface Fog Radius")
+
+    inputs = {}
+    input_index = 0
+    for mode in ("WRAP", "ARTISTIC"):
+        for side in ("LEFT", "CENTER", "RIGHT"):
+            key = mode + "_" + side
+            inputs[key] = _in_top(
+                comp, key + "_IN", input_index, report)
+            input_index += 1
+    fog_plate = _in_top(comp, "FOG_PLATE_IN", input_index, report)
+
+    graded = {}
+    output_index = 0
+    layouts = {}
+    for mode in ("WRAP", "ARTISTIC"):
+        for side in ("LEFT", "CENTER", "RIGHT"):
+            key = mode + "_" + side
+            graded[key] = _glsl(
+                comp, "GRADE_" + key, "installation_grade",
+                [inputs[key], fog_plate], report, False)
+            _set_resolution(graded[key], 960, 540)
+            _out_top(comp, "OUT_" + key, graded[key], output_index, report)
+            output_index += 1
+
+        layout = _ensure(
+            comp, "layoutTOP", mode + "_MOSAIC", report, optional=True)
+        if layout is None:
+            layout = _ensure(
+                comp, "compositeTOP", mode + "_MOSAIC_FALLBACK", report)
+        for side_index, side in enumerate(("LEFT", "CENTER", "RIGHT")):
+            _connect(
+                graded[mode + "_" + side], layout, side_index, 0,
+                report, replace=True)
+        _set(layout, ("align", "direction"), "horizontal")
+        _set_resolution(layout, 2880, 540)
+        layouts[mode] = layout
+        _out_top(comp, "OUT_" + mode + "_MOSAIC", layout, output_index, report)
+        output_index += 1
+
+    _table(comp, "SURFACE_CONTRACT", [
+        ["output", "camera relationship", "use"],
+        ["OUT_WRAP_LEFT/CENTER/RIGHT", "one origin; TD camera yaw +A / 0 / -A",
+         "calibrated surrounding walls with continuous perspective"],
+        ["OUT_WRAP_MOSAIC", "left | center | right",
+         "single-canvas preview, recorder, or projector mapper input"],
+        ["OUT_ARTISTIC_LEFT/CENTER/RIGHT", "translated and rotated cameras",
+         "sculptural multi-angle presentation with intentional seams"],
+        ["OUT_ARTISTIC_MOSAIC", "left | center | right",
+         "single-canvas preview, recorder, or projector mapper input"],
+    ], report)
+    _text(comp, "README_FIRST",
+          "Each surface TOP is an independent projector/LED feed. The mosaic "
+          "TOPs concatenate left, center and right only for preview, recording "
+          "or a downstream mapping tool. Panoramic Wrap requires venue camera "
+          "yaw/FOV calibration. Artistic Multi-Angle deliberately does not "
+          "promise continuous seams.", report)
     return comp
 
 
@@ -2603,6 +2799,10 @@ def build(root=None):
     # reuses them.  Keep the visible/runtime version synchronized on upgrades.
     _set(pipeline, "Buildversion", BUILD_VERSION)
     _custom(pipeline, page, "Pulse", "Rebuild", False)
+    _custom(
+        pipeline, page, "Menu", "Displaymode", "single",
+        menu=("single", "panoramic_wrap", "artistic_multi_angle"),
+        label="Active Installation Display")
 
     sources = _build_sources(pipeline, report)
     role_bridge = _build_role_bridge(pipeline, report)
@@ -2613,6 +2813,7 @@ def build(root=None):
     contract = _build_render_contract(pipeline, report)
     point_render = _build_point_render(pipeline, report)
     installation = _build_installation(pipeline, report)
+    triple = _build_triple_display(pipeline, report)
     stereo = _build_stereo(pipeline, report)
 
     # These wires are owned by the builder and are repaired on every rebuild.
@@ -2643,16 +2844,39 @@ def build(root=None):
     _connect(contract, point_render, 1, 1, report, replace=True)
     _connect(point_render, installation, 0, 0, report, replace=True)
     _connect(completion, installation, 1, 1, report, replace=True)
+    for destination_index, source_index in enumerate(range(3, 9)):
+        _connect(point_render, triple, destination_index, source_index, report, replace=True)
+    _connect(completion, triple, 6, 1, report, replace=True)
     _connect(point_render, stereo, 0, 1, report, replace=True)
     _connect(point_render, stereo, 1, 2, report, replace=True)
+
+    display_route = _ensure(
+        pipeline, "switchTOP", "DISPLAY_MODE_ROUTE", report)
+    _connect(installation, display_route, 0, 0, report, replace=True)
+    _connect(triple, display_route, 1, 3, report, replace=True)
+    _connect(triple, display_route, 2, 7, report, replace=True)
+    _expr(display_route, "index", "parent().par.Displaymode.menuIndex")
 
     # Easy-to-find root outputs for projectors, recorders, transports and later
     # VR runtimes.  They mirror the internal stable contract names.
     outputs = (
         ("OUT_POSITION", contract, 0),
+        # Preserve the geometry-aligned OUT_COLOR contract used by validators
+        # and downstream point renderers. Expose the exact synchronized source
+        # separately so it can be compared without fog/procedural completion.
+        ("OUT_SOURCE_COLOR", role_bridge, 0),
         ("OUT_COLOR", contract, 1),
         ("OUT_INTERACTION", contract, 2),
         ("OUT_INSTALLATION", installation, 0),
+        ("OUT_TRIPLE_WRAP", triple, 3),
+        ("OUT_TRIPLE_ARTISTIC", triple, 7),
+        ("OUT_DISPLAY_ACTIVE", display_route, 0),
+        ("OUT_TRIPLE_WRAP_LEFT", triple, 0),
+        ("OUT_TRIPLE_WRAP_CENTER", triple, 1),
+        ("OUT_TRIPLE_WRAP_RIGHT", triple, 2),
+        ("OUT_TRIPLE_ARTISTIC_LEFT", triple, 4),
+        ("OUT_TRIPLE_ARTISTIC_CENTER", triple, 5),
+        ("OUT_TRIPLE_ARTISTIC_RIGHT", triple, 6),
         ("OUT_LEFT_EYE", stereo, 0),
         ("OUT_RIGHT_EYE", stereo, 1),
         ("OUT_STEREO_PREVIEW", stereo, 2),
@@ -2683,12 +2907,20 @@ def build(root=None):
         ["position_contract", TOP_CONTRACTS["POSITION"]],
         ["renderer", "TOP to POP -> metric Geometry/Camera/Render TOP (TD 2025)"],
         ["installation_output", "OUT_INSTALLATION"],
+        ["triple_wrap_output",
+         "OUT_TRIPLE_WRAP_LEFT/CENTER/RIGHT + OUT_TRIPLE_WRAP"],
+        ["triple_artistic_output",
+         "OUT_TRIPLE_ARTISTIC_LEFT/CENTER/RIGHT + OUT_TRIPLE_ARTISTIC"],
+        ["active_display_output", "OUT_DISPLAY_ACTIVE"],
         ["stereo_output", "OUT_LEFT_EYE, OUT_RIGHT_EYE, OUT_STEREO_PREVIEW"],
         ["openvr_dependency", "none"],
         ["unknown_nodes", "preserved"],
     ], report)
     _text(pipeline, "README_FIRST", "FLEXGPU WORKING PIPELINE\n\n"
-          "Open OUT_INSTALLATION for the center point-cloud render and "
+          "Open OUT_INSTALLATION for the unchanged single point-cloud render, "
+          "OUT_TRIPLE_WRAP or OUT_TRIPLE_ARTISTIC for three-surface mosaics, "
+          "and OUT_DISPLAY_ACTIVE for the mode selected on WORKING_PIPELINE. "
+          "Each triple mode also exposes independent LEFT/CENTER/RIGHT TOPs. "
           "OUT_STEREO_PREVIEW for a desktop stereo view. The animated RGB/depth "
           "and sensor sources work immediately. Later, replace only the two "
           "labelled TOPs inside SOURCES/STREAMDIFFUSION_ADAPTER and turn on the "

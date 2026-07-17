@@ -168,7 +168,8 @@ def quiet_apply(helpers, root, overrides, *, inherit_environment=True):
 
 def complete_runtime_root() -> FakeRoot:
     nodes: dict[str, FakeNode] = {
-        "WORKING_PIPELINE": FakeNode("WORKING_PIPELINE"),
+        "WORKING_PIPELINE": FakeNode(
+            "WORKING_PIPELINE", Displaymode="single"),
         "WORKING_PIPELINE/SOURCES": FakeNode(
             "SOURCES", UseStreamDiffusion=False, UseExternalDepth=False,
             Frameid=-1, Sessionepoch=0, Sourceagems=-1.0,
@@ -188,7 +189,9 @@ def complete_runtime_root() -> FakeRoot:
             Calibrationepoch=0,
         ),
         "WORKING_PIPELINE/POINT_RENDER": FakeNode(
-            "POINT_RENDER", Maxpoints=120000, Pointsize=3.0
+            "POINT_RENDER", Maxpoints=120000, Pointsize=3.0, Pointkeep=0.68,
+            Surfacefovdegrees=60.0, Wrapyawdegrees=45.0,
+            Artisticyawdegrees=18.0, Artisticoffsetmetres=0.45,
         ),
         "WORKING_PIPELINE/COMPLETION": FakeNode(
             "COMPLETION", Mode="hybrid", Fogdensity=0.35, Proceduralmix=0.72
@@ -240,6 +243,8 @@ def complete_runtime_root() -> FakeRoot:
         ),
         "WORKING_PIPELINE/TELEMETRY": FakeNode("TELEMETRY"),
         "WORKING_PIPELINE/INSTALLATION_OUTPUT": FakeNode("INSTALLATION_OUTPUT"),
+        "WORKING_PIPELINE/TRIPLE_DISPLAY": FakeNode(
+            "TRIPLE_DISPLAY", Fogdensity=0.35, Fogradius=2.0),
         "WORKING_PIPELINE/STEREO_PREVIEW": FakeNode("STEREO_PREVIEW"),
         "AI_PIPELINE": FakeNode(
             "AI_PIPELINE",
@@ -259,6 +264,15 @@ def complete_runtime_root() -> FakeRoot:
         "WORKING_PIPELINE/OUT_COLOR",
         "WORKING_PIPELINE/OUT_INTERACTION",
         "WORKING_PIPELINE/OUT_INSTALLATION",
+        "WORKING_PIPELINE/OUT_TRIPLE_WRAP",
+        "WORKING_PIPELINE/OUT_TRIPLE_ARTISTIC",
+        "WORKING_PIPELINE/OUT_DISPLAY_ACTIVE",
+        "WORKING_PIPELINE/OUT_TRIPLE_WRAP_LEFT",
+        "WORKING_PIPELINE/OUT_TRIPLE_WRAP_CENTER",
+        "WORKING_PIPELINE/OUT_TRIPLE_WRAP_RIGHT",
+        "WORKING_PIPELINE/OUT_TRIPLE_ARTISTIC_LEFT",
+        "WORKING_PIPELINE/OUT_TRIPLE_ARTISTIC_CENTER",
+        "WORKING_PIPELINE/OUT_TRIPLE_ARTISTIC_RIGHT",
         "WORKING_PIPELINE/OUT_LEFT_EYE",
         "WORKING_PIPELINE/OUT_RIGHT_EYE",
         "WORKING_PIPELINE/OUT_STEREO_PREVIEW",
@@ -276,8 +290,18 @@ def complete_runtime_root() -> FakeRoot:
         "WORKING_PIPELINE/POINT_RENDER/METRIC_RENDER_LEFT_EYE",
         "WORKING_PIPELINE/POINT_RENDER/METRIC_RENDER_RIGHT_EYE",
         "WORKING_PIPELINE/STEREO_PREVIEW/STEREO_SIDE_BY_SIDE",
+        "WORKING_PIPELINE/TRIPLE_DISPLAY/WRAP_MOSAIC",
+        "WORKING_PIPELINE/TRIPLE_DISPLAY/ARTISTIC_MOSAIC",
     ):
         nodes[path] = resolution_node(path)
+    for mode in ("WRAP", "ARTISTIC"):
+        for side in ("LEFT", "CENTER", "RIGHT"):
+            for prefix in (
+                "WORKING_PIPELINE/POINT_RENDER/METRIC_RENDER_",
+                "WORKING_PIPELINE/TRIPLE_DISPLAY/GRADE_",
+            ):
+                path = prefix + mode + "_" + side
+                nodes[path] = resolution_node(path)
     for path in (
         "WORKING_PIPELINE/ROLE_BRIDGE/RGB_ROUTE",
         "WORKING_PIPELINE/ROLE_BRIDGE/DEPTH_ROUTE",
@@ -332,6 +356,12 @@ def complete_runtime_root() -> FakeRoot:
         "WORKING_PIPELINE/INSTALLATION_OUTPUT/installation_grade_PIXEL",
         "WORKING_PIPELINE/STEREO_PREVIEW/GRADE_LEFT_EYE_PIXEL",
         "WORKING_PIPELINE/STEREO_PREVIEW/GRADE_RIGHT_EYE_PIXEL",
+        "WORKING_PIPELINE/TRIPLE_DISPLAY/GRADE_WRAP_LEFT_PIXEL",
+        "WORKING_PIPELINE/TRIPLE_DISPLAY/GRADE_WRAP_CENTER_PIXEL",
+        "WORKING_PIPELINE/TRIPLE_DISPLAY/GRADE_WRAP_RIGHT_PIXEL",
+        "WORKING_PIPELINE/TRIPLE_DISPLAY/GRADE_ARTISTIC_LEFT_PIXEL",
+        "WORKING_PIPELINE/TRIPLE_DISPLAY/GRADE_ARTISTIC_CENTER_PIXEL",
+        "WORKING_PIPELINE/TRIPLE_DISPLAY/GRADE_ARTISTIC_RIGHT_PIXEL",
     ):
         nodes[path] = FakeTextNode(
             path,
@@ -406,11 +436,19 @@ class TouchDesignerRuntimeHelperTests(unittest.TestCase):
                 "sensor": {"mode": "disabled"},
                 "render": {
                     "point_budget": 200000,
+                    "point_keep_fraction": 1.0,
                     "point_size_px": 5.5,
                     "installation_width": 1920,
                     "installation_height": 1080,
                     "stereo_width": 3000,
                     "stereo_height": 900,
+                    "display_mode": "panoramic_wrap",
+                    "triple_surface_width": 800,
+                    "triple_surface_height": 450,
+                    "surface_fov_degrees": 64,
+                    "triple_wrap_yaw_degrees": 50,
+                    "triple_artistic_yaw_degrees": 21,
+                    "triple_artistic_offset_metres": 0.6,
                     "fog_density": 0.6,
                     "procedural_mix": 0.4,
                 },
@@ -428,6 +466,7 @@ class TouchDesignerRuntimeHelperTests(unittest.TestCase):
         point_render = root.op("WORKING_PIPELINE/POINT_RENDER")
         self.assertEqual(point_render.par.Maxpoints.val, 256**2)
         self.assertEqual(point_render.par.Pointsize.val, 5.5)
+        self.assertEqual(point_render.par.Pointkeep.val, 1.0)
         self.assertEqual(
             root.op("WORKING_PIPELINE/SOURCES").par.UseStreamDiffusion.val, True
         )
@@ -444,6 +483,28 @@ class TouchDesignerRuntimeHelperTests(unittest.TestCase):
         left = root.op("WORKING_PIPELINE/POINT_RENDER/METRIC_RENDER_LEFT_EYE")
         self.assertEqual((center.par.resolutionw.val, center.par.resolutionh.val), (1920, 1080))
         self.assertEqual((left.par.resolutionw.val, left.par.resolutionh.val), (1500, 900))
+        wrap_left = root.op(
+            "WORKING_PIPELINE/POINT_RENDER/METRIC_RENDER_WRAP_LEFT"
+        )
+        wrap_mosaic = root.op(
+            "WORKING_PIPELINE/TRIPLE_DISPLAY/WRAP_MOSAIC"
+        )
+        self.assertEqual(
+            (wrap_left.par.resolutionw.val, wrap_left.par.resolutionh.val),
+            (800, 450),
+        )
+        self.assertEqual(
+            (wrap_mosaic.par.resolutionw.val, wrap_mosaic.par.resolutionh.val),
+            (2400, 450),
+        )
+        self.assertEqual(
+            root.op("WORKING_PIPELINE").par.Displaymode.val,
+            "panoramic_wrap",
+        )
+        self.assertEqual(point_render.par.Surfacefovdegrees.val, 64.0)
+        self.assertEqual(point_render.par.Wrapyawdegrees.val, 50.0)
+        self.assertEqual(point_render.par.Artisticyawdegrees.val, 21.0)
+        self.assertEqual(point_render.par.Artisticoffsetmetres.val, 0.6)
         self.assertTrue(root.op("WORKING_PIPELINE/TELEMETRY").allowCooking)
         completion = root.op("WORKING_PIPELINE/COMPLETION")
         self.assertEqual(completion.par.Fogdensity.val, 0.6)
@@ -1942,8 +2003,8 @@ class TouchDesignerRuntimeHelperTests(unittest.TestCase):
     def test_readiness_requires_an_observed_output_cook_advance_when_available(self) -> None:
         helpers = load_helpers()
         root = complete_runtime_root()
-        output = FakeCookNode("OUT_INSTALLATION")
-        root.nodes["WORKING_PIPELINE/OUT_INSTALLATION"] = output
+        output = FakeCookNode("OUT_DISPLAY_ACTIVE")
+        root.nodes["WORKING_PIPELINE/OUT_DISPLAY_ACTIVE"] = output
         quiet_apply(helpers, root, {"role": "world"})
         helpers["tick"](root)
         first = helpers["_application_readiness"](
@@ -1980,7 +2041,7 @@ class TouchDesignerRuntimeHelperTests(unittest.TestCase):
             item["name"]: item
             for item in readiness["required_output_progress"]
         }
-        self.assertGreaterEqual(required["installation"]["advances"], 1)
+        self.assertGreaterEqual(required["display_active"]["advances"], 1)
         self.assertEqual(required["right_eye"]["advances"], 0)
 
     def test_heartbeat_binds_expected_build_and_effective_config_identity(self) -> None:

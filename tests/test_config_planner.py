@@ -120,6 +120,19 @@ class ConfigPlannerTests(unittest.TestCase):
             self.assertEqual(process.env["FLEXGPU_MAX_POINTS"], "120000")
             self.assertEqual(process.env["FLEXGPU_VR_REFRESH_HZ"], "72")
 
+    def test_explicit_render_limits_override_tier_environment(self) -> None:
+        config = validate_config(
+            {
+                "topology": "single",
+                "tier": "3080ti_16gb",
+                "render": {"point_budget": 147456, "vr_fps": 80},
+                "processes": {"world": python_process("world")},
+            }
+        )
+        process = build_process_plan(config, [GPU_3080]).processes[0]
+        self.assertEqual(process.env["FLEXGPU_MAX_POINTS"], "147456")
+        self.assertEqual(process.env["FLEXGPU_VR_REFRESH_HZ"], "80")
+
     def test_dual_local_auto_assigns_largest_gpu_to_ai(self) -> None:
         config = validate_config(
             {

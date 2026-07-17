@@ -81,12 +81,20 @@ class RuntimeConfigSectionTests(unittest.TestCase):
                 "render": {
                     "point_size_px": 3.0,
                     "point_budget": 120000,
+                    "point_keep_fraction": 1.0,
                     "installation_width": 1920,
                     "installation_height": 1080,
                     "installation_fps": 60,
                     "stereo_width": 2560,
                     "stereo_height": 720,
                     "vr_fps": 72,
+                    "display_mode": "artistic_multi_angle",
+                    "triple_surface_width": 960,
+                    "triple_surface_height": 540,
+                    "surface_fov_degrees": 60,
+                    "triple_wrap_yaw_degrees": 45,
+                    "triple_artistic_yaw_degrees": 18,
+                    "triple_artistic_offset_metres": 0.45,
                     "fog_density": 0.35,
                     "procedural_mix": 0.7,
                 },
@@ -197,7 +205,14 @@ class RuntimeConfigSectionTests(unittest.TestCase):
             },
         }
         profile["sensor"] = {"interaction_radius_m": 0}
-        profile["render"] = {"point_budget": True, "procedural_mix": 1.5}
+        profile["render"] = {
+            "point_budget": True,
+            "point_keep_fraction": -0.1,
+            "procedural_mix": 1.5,
+            "display_mode": "unknown",
+            "triple_surface_width": 9000,
+            "surface_fov_degrees": 180,
+        }
         with self.assertRaises(ConfigError) as captured:
             validate_config(profile)
         message = str(captured.exception)
@@ -206,6 +221,10 @@ class RuntimeConfigSectionTests(unittest.TestCase):
         self.assertIn("frame_low", message)
         self.assertIn("interaction_radius_m", message)
         self.assertIn("point_budget", message)
+        self.assertIn("point_keep_fraction", message)
+        self.assertIn("display_mode", message)
+        self.assertIn("triple_surface_width", message)
+        self.assertIn("surface_fov_degrees", message)
 
     def test_huge_runtime_numbers_are_reported_as_config_errors(self) -> None:
         profile = base_profile()

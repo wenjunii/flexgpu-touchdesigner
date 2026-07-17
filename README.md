@@ -6,6 +6,8 @@ real-time generated point world.  It supports:
 - NVIDIA RTX 3080 Ti Laptop 16 GB, RTX 4090 24 GB, and RTX 5090 32 GB tiers.
 - One GPU, two GPUs in one Windows computer, or two networked computers.
 - Configuration branches for installation, VR, and combined experiences.
+- Single, panoramic three-surface, and artistic three-angle installation
+  outputs from one metric point world.
 - Selectors for thick-points/fog, procedural backfill, and hybrid completion.
 - Calibrated depth, frame-aware confidence/age persistence, and deterministic
   commissioning data for adapter development.
@@ -41,6 +43,7 @@ headset submission, SHARP, and Gaussian inference are user-supplied adapters.
 .github/workflows/  Windows CI for tests, benchmark smoke, and script parsing
 config/             validated show profiles and quality presets
 docs/               architecture and WorldBus protocol
+integrations/embody/ checked public FlexGPU context for the local TD Knowledge MCP
 scripts/            Windows lifecycle, release verification, and guarded sync
 src/flexgpu/         planner, adaptive governor, telemetry, and WorldBus reference
 tests/               runtime, transport, configuration, and publication tests
@@ -65,9 +68,10 @@ touchdesigner/       TD 2025 bootstrap source and integration guide
 | Local GPU placement | Read-only `nvidia-smi` snapshot and starting recommendation; not a benchmark or scheduler |
 | Process status, readiness and AI recovery | Atomic TouchDesigner application heartbeat, read-only alive/ready/stale status, bounded readiness waits, and operator-authorized recovery of a separate AI role; not an autonomous watchdog |
 | StreamDiffusionTD and sensor SDK | Labelled manual boundaries plus opt-in private `.tox` loading with safe demo/simulated fallback; paid/private components remain excluded |
-| Live MoGe-2 generated geometry | Pinned offline worker, newest-only synchronized atlas, strict camera/frame metadata, and default-off TD bridge implemented; real worker and local `.toe` path live-accepted on the 3080 Ti Laptop |
+| Live MoGe-2 generated geometry | Pinned offline worker, newest-only synchronized atlas, strict camera/frame metadata, and default-off TD bridge implemented; real worker, local `.toe` path, and cold-reopen runtime imports live-accepted on the 3080 Ti Laptop |
+| Embody/knowledge MCP integration | Project-scoped context, privacy rules, output audit order, and local MCP configuration implemented; Embody still has to be added to an ignored working TOE and enabled locally |
 | Temporary laptop audience sensor | Default-off result-only TD bridge and optional Depth Anything V2 Small webcam worker implemented; RGB-free mock transport, live routing, and stale zero-gating accepted on the 3080 Ti Laptop; webcam/paid-app acceptance remains local |
-| Installation and VR | Metric installation render plus parallel-camera stereo development textures; projection mapping, headset runtime, pose/input, compositor submission, and physical validation are user-supplied |
+| Installation and VR | Unchanged single display, selectable three-surface panoramic wrap, artistic multi-angle outputs, and parallel-camera stereo development textures; projector warping/blending, headset runtime, pose/input, compositor submission, and physical validation are user-supplied |
 | SHARP and Gaussian reconstruction | Disabled external-worker adapter contracts; inference is not bundled |
 
 Experience and completion flags select the corresponding branches. The
@@ -106,6 +110,20 @@ The raw report and captures contain machine-local paths and remain gitignored.
 This is reproducible synthetic/operator evidence, not a claim that the private
 StreamDiffusionTD adapter, physical sensor, 4090/5090 profiles, dual-GPU
 transport, headset runtime, or venue outputs have passed hardware acceptance.
+
+## Optional Embody MCP workflow
+
+The checked-in
+[`integrations/embody/flexgpu-project-context.json`](integrations/embody/flexgpu-project-context.json)
+teaches the local TD Knowledge MCP the stable FlexGPU network paths, output
+comparison order, validation sequence, and private-component boundaries.
+Embody Envoy then supplies live TouchDesigner inspection, TOP capture,
+performance data, and reversible mutation tools through the same MCP server.
+
+The machine-specific `.mcp.json` remains ignored. Follow
+[`docs/EMBODY_MCP.md`](docs/EMBODY_MCP.md) to add Embody to an ignored working
+TOE, keep externalization disabled around private components, and verify the
+connection.
 
 ## Quick start
 
@@ -248,7 +266,11 @@ producer and add the external MoGe-2 bridge to an ignored working `.toe`.
 [docs/MOGE2_LIVE.md](docs/MOGE2_LIVE.md) gives the exact offline gate,
 default-off installer, local 3080 startup order, mock/real worker commands, and
 one-/two-GPU network settings. The worker never imports into TouchDesigner and
-normal inference never downloads a model.
+normal inference never downloads a model. The bridge installer embeds a
+validated hint to this checkout's public `src` tree in both generated runtime
+DATs, so a saved local `.toe` can compile after a cold TouchDesigner restart
+without replaying the installer Textport command. Reinstall the bridges in a
+new incremented `.toe` after moving or renaming the repository.
 
 Until a physical audience depth sensor arrives, the laptop webcam can drive a
 separate temporary interaction branch. It is not the generated-world depth
@@ -346,6 +368,11 @@ sensor age, transport state, and output activation. Status distinguishes a live
 PID with no ready heartbeat from `ready` and stale/frozen. `-WaitReadyMs` is a
 bounded launch/recovery acceptance wait, not a background watchdog, and this
 application heartbeat is separate from the WorldBus network heartbeat.
+On Windows, the controller reads command-line identity from the same open
+kernel process handle used for lifetime checks. It falls back to a bounded WMI
+query only when the native query is unavailable. This removes cold
+PowerShell/CIM startup latency from the normal readiness path without weakening
+PID-reuse protection.
 Readiness waiting requires a v1.2.1 `.toe` and a local profile whose process
 `project` points to it. The tracked synthetic canonical project contains the
 heartbeat writer; an older or privately modified project must be rebuilt before
@@ -482,6 +509,15 @@ moving the world. Installation and left/right views can tune their fog
 independently, but the stereo textures still have no headset pose, runtime
 projection, late-latching, hidden-area mesh, or compositor submission.
 
+Installation display mode does not change the world simulation. `single`
+retains the original 1280x720 center output. `panoramic_wrap` renders left,
+center, and right cameras from one common origin with different yaw directions;
+calibrate their yaw and FOV to the physical wall angles. `artistic_multi_angle`
+translates and rotates the side cameras to expose parallax, so its seams are
+intentionally not continuous. The 3080 Ti Laptop defaults to 640x360 per triple
+surface, the 4090 to 960x540, and the 5090 to 1280x720. These are safe starting
+budgets; measure before raising them.
+
 The target architecture decouples AI updates from world/render cadence. On the
 3080 Ti, for example, the configured 5-10 Hz diffusion-update range is a scheduling
 budget for a future AI adapter; the stock demo does not prove that cadence. The
@@ -559,8 +595,8 @@ See [touchdesigner/README.md](touchdesigner/README.md) for building the starter
   world-space interaction fields.
 - Thick/disocclusion fog, procedural backfill, and hybrid completion.
 - A metric point-render contract with aligned per-point color, soft circular
-  glyphs, stable density thinning, an installation preview, and a
-  parallel-camera stereo desktop preview.
+  glyphs, stable density thinning, single plus two three-surface installation
+  modes, and a parallel-camera stereo desktop preview.
 - Role-gated loopback/network Touch TCP RGB/raw-depth/mask/confidence transport,
   plus an explicit-metadata advanced Shared Mem path.
 - Live adaptive/telemetry bindings and disabled SHARP/Gaussian worker adapters.
@@ -574,6 +610,48 @@ circular alpha glyph rather than mapping the full generated image onto every
 point. Raise `Pointkeep` toward `1.0` only when the measured GPU budget and the
 desired visual density justify it. Fog/noise and procedural backfill remain
 separate completion layers around disocclusions.
+Set `render.point_keep_fraction` in a local runtime profile to persist that
+choice. The local 3080 detail profile uses `1.0` with all 147,456 samples from
+the 384-square geometry texture, removing the deliberate black sampling holes.
+
+The installation output choices are always retained:
+
+| Output | Meaning |
+| --- | --- |
+| `OUT_SOURCE_COLOR` | Exact synchronized generated image before fog/procedural completion |
+| `OUT_COLOR` | Completed geometry-aligned color used by the point renderer |
+| `OUT_INSTALLATION` | Original single display |
+| `OUT_TRIPLE_WRAP_LEFT/CENTER/RIGHT` | Common-origin panoramic surface feeds |
+| `OUT_TRIPLE_WRAP` | Left-center-right panoramic mosaic |
+| `OUT_TRIPLE_ARTISTIC_LEFT/CENTER/RIGHT` | Deliberately offset multi-angle feeds |
+| `OUT_TRIPLE_ARTISTIC` | Left-center-right artistic mosaic |
+| `OUT_DISPLAY_ACTIVE` | Mode selected by `render.display_mode` or the `WORKING_PIPELINE` Display Mode menu |
+
+For the current 3080 Ti local project, keep `display_mode` at `single` until
+the new network has been validated. Then change only this config value to
+`panoramic_wrap` or `artistic_multi_angle` and restart:
+
+```json
+"render": {
+  "display_mode": "panoramic_wrap",
+  "triple_surface_width": 640,
+  "triple_surface_height": 360,
+  "surface_fov_degrees": 60,
+  "triple_wrap_yaw_degrees": 30,
+  "triple_artistic_yaw_degrees": 18,
+  "triple_artistic_offset_metres": 0.45
+}
+```
+
+The three individual TOPs are the actual projector/LED feeds. Mosaics are for
+desktop preview, capture, or a downstream mapper. Venue edge blend, warp,
+color matching, and frame synchronization still belong in the projector/LED
+mapping layer.
+
+The current 30-degree panoramic yaw intentionally overlaps a monocular
+image-derived cloud across the side feeds. Increasing it toward 45 degrees is
+appropriate only when the reconstructed world contains enough off-axis
+geometry; otherwise the side cameras correctly see mostly empty background.
 
 The scaffold is deliberately adapter-based. Connect the exact StreamDiffusionTD
 component, camera SDK, and VR component available on the show machine rather
@@ -740,6 +818,10 @@ write/read/validation with synthetic GPUs, and scans the exact candidates,
 index, and history reachable from `HEAD`. `-AllRefs` performs the stricter scan
 of every local branch, tag, and stash. CI uses `-SkipPublicSync` only because
 its separate publication-safety job already performs that all-ref scan.
+Regression coverage includes bridge DAT imports in a clean interpreter,
+component-qualified TOP-to-POP position/color attributes, native Windows
+process identity with its compatibility fallback, and heartbeat publication
+without relying on process-launch delay.
 
 This source gate uses temporary and gitignored outputs, but it does not mutate
 Git or tracked project files. It does not launch TouchDesigner, open the

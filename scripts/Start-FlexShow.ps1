@@ -9,6 +9,12 @@ safe because flexgpu.py reuses its runtime manifest and skips owned processes
 that are already running. If launch settings changed, it refuses reuse and asks
 you to stop the old process first. -WaitReadyMs optionally requires each app to
 publish the atomic heartbeat/readiness contract before start succeeds.
+
+On Windows, process ownership is captured from the already-open process handle
+before readiness is evaluated. A bounded WMI query remains only as a
+compatibility fallback. This prevents a cold PowerShell/CIM startup from
+consuming the heartbeat window while preserving fail-closed command-line
+identity checks.
 #>
 #Requires -Version 5.1
 [CmdletBinding()]

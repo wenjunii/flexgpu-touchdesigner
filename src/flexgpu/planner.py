@@ -275,7 +275,17 @@ def build_process_plan(
             raise PlanError("missing process definition for role %s" % role)
         gpu = assignments[role]
         role_tier = role_tiers[role]
-        quality = preset_for(role_tier).settings
+        quality = dict(preset_for(role_tier).settings)
+        # Explicit show-profile render limits must survive process launch.
+        # Otherwise the tier environment silently overrides the same values
+        # when TouchDesigner's embedded runtime materializes the JSON config.
+        render = config.raw.get("render", {})
+        if not isinstance(render, Mapping):
+            render = {}
+        if "point_budget" in render:
+            quality["max_points"] = int(render["point_budget"])
+        if "vr_fps" in render:
+            quality["vr_refresh_hz"] = int(render["vr_fps"])
         command, cwd, project_path = _command_for(definition, gpu, config, role_tier)
         env = {
             "CUDA_DEVICE_ORDER": "PCI_BUS_ID",

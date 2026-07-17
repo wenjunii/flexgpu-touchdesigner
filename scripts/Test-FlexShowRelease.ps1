@@ -6,6 +6,9 @@ Runs the complete non-publishing FlexShow source release verification.
 Compiles Python sources, validates shipped profiles, runs the unit suite and
 synthetic benchmark, parses every PowerShell script, smoke-tests the machine
 initializer with synthetic hardware, and checks the exact public surface.
+The unit stage includes cold-reopen bridge imports, component-qualified
+TOP-to-POP attribute mappings, and native/fallback Windows process-identity
+regressions.
 
 The script never launches TouchDesigner or show processes. Live TouchDesigner,
 private adapter, physical sensor, dual-GPU, headset, and venue acceptance tests

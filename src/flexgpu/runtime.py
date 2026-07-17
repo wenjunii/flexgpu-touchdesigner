@@ -275,7 +275,7 @@ def _windows_process_core(pid: int) -> dict[str, str] | None:
 
 
 def _windows_command_line(pid: int) -> str | None:
-    """Read the actual Win32 command line without interpolating user input."""
+    """Read the actual Win32 command line through the compatibility WMI path."""
 
     system_root = os.environ.get("SystemRoot", r"C:\Windows")
     powershell = os.path.join(
@@ -317,13 +317,90 @@ def _windows_command_line(pid: int) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _windows_command_line_from_handle(handle: Any) -> str | None:
+    """Read a command line natively from an already-verified process handle.
+
+    Modern Windows exposes the command line through
+    ``NtQueryInformationProcess(ProcessCommandLineInformation)``.  Keeping the
+    existing handle open makes this both race-resistant and much faster than
+    starting PowerShell/WMI for every identity check.  The caller retains the
+    WMI path as a compatibility fallback for older or restricted systems.
+    """
+
+    if os.name != "nt":
+        return None
+    from ctypes import wintypes
+
+    class _UnicodeString(ctypes.Structure):
+        _fields_ = [
+            ("length", wintypes.USHORT),
+            ("maximum_length", wintypes.USHORT),
+            ("buffer", wintypes.LPVOID),
+        ]
+
+    try:
+        ntdll = ctypes.windll.ntdll
+        query = ntdll.NtQueryInformationProcess
+        query.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.ULONG,
+            ctypes.POINTER(wintypes.ULONG),
+        ]
+        query.restype = wintypes.LONG
+        required = wintypes.ULONG()
+        process_command_line_information = 60
+        query(
+            handle,
+            process_command_line_information,
+            None,
+            0,
+            ctypes.byref(required),
+        )
+        minimum = ctypes.sizeof(_UnicodeString)
+        if required.value < minimum or required.value > 1024 * 1024:
+            return None
+        storage = ctypes.create_string_buffer(required.value)
+        status = query(
+            handle,
+            process_command_line_information,
+            storage,
+            required.value,
+            ctypes.byref(required),
+        )
+        if status < 0:
+            return None
+        value = ctypes.cast(
+            storage, ctypes.POINTER(_UnicodeString)
+        ).contents
+        pointer = int(value.buffer or 0)
+        start = ctypes.addressof(storage)
+        end = pointer + int(value.length)
+        if (
+            value.length <= 0
+            or value.length % ctypes.sizeof(ctypes.c_wchar) != 0
+            or pointer < start
+            or end > start + ctypes.sizeof(storage)
+        ):
+            return None
+        command_line = ctypes.wstring_at(
+            pointer, value.length // ctypes.sizeof(ctypes.c_wchar)
+        )
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+    return command_line or None
+
+
 def _inspect_windows_process_handle(pid: int, handle: Any) -> dict[str, str] | None:
     """Inspect a PID while retaining the exact kernel process object."""
 
     before = _windows_process_core_from_handle(handle)
     if before is None:
         return None
-    command_line = _windows_command_line(pid)
+    command_line = _windows_command_line_from_handle(handle)
+    if command_line is None:
+        command_line = _windows_command_line(pid)
     after = _windows_process_core_from_handle(handle)
     if command_line is None or before != after:
         return None
@@ -1196,8 +1273,9 @@ def _heartbeat_status(
         "heartbeat_age_ms": round(max(0.0, age_ms), 1),
         "application_state": payload.get("state"),
     }
-    if age_ms > timeout_ms:
-        return "stale", "application heartbeat is stale", details
+    # Report immutable launch-identity mismatches before freshness. A stale
+    # timestamp must not hide evidence that the heartbeat belongs to a
+    # different build or semantic configuration.
     if expected_build:
         build = payload.get("build")
         actual_build = build.get("version") if isinstance(build, Mapping) else None
@@ -1214,6 +1292,8 @@ def _heartbeat_status(
         )
         if actual_config_id != expected_config_id:
             return "stale", "application config identity does not match the launch plan", details
+    if age_ms > timeout_ms:
+        return "stale", "application heartbeat is stale", details
     if payload.get("state") == "ready":
         return "ready", "", details
     return "alive", "application has not reported ready", details
@@ -1602,7 +1682,14 @@ def _stop_verified_records(
         child = _LOCAL_CHILDREN.pop(int(target["pid"]), None)
         if child is not None:
             try:
-                child.wait(timeout=0.1)
+                # The retained kernel handle can report termination slightly
+                # before Python's Popen handle and inherited log handle are
+                # fully reaped on Windows. Give that local bookkeeping a
+                # bounded chance to finish so callers can safely remove a
+                # temporary runtime directory immediately after stop.
+                child.wait(
+                    timeout=max(1.0, min(float(FORCED_STOP_SECONDS), 5.0))
+                )
             except (OSError, subprocess.TimeoutExpired):
                 pass
     return {

@@ -52,7 +52,8 @@ class BootstrapRuntimeSourceTests(unittest.TestCase):
         for stage in (
             "SOURCES", "RECONSTRUCTION", "SENSOR_INTERACTION",
             "TEMPORAL_WORLD", "COMPLETION", "RENDER_CONTRACT",
-            "POINT_RENDER", "INSTALLATION_OUTPUT", "STEREO_PREVIEW",
+            "POINT_RENDER", "INSTALLATION_OUTPUT", "TRIPLE_DISPLAY",
+            "STEREO_PREVIEW",
         ):
             self.assertIn(stage, self.runtime)
         for endpoint in (

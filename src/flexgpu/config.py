@@ -200,12 +200,20 @@ RUNTIME_SECTION_FIELDS = {
     "render": {
         "point_size_px",
         "point_budget",
+        "point_keep_fraction",
         "installation_width",
         "installation_height",
         "installation_fps",
         "stereo_width",
         "stereo_height",
         "vr_fps",
+        "display_mode",
+        "triple_surface_width",
+        "triple_surface_height",
+        "surface_fov_degrees",
+        "triple_wrap_yaw_degrees",
+        "triple_artistic_yaw_degrees",
+        "triple_artistic_offset_metres",
         "fog_density",
         "procedural_mix",
     },
@@ -885,6 +893,8 @@ def _validate_runtime_sections(
             exclusive_minimum=True,
         )
         _runtime_integer(render, "point_budget", "render", errors, 1000, 10000000)
+        _runtime_number(
+            render, "point_keep_fraction", "render", errors, 0, 1)
         for key in (
             "installation_width",
             "installation_height",
@@ -892,8 +902,28 @@ def _validate_runtime_sections(
             "stereo_height",
         ):
             _runtime_integer(render, key, "render", errors, 64, 16384)
+        if "triple_surface_width" in render:
+            _runtime_integer(
+                render, "triple_surface_width", "render", errors, 64, 8192)
+        if "triple_surface_height" in render:
+            _runtime_integer(
+                render, "triple_surface_height", "render", errors, 64, 8192)
         for key in ("installation_fps", "vr_fps"):
             _runtime_integer(render, key, "render", errors, 1, 240)
+        if (
+            "display_mode" in render
+            and render.get("display_mode")
+            not in {"single", "panoramic_wrap", "artistic_multi_angle"}
+        ):
+            errors.append("render.display_mode is unsupported")
+        _runtime_number(
+            render, "surface_fov_degrees", "render", errors, 10, 140)
+        _runtime_number(
+            render, "triple_wrap_yaw_degrees", "render", errors, 0, 120)
+        _runtime_number(
+            render, "triple_artistic_yaw_degrees", "render", errors, 0, 90)
+        _runtime_number(
+            render, "triple_artistic_offset_metres", "render", errors, 0, 10)
         _runtime_number(render, "fog_density", "render", errors, 0, 10)
         _runtime_number(render, "procedural_mix", "render", errors, 0, 1)
 

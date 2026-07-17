@@ -400,12 +400,22 @@
       "properties": {
         "point_size_px": { "type": "number", "exclusiveMinimum": 0, "maximum": 128 },
         "point_budget": { "type": "integer", "minimum": 1000, "maximum": 10000000 },
+        "point_keep_fraction": { "type": "number", "minimum": 0, "maximum": 1 },
         "installation_width": { "type": "integer", "minimum": 64, "maximum": 16384 },
         "installation_height": { "type": "integer", "minimum": 64, "maximum": 16384 },
         "installation_fps": { "type": "integer", "minimum": 1, "maximum": 240 },
         "stereo_width": { "type": "integer", "minimum": 64, "maximum": 16384 },
         "stereo_height": { "type": "integer", "minimum": 64, "maximum": 16384 },
         "vr_fps": { "type": "integer", "minimum": 1, "maximum": 240 },
+        "display_mode": {
+          "enum": ["single", "panoramic_wrap", "artistic_multi_angle"]
+        },
+        "triple_surface_width": { "type": "integer", "minimum": 64, "maximum": 8192 },
+        "triple_surface_height": { "type": "integer", "minimum": 64, "maximum": 8192 },
+        "surface_fov_degrees": { "type": "number", "minimum": 10, "maximum": 140 },
+        "triple_wrap_yaw_degrees": { "type": "number", "minimum": 0, "maximum": 120 },
+        "triple_artistic_yaw_degrees": { "type": "number", "minimum": 0, "maximum": 90 },
+        "triple_artistic_offset_metres": { "type": "number", "minimum": 0, "maximum": 10 },
         "fog_density": { "type": "number", "minimum": 0, "maximum": 10 },
         "procedural_mix": { "type": "number", "minimum": 0, "maximum": 1 }
       }

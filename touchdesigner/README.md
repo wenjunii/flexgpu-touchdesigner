@@ -6,6 +6,8 @@ stock-operator `WORKING_PIPELINE` that runs
 without third-party packages: animated RGB/depth, depth-to-position GLSL,
 temporal feedback, simulated audience interaction, fog/procedural completion,
 a point-render path, an installation preview, and a desktop stereo preview.
+The installation branch retains that single output and also builds panoramic
+wrap and artistic multi-angle three-surface views.
 
 The repository does not bundle your `StreamDiffusionTD.tox`, model weights, a
 sensor SDK/calibration, an OpenXR/OpenVR runtime, projection mapping, or
@@ -107,15 +109,53 @@ View these root outputs below `/project1/flexgpu/WORKING_PIPELINE`:
 
 | Output | Use |
 | --- | --- |
-| `OUT_INSTALLATION` | Center point-world preview with the fog plate |
+| `OUT_INSTALLATION` | Center point-world preview with local edge fog; no full-frame source duplicate |
+| `OUT_TRIPLE_WRAP_LEFT`, `OUT_TRIPLE_WRAP_CENTER`, `OUT_TRIPLE_WRAP_RIGHT` | Common-origin panoramic feeds for three surfaces |
+| `OUT_TRIPLE_WRAP` | Panoramic left-center-right preview/mapping mosaic |
+| `OUT_TRIPLE_ARTISTIC_LEFT`, `OUT_TRIPLE_ARTISTIC_CENTER`, `OUT_TRIPLE_ARTISTIC_RIGHT` | Deliberately offset/rotated sculptural feeds |
+| `OUT_TRIPLE_ARTISTIC` | Artistic left-center-right preview/mapping mosaic |
+| `OUT_DISPLAY_ACTIVE` | Selected single, panoramic, or artistic installation output |
 | `OUT_STEREO_PREVIEW` | Side-by-side desktop stereo preview |
 | `OUT_LEFT_EYE`, `OUT_RIGHT_EYE` | Eye textures for a future headset adapter |
 | `OUT_POSITION` | RGBA32F position texture: XYZ metres and active alpha |
-| `OUT_COLOR` | Color texture aligned with `OUT_POSITION` |
+| `OUT_SOURCE_COLOR` | Exact synchronized generated/source image before completion, for visual comparison |
+| `OUT_COLOR` | Fog/procedural color aligned with completed `OUT_POSITION` and consumed by the point renderer |
 | `OUT_INTERACTION` | RGB force and alpha occupancy texture |
 
 These are inspectable development outputs. `OUT_INSTALLATION` is not projector
 mapping, and the eye textures are not submitted to a headset compositor.
+
+### Select and tune the installation display
+
+Select `single`, `panoramic_wrap`, or `artistic_multi_angle` with the
+**Active Installation Display** menu on `WORKING_PIPELINE`, or set
+`render.display_mode` in the launch config. Selection changes only
+`OUT_DISPLAY_ACTIVE`; all fixed outputs remain available.
+
+Panoramic left/center/right cameras share one origin. Tune
+`POINT_RENDER/Wrapyawdegrees` and `Surfacefovdegrees` to match the physical wall
+angles and overlap. Artistic side cameras additionally use
+`Artisticyawdegrees` and `Artisticoffsetmetres`; this produces parallax and
+intentional discontinuities at the seams.
+
+A monocular image-derived point cloud covers only the source camera's frontal
+field of view; it is not a captured 360-degree world. On the local 3080 profile,
+the panoramic yaw starts at +/-30 degrees so each side feed retains useful
+overlap with the center. Larger yaw values honestly reveal empty space unless a
+later reconstruction stage creates geometry beyond the source view.
+
+Each surface is rendered independently and receives only local
+view-disocclusion fog around point silhouettes. The completion color texture is
+never painted behind the whole view, which avoids a stretched, dark duplicate
+of the generated image. The public mosaics simply place left, center, and right
+horizontally. Use the individual surface TOPs for three projectors or LED
+processors; use a mosaic only when a downstream mapper expects one canvas.
+
+Runtime config controls per-surface resolution. Defaults are deliberately
+conservative: 640x360 on the 3080 Ti Laptop, 960x540 on the 4090, and 1280x720
+on the 5090. A triple mode costs roughly three installation render views, so
+commission at the default before raising `triple_surface_width`,
+`triple_surface_height`, point count, or point thickness.
 
 ## Replace the demo with your StreamDiffusionTD.tox
 
@@ -300,8 +340,9 @@ receiver-cook DAT/CHOP is not valid producer metadata.
 | `WORKING_PIPELINE/SENSOR_INTERACTION/DEPTH_SENSOR_ADAPTER/DEPTH_ANYTHING_BRIDGE` | Default-off replaceable no-RGB depth/mask/confidence receiver for temporary webcam interaction rehearsal |
 | `WORKING_PIPELINE/TEMPORAL_WORLD` | One-cook frame-aware confidence/age lifecycle plus dt-integrated position/color feedback and automatic contract resets |
 | `WORKING_PIPELINE/COMPLETION` | Working fog, procedural and hybrid GLSL branches |
-| `WORKING_PIPELINE/POINT_RENDER` | Metric TOP-to-POP point renderer with per-point color, round glyphs, stable thinning, center/parallel-eye cameras, and honest mono fallback |
+| `WORKING_PIPELINE/POINT_RENDER` | Metric TOP-to-POP point renderer with per-point color, round glyphs, stable thinning, single/panoramic/artistic/parallel-eye cameras, and honest mono fallback |
 | `WORKING_PIPELINE/INSTALLATION_OUTPUT` | Center render and view-space edge-fog development preview |
+| `WORKING_PIPELINE/TRIPLE_DISPLAY` | Per-surface completion, independent left/center/right feeds, and panoramic/artistic mosaics |
 | `WORKING_PIPELINE/STEREO_PREVIEW` | Per-eye view-space completion plus side-by-side desktop preview |
 | `WORKING_PIPELINE/TELEMETRY` | Info CHOP metrics used by live telemetry and adaptive monitoring |
 | `WORKING_PIPELINE/EXPERIMENTAL_EXTERNAL_ADAPTERS` | Disabled SHARP/Gaussian worker contracts only |
@@ -421,9 +462,14 @@ gates.
 Managed launches also set `FLEXGPU_ROOT` and `FLEXGPU_SRC` before
 TouchDesigner starts. This is required because saving a `.toe` preserves Text
 DAT source but not an interactive Textport's `sys.path` or imported-module
-cache. The MoGe-2 and Depth Anything embedded runtimes additionally validate
-bounded candidates relative to `FLEXGPU_CONFIG`, so reopening through
-`Start-FlexShow.ps1` does not depend on a previous installer session.
+cache. When either local bridge is installed, its generated runtime DAT embeds
+a validated absolute hint to this checkout's public `src` tree. The MoGe-2 and
+Depth Anything runtimes try that hint plus bounded candidates relative to
+`FLEXGPU_CONFIG`, `project.folder`, and their DAT file folder; they never scan
+the filesystem recursively. A saved local `.toe` therefore compiles after a
+cold TouchDesigner restart without replaying an interactive bootstrap command.
+If the repository is moved or renamed, rerun both bounded bridge installers
+and save a new incremented `.toe` so the embedded hint follows the checkout.
 
 When `adaptive.enabled` is true, the Execute DAT calls `tick()` at frame start.
 The embedded controller uses measured frame interval plus configured
@@ -476,6 +522,17 @@ linear `Pointkeep` control (`0.68` by default) to preserve visible gaps without
 temporal sparkle. Tune `Pointsize`, `Pointopacity`, and `Pointkeep` on the
 `POINT_RENDER` component. The fog/noise and procedural backfill passes remain
 downstream and fill disocclusions without replacing the clean point render.
+Set `render.point_keep_fraction` in the runtime profile to persist the visible
+fraction across relaunches; use `1.0` when fine image detail matters more than
+the sparse-cloud look.
+
+The TOP-to-POP channel mappings are deliberately component-qualified:
+`r g b a` maps to `P(0) P(1) P(2) active` for position and to
+`Color(0) Color(1) Color(2) Color(3)` for color. Repeating `P` or `Color` four
+times asks each scalar TOP channel to provide a complete vector and produces
+the `More attribute values than channels specified` warning. Rebuild the
+managed `POINT_RENDER` network if an older saved TOE still contains those
+repeated vector scopes.
 
 Sensor interaction samples a bounded 8x8 set of calibrated world-space
 occupancy primitives for each generated point. Mask and confidence are applied

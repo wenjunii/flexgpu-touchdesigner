@@ -28,6 +28,9 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable, Mapping, Optional, Sequence, Tuple
 
 
+_EMBEDDED_FLEXGPU_SRC = ""
+
+
 def _ensure_local_src_path() -> None:
     """Locate the repository ``src`` folder without consulting TouchDesigner."""
 
@@ -39,6 +42,8 @@ def _ensure_local_src_path() -> None:
         candidates.append(os.path.abspath(explicit_src))
     if explicit_root:
         candidates.append(os.path.abspath(os.path.join(explicit_root, "src")))
+    if _EMBEDDED_FLEXGPU_SRC:
+        candidates.append(os.path.abspath(_EMBEDDED_FLEXGPU_SRC))
     if explicit_config:
         config_dir = os.path.dirname(os.path.abspath(explicit_config))
         candidates.append(os.path.abspath(os.path.join(config_dir, "src")))
@@ -54,6 +59,16 @@ def _ensure_local_src_path() -> None:
     if project_folder:
         candidates.append(os.path.abspath(os.path.join(project_folder, "src")))
         candidates.append(os.path.abspath(os.path.join(project_folder, "..", "src")))
+    current_op = globals().get("me", getattr(builtins, "me", None))
+    try:
+        operator_folder = str(current_op.fileFolder)
+    except Exception:
+        operator_folder = ""
+    if operator_folder:
+        candidates.append(os.path.abspath(os.path.join(operator_folder, "src")))
+        candidates.append(
+            os.path.abspath(os.path.join(operator_folder, "..", "src"))
+        )
     # A local installer normally adds ``<repo>/touchdesigner`` to sys.path
     # before this source is embedded in a Text DAT. Embedded DAT modules expose
     # an operator path as ``__file__`` and some TD builds do not expose

@@ -3,7 +3,11 @@ from __future__ import annotations
 import ast
 import importlib.util
 import inspect
+import os
 import re
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -32,6 +36,73 @@ class RuntimePipelineSourceTests(unittest.TestCase):
         self.assertEqual(self.module.PIPELINE_NAME, "WORKING_PIPELINE")
         self.assertIsNone(self.module.LAST_REPORT)
         ast.parse(self.source)
+
+    def test_embedded_bridge_runtimes_bind_public_src_for_cold_reopen(self) -> None:
+        class Report:
+            def __init__(self) -> None:
+                self.warnings = []
+
+            def warn(self, message) -> None:
+                self.warnings.append(str(message))
+
+        src_path = os.path.abspath(ROOT / "src")
+        for source_loader, module_name in (
+            (self.module._moge2_runtime_source, "embedded_moge2_cold"),
+            (
+                self.module._depth_anything_runtime_source,
+                "embedded_depth_anything_cold",
+            ),
+        ):
+            with self.subTest(module=module_name):
+                report = Report()
+                embedded_source = source_loader(report)
+                self.assertEqual(report.warnings, [])
+                self.assertIn(
+                    "_EMBEDDED_FLEXGPU_SRC = %r" % src_path,
+                    embedded_source,
+                )
+                with tempfile.TemporaryDirectory() as directory:
+                    runtime_path = Path(directory) / (module_name + ".py")
+                    runtime_path.write_text(embedded_source, encoding="utf-8")
+                    command = f"""
+import os, pathlib, sys, types
+repo = pathlib.Path({str(ROOT)!r})
+runtime_path = pathlib.Path({str(runtime_path)!r})
+def normalized(value):
+    return os.path.normcase(os.path.abspath(os.fspath(value)))
+for key in ('FLEXGPU_CONFIG', 'FLEXGPU_ROOT', 'FLEXGPU_SRC'):
+    os.environ.pop(key, None)
+for name in tuple(sys.modules):
+    if name == 'flexgpu' or name.startswith('flexgpu.'):
+        sys.modules.pop(name, None)
+blocked = {{
+    normalized(repo),
+    normalized(repo / 'src'),
+    normalized(repo / 'touchdesigner'),
+}}
+sys.path[:] = [
+    entry for entry in sys.path
+    if not isinstance(entry, str) or normalized(entry) not in blocked
+]
+module = types.ModuleType({module_name!r})
+module.__file__ = '/project1/flexgpu/WORKING_PIPELINE/runtime'
+sys.modules[module.__name__] = module
+source = runtime_path.read_text(encoding='utf-8')
+exec(compile(source, module.__file__, 'exec'), module.__dict__)
+assert 'flexgpu.worldbus' in sys.modules
+assert normalized({src_path!r}) in {{
+    normalized(entry) for entry in sys.path if isinstance(entry, str)
+}}
+"""
+                    completed = subprocess.run(
+                        [sys.executable, "-S", "-c", command],
+                        cwd=directory,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_shader_names_are_stable_and_complete(self) -> None:
         expected = {
@@ -140,6 +211,11 @@ class RuntimePipelineSourceTests(unittest.TestCase):
         advect = self.module.SHADERS["temporal_advect"]
         self.assertIn("vec4(worldPosition, valid * confidence)", depth)
         self.assertIn("world XYZ metres + active alpha", depth)
+        self.assertIn("(uv.y - cyNormalized) * z / fy", depth)
+        self.assertNotIn("-(uv.y - cyNormalized) * z / fy", depth)
+        backfill = self.module.SHADERS["procedural_backfill"]
+        self.assertIn("(uv.y - 0.5) * generatedDepth / generatedFocal", backfill)
+        self.assertIn("float generatedActive = 1.0", backfill)
         self.assertIn("POSITION + ADVECTED_HISTORY + TEMPORAL_STATE", temporal)
         self.assertIn("state.r", temporal)
         self.assertIn("interaction.rgb", advect)
@@ -301,6 +377,8 @@ class RuntimePipelineSourceTests(unittest.TestCase):
         self.assertIn("generatedActive", procedural)
         self.assertNotIn("float active =", procedural)
         self.assertIn("POSITION + PROCEDURAL_POSITION + COLOR", procedural_color)
+        self.assertIn("vec3 palette = source.rgb", procedural_color)
+        self.assertNotIn("vec3(0.78, 0.30, 0.16)", procedural_color)
         self.assertNotIn("sTD2DInputs[3]", procedural_color)
         self.assertIn("FOG_COLOR + PROCEDURAL_COLOR", hybrid)
 
@@ -308,11 +386,15 @@ class RuntimePipelineSourceTests(unittest.TestCase):
         expected = {
             "RGB", "DEPTH", "POSITION", "COLOR", "SENSOR_POSITION",
             "CONFIDENCE", "TEMPORAL_STATE", "INTERACTION", "INSTALLATION",
-            "STEREO",
+            "TRIPLE_DISPLAY", "STEREO",
         }
         self.assertEqual(set(self.module.TOP_CONTRACTS), expected)
         self.assertIn("XYZ metres", self.module.TOP_CONTRACTS["POSITION"])
         self.assertIn("side-by-side", self.module.TOP_CONTRACTS["STEREO"])
+        self.assertIn(
+            "three RGBA surface TOPs",
+            self.module.TOP_CONTRACTS["TRIPLE_DISPLAY"],
+        )
 
     def test_sensor_interaction_uses_calibrated_world_positions(self) -> None:
         interaction = self.module.SHADERS["interaction_field"]
@@ -488,7 +570,10 @@ class RuntimePipelineSourceTests(unittest.TestCase):
             '_connect(position, feedback, 0, 0, report, replace=True)',
             self.source,
         )
-        self.assertIn('_set(feedback, ("targettop", "target"), persistent.path)', self.source)
+        self.assertIn(
+            '_set(feedback, ("targettop", "target", "top"), persistent.path)',
+            self.source,
+        )
         self.assertIn('"feedbackTOP", "COLOR_HISTORY"', self.source)
         self.assertIn('"feedbackTOP", "STATE_HISTORY"', self.source)
         self.assertIn('"temporal_color", "temporal_color"', self.source)
@@ -510,8 +595,13 @@ class RuntimePipelineSourceTests(unittest.TestCase):
             self.assertIn("edgeHole", shader)
             self.assertIn("FLEXGPU_VIEW_FOG_DENSITY", shader)
             self.assertIn("FLEXGPU_VIEW_FOG_RADIUS", shader)
+        self.assertNotIn("fog.rgb * fog.a * 0.24", installation)
+        self.assertIn("vec3 color = points.rgb + edgeColor * viewFog", installation)
         self.assertIn('"GRADE_LEFT_EYE", "view_completion"', self.source)
         self.assertIn('"GRADE_RIGHT_EYE", "view_completion"', self.source)
+        self.assertIn('"GRADE_" + key, "installation_grade"', self.source)
+        self.assertIn('for mode in ("WRAP", "ARTISTIC")', self.source)
+        self.assertIn('for side in ("LEFT", "CENTER", "RIGHT")', self.source)
         self.assertIn('_set(node, "bgcolora", 0.0)', self.source)
 
     def test_actual_point_render_and_visible_outputs_are_built(self) -> None:
@@ -521,7 +611,8 @@ class RuntimePipelineSourceTests(unittest.TestCase):
         ):
             self.assertIn('"%s"' % operator_name, self.source)
         for output in ("OUT_INSTALLATION", "OUT_LEFT_EYE", "OUT_RIGHT_EYE",
-                       "OUT_STEREO_PREVIEW"):
+                       "OUT_STEREO_PREVIEW", "OUT_TRIPLE_WRAP",
+                       "OUT_TRIPLE_ARTISTIC", "OUT_DISPLAY_ACTIVE"):
             self.assertIn(output, self.source)
         self.assertIn('"rgba", "pactive"', self.source)
         self.assertIn("POSITION_TO_POINTS", self.source)
@@ -532,14 +623,46 @@ class RuntimePipelineSourceTests(unittest.TestCase):
         self.assertIn('"Pointkeep", 0.68', self.source)
         self.assertIn('"Pointopacity", 0.92', self.source)
         self.assertIn('_set_sequence_blocks(points, "input", 2)', self.source)
-        self.assertIn('"input1attrscope", "Color Color Color Color"', self.source)
+        self.assertIn(
+            '"input0attrscope", "P(0) P(1) P(2) active"',
+            self.source,
+        )
+        self.assertIn(
+            '"Color(0) Color(1) Color(2) Color(3)"',
+            self.source,
+        )
+        self.assertNotIn('"input0attrscope", "P P P P"', self.source)
+        self.assertNotIn('"input1attrscope", "Color Color Color Color"', self.source)
         self.assertIn('"thinrandomseed", 19', self.source)
-        self.assertIn("1.0 - parent().par.Pointkeep.eval()", self.source)
+        self.assertIn(
+            "1.0 - pow(max(0.0, 1.0 - parent().par.Pointkeep.eval()),",
+            self.source,
+        )
         self.assertIn('"overridemat", point_material.path', self.source)
         self.assertIn('"normalizegeo", False', self.source)
         self.assertNotIn('"normalizegeo", True', self.source)
         self.assertIn('_expr(camera, "tx", shift_expression)', self.source)
         self.assertIn('_set(camera, "ipdshift", 0.0)', self.source)
+        self.assertIn('"CAMERA_WRAP_" + side', self.source)
+        self.assertIn(
+            '("LEFT", "parent().par.Wrapyawdegrees.eval()")',
+            self.source,
+        )
+        self.assertIn(
+            '("RIGHT", "-parent().par.Wrapyawdegrees.eval()")',
+            self.source,
+        )
+        self.assertIn('"CAMERA_ARTISTIC_" + side', self.source)
+        self.assertIn('"tx", 0.0', self.source)
+        self.assertIn("Wrapyawdegrees", self.source)
+        self.assertIn("Artisticoffsetmetres", self.source)
+        self.assertIn("DISPLAY_MODE_ROUTE", self.source)
+        self.assertIn('("OUT_SOURCE_COLOR", role_bridge, 0)', self.source)
+        self.assertIn('("OUT_COLOR", contract, 1)', self.source)
+        self.assertIn(
+            'menu=("single", "panoramic_wrap", "artistic_multi_angle")',
+            self.source,
+        )
         self.assertNotIn("eye_offset * -35.0", self.source)
         self.assertIn("HEADSET_ADAPTER_CONTRACT", self.source)
 
