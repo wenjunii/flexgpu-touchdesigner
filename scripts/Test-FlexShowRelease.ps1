@@ -337,6 +337,8 @@ echo 1, GPU-high, 00000000:02:00.0, NVIDIA GeForce RTX 4090, 24564, 555.10
 
     $output = & $initializer `
         -Topology auto `
+        -DisplayProfile venue_1080p `
+        -DisplayMode panoramic_wrap `
         -NvidiaSmi $fakeSmi `
         -TouchDesignerExe $fakeTouchDesigner `
         -Output $LocalConfig `
@@ -349,6 +351,8 @@ echo 1, GPU-high, 00000000:02:00.0, NVIDIA GeForce RTX 4090, 24564, 555.10
     if ($result.status -ne 'ok' -or $result.topology -ne 'dual_local' -or
         $result.tier -ne 'auto' -or $result.ai_tier -ne '4090' -or
         $result.render_tier -ne '3080ti_16gb' -or
+        $result.display_profile -ne 'venue_1080p' -or
+        $result.display_mode -ne 'panoramic_wrap' -or
         $result.ai_gpu.index -ne 1 -or $result.render_gpu.index -ne 0) {
         throw 'Initializer smoke test returned an unexpected GPU assignment.'
     }
@@ -360,6 +364,11 @@ echo 1, GPU-high, 00000000:02:00.0, NVIDIA GeForce RTX 4090, 24564, 555.10
         $written.gpu.render.uuid -ne $result.render_gpu.uuid -or
         $written.processes.ai.executable -ne $fakeTouchDesigner -or
         $written.processes.world.executable -ne $fakeTouchDesigner -or
+        $written.render.display_mode -ne 'panoramic_wrap' -or
+        $written.render.installation_width -ne 1920 -or
+        $written.render.installation_height -ne 1080 -or
+        $written.render.triple_surface_width -ne 1920 -or
+        $written.render.triple_surface_height -ne 1080 -or
         $written.transport.type -ne 'touch_tcp') {
         throw 'Written initializer configuration does not match its result.'
     }

@@ -157,6 +157,30 @@ on the 5090. A triple mode costs roughly three installation render views, so
 commission at the default before raising `triple_surface_width`,
 `triple_surface_height`, point count, or point thickness.
 
+For a three-projector venue where every projector is 1920x1080, initialize an
+ignored local profile with `-DisplayProfile venue_1080p`. It sets
+`OUT_INSTALLATION` and every individual wrap/artistic feed to 1920x1080; the
+two horizontal mosaics become 5760x1080. It does not increase diffusion,
+MoGe inference, geometry texture resolution, or point count:
+
+```powershell
+.\scripts\Initialize-FlexShow.ps1 `
+  -Topology single `
+  -Experience installation `
+  -Completion hybrid `
+  -DisplayProfile venue_1080p `
+  -DisplayMode single `
+  -TouchDesignerVersion 2025.32820 `
+  -Project .\projects\FlexShow-local.toe `
+  -Output .\config\local-venue-1080p.json
+```
+
+Start with `single`, validate the actual source and point detail, then change
+`render.display_mode` to `panoramic_wrap` or `artistic_multi_angle`. Use the
+individual wall TOPs for projector mapping; the mosaics remain preview or
+downstream-mapper inputs. Output resolution alone cannot recover detail missing
+from the StreamDiffusion image or the MoGe/geometry sampling grid.
+
 ## Replace the demo with your StreamDiffusionTD.tox
 
 The exact adapter COMP is:

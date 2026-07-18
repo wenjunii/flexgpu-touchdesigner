@@ -10,6 +10,12 @@ param(
     [ValidateSet('fog', 'procedural', 'hybrid')]
     [string]$Completion = 'hybrid',
 
+    [ValidateSet('tier_default', 'venue_1080p')]
+    [string]$DisplayProfile = 'tier_default',
+
+    [ValidateSet('single', 'panoramic_wrap', 'artistic_multi_angle')]
+    [string]$DisplayMode = 'single',
+
     [int]$AIIndex = -1,
 
     [int]$RenderIndex = -1,
@@ -519,6 +525,18 @@ if ($resolvedTopology -eq 'dual_local') {
     # because it needs an explicit producer-backed frame-state sidecar.
     $transport.peer_host = '127.0.0.1'
 }
+$render = [ordered]@{
+    display_mode = $DisplayMode
+}
+if ($DisplayProfile -eq 'venue_1080p') {
+    # Keep AI/geometry quality tied to the selected GPU tier while making the
+    # final physical feeds native 1080p. The triple mosaics are derived by the
+    # TouchDesigner runtime as 3 * triple_surface_width by surface height.
+    $render.installation_width = 1920
+    $render.installation_height = 1080
+    $render.triple_surface_width = 1920
+    $render.triple_surface_height = 1080
+}
 $configuration = [ordered]@{
     '$schema' = './flexshow.schema.json'
     topology = $resolvedTopology
@@ -530,6 +548,7 @@ $configuration = [ordered]@{
         render = [ordered]@{ uuid = $renderGpu.Uuid }
     }
     processes = $processes
+    render = $render
     transport = $transport
     runtime_dir = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot '.flexgpu\local'))
 }
@@ -545,6 +564,9 @@ $result = [ordered]@{
     config = $outputPath
     topology = $resolvedTopology
     tier = $tier
+    display_profile = $DisplayProfile
+    display_mode = $DisplayMode
+    render = $render
     ai_tier = $aiTier
     render_tier = $renderTier
     ai_gpu = [ordered]@{ index = $aiGpu.Index; uuid = $aiGpu.Uuid; name = $aiGpu.Name }
@@ -560,6 +582,7 @@ if ($Json) {
 else {
     Write-Host "[FlexShow] local preset: $outputPath"
     Write-Host "[FlexShow] topology=$resolvedTopology tier=$tier AI-tier=$aiTier render-tier=$renderTier"
+    Write-Host "[FlexShow] display-profile=$DisplayProfile display-mode=$DisplayMode"
     Write-Host "[FlexShow] AI GPU $($aiGpu.Index): $($aiGpu.Name)"
     Write-Host "[FlexShow] render GPU $($renderGpu.Index): $($renderGpu.Name)"
     Write-Host "[FlexShow] TouchDesigner $($touchDesignerSelection.version) [$($touchDesignerSelection.selection)]: $touchDesignerPath"

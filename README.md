@@ -144,6 +144,12 @@ gitignored UUID-based preset:
 `auto` chooses `single` for one NVIDIA GPU and `dual_local` for two or more.
 Use `-AIIndex` and `-RenderIndex` to override its assignment, `-Output` for a
 different `config/local-*.json` name, and `-Force` to replace that local file.
+`-DisplayProfile venue_1080p` writes native 1920x1080 single and per-surface
+feeds without changing the selected GPU tier's diffusion, geometry, or point
+budgets. `-DisplayMode single`, `panoramic_wrap`, or
+`artistic_multi_angle` selects `OUT_DISPLAY_ACTIVE`; every fixed output remains
+available. The default `tier_default` display profile retains the conservative
+per-GPU surface sizes.
 `-ListTouchDesigner` is read-only and reports product versions, paths, and the
 deterministic default without probing GPUs. `-TouchDesignerVersion` selects one
 exact installed build; `-TouchDesignerExe` selects one exact path. They cannot
@@ -628,20 +634,39 @@ The installation output choices are always retained:
 | `OUT_DISPLAY_ACTIVE` | Mode selected by `render.display_mode` or the `WORKING_PIPELINE` Display Mode menu |
 
 For the current 3080 Ti local project, keep `display_mode` at `single` until
-the new network has been validated. Then change only this config value to
-`panoramic_wrap` or `artistic_multi_angle` and restart:
+the new network has been validated. A new ignored local profile for three
+native 1080p projectors can be created without raising the 3080's internal
+512-square diffusion or 384-square geometry budgets:
+
+```powershell
+.\scripts\Initialize-FlexShow.ps1 `
+  -Topology single `
+  -Experience installation `
+  -Completion hybrid `
+  -DisplayProfile venue_1080p `
+  -DisplayMode single `
+  -TouchDesignerVersion 2025.32820 `
+  -Project .\projects\FlexShow-local.toe `
+  -Output .\config\local-venue-1080p.json
+```
+
+The initializer refuses to replace an existing local profile unless `-Force`
+is explicit. Do not use `-Force` on a profile containing private adapter paths
+until those settings have been backed up. The generated render contract is:
 
 ```json
 "render": {
-  "display_mode": "panoramic_wrap",
-  "triple_surface_width": 640,
-  "triple_surface_height": 360,
-  "surface_fov_degrees": 60,
-  "triple_wrap_yaw_degrees": 30,
-  "triple_artistic_yaw_degrees": 18,
-  "triple_artistic_offset_metres": 0.45
+  "display_mode": "single",
+  "installation_width": 1920,
+  "installation_height": 1080,
+  "triple_surface_width": 1920,
+  "triple_surface_height": 1080
 }
 ```
+
+Change only `display_mode` to `panoramic_wrap` or
+`artistic_multi_angle` and restart after the single view passes. The individual
+wall feeds remain 1920x1080; each horizontal mosaic is 5760x1080.
 
 The three individual TOPs are the actual projector/LED feeds. Mosaics are for
 desktop preview, capture, or a downstream mapper. Venue edge blend, warp,
@@ -652,6 +677,11 @@ The current 30-degree panoramic yaw intentionally overlaps a monocular
 image-derived cloud across the side feeds. Increasing it toward 45 degrees is
 appropriate only when the reconstructed world contains enough off-axis
 geometry; otherwise the side cameras correctly see mostly empty background.
+
+Native output resolution reduces final scaling blur but cannot create point
+detail missing from the source or geometry grid. Increase StreamDiffusion,
+MoGe inference, geometry resolution, and point budget together on a 4090/5090;
+changing only the projector TOP dimensions merely resamples the existing cloud.
 
 The scaffold is deliberately adapter-based. Connect the exact StreamDiffusionTD
 component, camera SDK, and VR component available on the show machine rather
