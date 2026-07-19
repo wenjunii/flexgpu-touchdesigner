@@ -124,10 +124,21 @@ comparison order, validation sequence, and private-component boundaries.
 Embody Envoy then supplies live TouchDesigner inspection, TOP capture,
 performance data, and reversible mutation tools through the same MCP server.
 
-The machine-specific `.mcp.json` remains ignored. Follow
-[`docs/EMBODY_MCP.md`](docs/EMBODY_MCP.md) to add Embody to an ignored working
-TOE, keep externalization disabled around private components, and verify the
-connection.
+The machine-specific `.codex/config.toml` remains ignored; the sanitized
+`.codex/config.toml.example` documents the required arguments without exposing
+local paths. The configuration follows FlexGPU's active Envoy instance through
+its ignored registry and applies the `/project1/flexgpu` identity guard, so a
+second TouchDesigner project cannot be mistaken for this one.
+
+Run the wiring preflight after restarting TouchDesigner or the MCP client:
+
+```powershell
+.\scripts\Test-TDKnowledgeBridge.ps1
+.\scripts\Test-TDKnowledgeBridge.ps1 -RequireEnvoy
+```
+
+Follow [`docs/EMBODY_MCP.md`](docs/EMBODY_MCP.md) for setup, the end-to-end MCP
+tool check, the ordered visual audit, and private-component boundaries.
 
 ## Quick start
 
@@ -863,11 +874,12 @@ failure if the selected interpreter cannot load the schema validator or NumPy.
 The release script selects a working Python 3.10+ interpreter through the same
 logic as the launcher, compiles `src`, `tools`, `tests`, and `touchdesigner`,
 validates every shipped JSON profile, runs the unit suite and deterministic
-3080 Ti benchmark, parses every PowerShell script, smoke-tests initializer
-write/read/validation with synthetic GPUs, and scans the exact candidates,
-index, and history reachable from `HEAD`. `-AllRefs` performs the stricter scan
-of every local branch, tag, and stash. CI uses `-SkipPublicSync` only because
-its separate publication-safety job already performs that all-ref scan.
+3080 Ti benchmark, parses every PowerShell script, validates the public
+TD Knowledge bridge contract, smoke-tests initializer write/read/validation
+with synthetic GPUs, and scans the exact candidates, index, and history
+reachable from `HEAD`. `-AllRefs` performs the stricter scan of every local
+branch, tag, and stash. CI uses `-SkipPublicSync` only because its separate
+publication-safety job already performs that all-ref scan.
 Regression coverage includes bridge DAT imports in a clean interpreter,
 component-qualified TOP-to-POP position/color attributes, native Windows
 process identity with its compatibility fallback, and heartbeat publication

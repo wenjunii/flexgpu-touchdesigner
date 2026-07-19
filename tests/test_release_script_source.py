@@ -29,6 +29,8 @@ class ReleaseScriptSourceTests(unittest.TestCase):
             "'-m', 'unittest'",
             "tools/benchmark_flexshow.py",
             "Parser]::ParseFile",
+            "Test-TDKnowledgeBridge.ps1",
+            "Smoke-test TD Knowledge bridge public wiring",
             "Initialize-FlexShow.ps1",
             "Smoke-test TouchDesigner version inventory and selectors",
             "Smoke-test Depth Anything wrapper accepted rehearsal defaults",

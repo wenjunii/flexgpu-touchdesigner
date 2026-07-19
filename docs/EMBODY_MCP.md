@@ -21,20 +21,41 @@ material.
 3. Set Embody's AI Project Root to a custom ignored folder such as
    `runtime/embody-ai`. This keeps Embody's generated AI configuration away
    from the public repository root.
-4. Enable Envoy on `127.0.0.1:9870`.
+4. Enable Envoy on `127.0.0.1`. Port `9870` is the initial fallback; Embody
+   may advance to another local port during a rapid restart.
 5. Leave Embody/TDN externalization off. The private StreamDiffusionTD
    component and working pipeline must not be exported automatically.
 6. Save as a new ignored working TOE only after the live project is healthy.
    TouchDesigner's versioned-save option may create a `.1.toe` successor.
-7. Restart the MCP client so it loads the local server configuration.
+7. Copy `.codex/config.toml.example` to the ignored
+   `.codex/config.toml` and replace every placeholder with an absolute local
+   path. Keep the `--envoy-config` argument pointed at
+   `runtime/embody-ai/.embody/envoy.json` and `--project-context` pointed at
+   `integrations/embody/flexgpu-project-context.json`.
+8. Restart the MCP client so it loads the project-scoped server configuration.
 
-The local `.mcp.json` is ignored because it contains machine-specific absolute
-paths. It launches the sibling `td-knowledge-mcp`, points it at the sibling
-knowledge index, and supplies the checked-in FlexGPU project context. It
-proxies Envoy from the same local endpoint; do not configure a second direct
+The local `.codex/config.toml` is ignored because it contains machine-specific
+absolute paths. It launches the sibling `td-knowledge-mcp`, points it at the
+sibling knowledge index, and supplies the checked-in FlexGPU project context.
+The server follows the active instance in the Envoy registry instead of
+assuming that fallback port `9870` remained available. It then verifies
+`/project1/flexgpu` before exposing live tools. This keeps FlexGPU isolated
+when another TouchDesigner project is open. Do not configure a second direct
 Envoy server unless intentionally debugging the proxy.
 
 ## Connection check
+
+Validate the checked-in contract and local wiring from the repository root:
+
+```powershell
+.\scripts\Test-TDKnowledgeBridge.ps1
+.\scripts\Test-TDKnowledgeBridge.ps1 -RequireEnvoy
+```
+
+The first command validates local paths and reports whether the registered
+Envoy instance is ready. The second makes the live TouchDesigner process and
+its loopback listener mandatory. Neither command starts or changes
+TouchDesigner, and neither publishes local paths.
 
 With TouchDesigner closed, the MCP should still expose:
 
@@ -46,6 +67,11 @@ With TouchDesigner closed, the MCP should still expose:
 With the local FlexGPU TOE open and Envoy enabled, the same server should also
 expose Envoy tools such as `get_td_info`, `query_network`, `get_op_errors`,
 `capture_top`, and `get_project_performance`.
+
+The PowerShell preflight validates configuration, registry following, process
+identity, and TCP reachability. The MCP tool checks above remain the
+end-to-end proof that the knowledge library and live Envoy proxy negotiated
+successfully.
 
 For the first live audit:
 

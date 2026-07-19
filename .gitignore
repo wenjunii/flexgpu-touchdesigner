@@ -7,6 +7,7 @@ htmlcov/
 .vscode/
 .idea/
 .mcp.json
+.codex/config.toml
 .embody/*
 !.embody/project.json
 .env

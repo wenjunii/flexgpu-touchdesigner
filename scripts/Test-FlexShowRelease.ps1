@@ -6,7 +6,8 @@ Runs the complete non-publishing FlexShow source release verification.
 Compiles Python sources, validates shipped profiles, runs the unit suite and
 synthetic benchmark, parses every PowerShell script, smoke-tests the machine
 initializer with synthetic hardware, verifies the default-off Depth Anything
-wrapper's accepted rehearsal defaults, and checks the exact public surface.
+wrapper's accepted rehearsal defaults, validates the public TD Knowledge
+bridge wiring, and checks the exact public surface.
 The unit stage includes cold-reopen bridge imports, component-qualified
 TOP-to-POP attribute mappings, and native/fallback Windows process-identity
 regressions.
@@ -37,6 +38,7 @@ $initializer = Join-Path $PSScriptRoot 'Initialize-FlexShow.ps1'
 $startWrapper = Join-Path $PSScriptRoot 'Start-FlexShow.ps1'
 $recoverWrapper = Join-Path $PSScriptRoot 'Recover-FlexShow.ps1'
 $depthAnythingWrapper = Join-Path $PSScriptRoot 'Start-DepthAnythingWorker.ps1'
+$tdKnowledgeBridgeChecker = Join-Path $PSScriptRoot 'Test-TDKnowledgeBridge.ps1'
 
 function Invoke-CheckedPython {
     param(
@@ -105,6 +107,23 @@ function Test-PowerShellSources {
         throw "PowerShell parsing failed:`n$($failures -join [Environment]::NewLine)"
     }
     Write-Host "[FlexShow release] parsed $($files.Count) PowerShell script(s)"
+}
+
+function Test-TDKnowledgeBridgeWiring {
+    Write-Host '[FlexShow release] Smoke-test TD Knowledge bridge public wiring'
+    if (-not (Test-Path -LiteralPath $tdKnowledgeBridgeChecker -PathType Leaf)) {
+        throw "TD Knowledge bridge checker does not exist: $tdKnowledgeBridgeChecker"
+    }
+    $output = & $tdKnowledgeBridgeChecker -SkipLocalConfig
+    $result = @($output)[-1] | ConvertFrom-Json
+    if (
+        $result.status -ne 'ok' -or
+        $result.project_id -ne 'flexgpu-touchdesigner' -or
+        $result.root_operator -ne '/project1/flexgpu' -or
+        $result.local_config -ne 'skipped'
+    ) {
+        throw 'TD Knowledge bridge public wiring failed its result contract.'
+    }
 }
 
 function Test-DepthAnythingWrapperPreview {
@@ -487,6 +506,7 @@ try {
     }
 
     Test-PowerShellSources
+    Test-TDKnowledgeBridgeWiring
     Test-DepthAnythingWrapperPreview
     Test-InitializerSmoke `
         -TemporaryDirectory $temporaryDirectory `

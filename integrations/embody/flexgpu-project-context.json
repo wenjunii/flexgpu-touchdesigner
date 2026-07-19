@@ -17,6 +17,9 @@
   },
   "network": {
     "root_operator": "/project1/flexgpu",
+    "identity_operators": [
+      "/project1/flexgpu"
+    ],
     "managed_scope": "/project1/flexgpu/WORKING_PIPELINE",
     "source_adapter": "/project1/flexgpu/WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER",
     "moge2_bridge": "/project1/flexgpu/WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER/MOGE2_BRIDGE",
