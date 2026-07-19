@@ -113,6 +113,7 @@ assert normalized({src_path!r}) in {{
             "sensor_to_world",
             "sensor_validity",
             "interaction_field",
+            "interaction_debug",
             "temporal_observation",
             "temporal_state",
             "temporal_advect",
@@ -401,15 +402,37 @@ assert normalized({src_path!r}) in {{
         self.assertIn("calibrated SENSOR_POSITION", interaction)
         self.assertIn("distanceMetres", interaction)
         self.assertIn("interactionRadiusMetres", interaction)
+        self.assertIn('"Float", "Forcegain", 0.35', self.source)
         self.assertNotIn("vec2 radial", interaction)
         self.assertIn("occupancyGridSize = 8", interaction)
         self.assertIn("sensorUV", interaction)
         self.assertNotIn("texture(sTD2DInputs[1], uv)", interaction)
+        interaction_debug = self.module.SHADERS["interaction_debug"]
+        self.assertIn("display-only", interaction_debug)
+        self.assertIn("interaction.a", interaction_debug)
+        self.assertIn('"OUT_INTERACTION_DEBUG"', self.source)
+        self.assertIn(
+            "_install_interaction_debug_output(sensor, pipeline, report)",
+            self.source,
+        )
         validity = self.module.SHADERS["sensor_validity"]
         self.assertIn("sensor.a * mask * confidence", validity)
         self.assertIn("DEPTH_SENSOR_ADAPTER", self.source)
         self.assertIn("REPLACE_WITH_CALIBRATED_SENSOR_POSITION", self.source)
         self.assertIn("SENSOR_POSITION_SOURCE", self.source)
+
+    def test_depth_anything_data_constants_are_unpremultiplied(self) -> None:
+        shader = self.module.SHADERS["depth_anything_sensor_position"]
+        self.assertIn("Constant TOPs premultiply RGB by alpha", shader)
+        self.assertIn(
+            "depthCalibrationPacked.rgb / "
+            "max(abs(depthCalibrationPacked.a), 1e-6)",
+            shader,
+        )
+        self.assertIn(
+            "intrinsicsPacked.rgb / max(abs(intrinsicsPacked.a), 1e-6)",
+            shader,
+        )
 
     def test_sensor_disabled_route_is_zero_and_circle_uses_documented_coordinates(self) -> None:
         self.assertIn(

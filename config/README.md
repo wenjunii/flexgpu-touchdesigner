@@ -227,8 +227,8 @@ For example, add these members to a complete preset:
     "confidence_operator": "out_confidence",
     "frame_state_operator": "frame_state",
     "calibration_path": "../calibration/sensor.json",
-    "interaction_radius_m": 0.45,
-    "force_gain": 1.0,
+    "interaction_radius_m": 0.55,
+    "force_gain": 0.35,
     "stale_timeout_ms": 1000
   },
   "render": {

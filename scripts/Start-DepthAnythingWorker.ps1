@@ -15,11 +15,14 @@ param(
     [ValidateRange(0, 31)]
     [int]$CameraIndex = 0,
 
+    [ValidateSet('auto', 'msmf', 'dshow', 'any')]
+    [string]$CameraBackend = 'auto',
+
     [ValidateRange(64, 7680)]
-    [int]$CameraWidth = 1280,
+    [int]$CameraWidth = 640,
 
     [ValidateRange(64, 4320)]
-    [int]$CameraHeight = 720,
+    [int]$CameraHeight = 480,
 
     [ValidateRange(196, 1024)]
     [int]$InputSize = 384,
@@ -31,7 +34,7 @@ param(
     [int]$OutputHeight = 144,
 
     [ValidateRange(0.1, 60.0)]
-    [double]$InferenceHz = 3.0,
+    [double]$InferenceHz = 5.0,
 
     [ValidateSet('session_frozen', 'fixed')]
     [string]$CalibrationMode = 'session_frozen',
@@ -143,6 +146,7 @@ $arguments = @(
     '--model-dir', $model,
     '--cache-dir', $cache,
     '--camera-index', [string]$CameraIndex,
+    '--camera-backend', $CameraBackend,
     '--camera-width', [string]$CameraWidth,
     '--camera-height', [string]$CameraHeight,
     '--input-size', [string]$InputSize,
@@ -181,12 +185,15 @@ if ($PSBoundParameters.ContainsKey('DurationSeconds')) {
 $plan = [ordered]@{
     status = if ($Start) { 'authorized' } else { 'preview' }
     optional_sensor_emulator = $true
+    profile = $Profile
     backend = $Backend
     capture = $resolvedCapture
     webcam_will_open = [bool]($Start -and $resolvedCapture -eq 'webcam')
     physical_gpu_index = $GpuIndex
     worker_device = 'cuda:0 (relative to CUDA_VISIBLE_DEVICES)'
     camera_index = $CameraIndex
+    camera_backend = $CameraBackend
+    camera_resolution = @($CameraWidth, $CameraHeight)
     input_size = $InputSize
     output_size = @($OutputWidth, $OutputHeight)
     output_limits = [ordered]@{

@@ -50,6 +50,7 @@ class TouchDesignerValidationSourceTests(unittest.TestCase):
         self.assertIn('mode.val = previous_mode', source)
         self.assertIn('"radiusx", "radiusy", "centerx", "centery"', source)
         self.assertIn('("OUT_SENSOR_MASK", "OUT_SENSOR_POSITION", "OUT_INTERACTION")', source)
+        self.assertIn('"OUT_INTERACTION_DEBUG"', source)
         self.assertIn('method(delayed=False)', source)
         self.assertIn('"has_signal": maximum > 1e-5 and span > 1e-6', source)
         self.assertIn("os.unlink(output)", source)
@@ -77,6 +78,7 @@ class TouchDesignerValidationSourceTests(unittest.TestCase):
                 "OUT_POSITION": (384, 384),
                 "OUT_COLOR": (384, 384),
                 "OUT_INTERACTION": (384, 384),
+                "OUT_INTERACTION_DEBUG": (384, 384),
                 "OUT_INSTALLATION": (1280, 720),
                 "OUT_TRIPLE_WRAP": (1920, 360),
                 "OUT_TRIPLE_ARTISTIC": (1920, 360),

@@ -209,6 +209,24 @@ void main()
     fragColor = TDOutputSwizzle(vec4(force, combinedOccupancy));
 }
 ''',
+    "interaction_debug": r'''// CONTRACT: INTERACTION -> display-only signed force/occupancy color
+out vec4 fragColor;
+
+void main()
+{
+    vec4 interaction = texture(sTD2DInputs[0], vUV.st);
+    float occupancy = clamp(interaction.a, 0.0, 1.0);
+    float magnitude = length(interaction.rgb);
+    float forceVisible = smoothstep(0.0001, 0.03, magnitude);
+    float presence = clamp(max(occupancy, magnitude * 12.0), 0.0, 1.0);
+    vec3 occupancyColor = vec3(0.05, 0.80, 1.00);
+    vec3 directionColor = 0.5 + 0.5 *
+        clamp(interaction.rgb * 12.0, vec3(-1.0), vec3(1.0));
+    vec3 color = mix(occupancyColor, directionColor, 0.65 * forceVisible) *
+                 presence;
+    fragColor = TDOutputSwizzle(vec4(clamp(color, 0.0, 1.0), 1.0));
+}
+''',
     "temporal_observation": r'''// CONTRACT: POSITION + CONFIDENCE + FRAME_CONTROL -> TEMPORAL_OBSERVATION
 out vec4 fragColor;
 
@@ -628,8 +646,16 @@ void main()
 {
     vec2 uv = vUV.st;
     vec4 packed = texture(sTD2DInputs[0], uv);
-    vec4 depthCalibration = texelFetch(sTD2DInputs[1], ivec2(0, 0), 0);
-    vec4 normalizedIntrinsics = texelFetch(sTD2DInputs[2], ivec2(0, 0), 0);
+    // Constant TOPs premultiply RGB by alpha. These 1x1 TOPs carry data,
+    // so recover their authored RGB values before interpreting the channels.
+    vec4 depthCalibrationPacked = texelFetch(sTD2DInputs[1], ivec2(0, 0), 0);
+    vec4 intrinsicsPacked = texelFetch(sTD2DInputs[2], ivec2(0, 0), 0);
+    vec4 depthCalibration = vec4(
+        depthCalibrationPacked.rgb / max(abs(depthCalibrationPacked.a), 1e-6),
+        depthCalibrationPacked.a);
+    vec4 normalizedIntrinsics = vec4(
+        intrinsicsPacked.rgb / max(abs(intrinsicsPacked.a), 1e-6),
+        intrinsicsPacked.a);
     float highByte = floor(clamp(packed.r, 0.0, 1.0) * 255.0 + 0.5);
     float lowByte = floor(clamp(packed.g, 0.0, 1.0) * 255.0 + 0.5);
     float uint16Depth = highByte * 256.0 + lowByte;
@@ -1341,6 +1367,8 @@ def _build_depth_anything_sensor_bridge(adapter, report):
             label="Capture Freshness (ms)")
     _custom(comp, page, "Toggle", "Flipvertical", True,
             label="Worker / TD Vertical Flip")
+    _custom(comp, page, "Toggle", "Mirrorhorizontal", True,
+            label="Mirror Horizontal (Webcam)")
     _custom(comp, page, "Toggle", "Resultvalid", False,
             label="Fresh Correlated Result")
 
@@ -1427,7 +1455,12 @@ def _build_depth_anything_sensor_bridge(adapter, report):
           "metadata. No RGB enters this COMP. A paid Depth Anything app or a "
           "future hardware depth sensor may replace that worker by mapping "
           "Spout, NDI, TOP, or API output to the same OUT_POSITION, OUT_MASK, "
-          "OUT_CONFIDENCE, and FRAME_STATE contracts. OUT_POSITION is strictly "
+          "OUT_CONFIDENCE, and FRAME_STATE contracts. Sensor data is mirrored "
+          "horizontally by default for intuitive laptop rehearsal; "
+          "turn Mirror Horizontal off for an unmirrored calibrated show sensor. "
+          "The packed depth, mask, confidence, principal point, and temporal "
+          "session identity change together so the sensor contracts stay aligned. "
+          "OUT_POSITION is strictly "
           "sensor-local XYZ; the parent CALIBRATE_SENSOR_POSITION applies the "
           "independent sensor_to_world transform. Socket threads retain bytes "
           "only. Stale, malformed, disconnected, or calibration-changing input "
@@ -1823,6 +1856,16 @@ def _build_reconstruction(parent, report):
     _custom(comp, page, "Float", "Depthbias", 0.0, label="Depth Bias")
     _custom(comp, page, "Float", "Nearmetres", 0.35, label="Near (metres)")
     _custom(comp, page, "Float", "Farmetres", 4.50, label="Far (metres)")
+    _custom(comp, page, "Toggle", "Installationdepthoverride", False,
+            label="Installation Depth Override")
+    _custom(comp, page, "Float", "Installationdepthscale", 1.0,
+            label="Installation Depth Scale")
+    _custom(comp, page, "Float", "Installationdepthbias", 0.0,
+            label="Installation Depth Bias")
+    _custom(comp, page, "Float", "Installationnear", 0.35,
+            label="Installation Near (metres)")
+    _custom(comp, page, "Float", "Installationfar", 4.50,
+            label="Installation Far (metres)")
     _custom(comp, page, "Float", "Fxnormalized", 0.0,
             label="fx / image width (0 = 60 degree default)")
     _custom(comp, page, "Float", "Fynormalized", 0.0,
@@ -1881,7 +1924,7 @@ def _build_sensor(parent, report):
             ("simulated", "replay", "depth_sensor", "disabled"))
     _custom(comp, page, "Float", "Interactionradius", 0.55,
             label="Interaction Radius (metres)")
-    _custom(comp, page, "Float", "Forcegain", 1.0, label="Force Gain")
+    _custom(comp, page, "Float", "Forcegain", 0.35, label="Force Gain")
     _custom(comp, page, "Float", "Sensoragems", -1.0,
             label="Sensor Age (ms; -1 unknown)")
     _custom(comp, page, "Int", "Sensorframeid", -1, label="Sensor Frame ID")
@@ -1992,15 +2035,20 @@ def _build_sensor(parent, report):
         [sensor_position, mask_switch, confidence_switch], report, True)
     interaction = _glsl(comp, "interaction_field", "interaction_field",
                         [position, valid_sensor_position], report, False)
+    interaction_debug = _glsl(
+        comp, "INTERACTION_DEBUG", "interaction_debug", [interaction], report, False)
     _out_top(comp, "OUT_SENSOR_POSITION", valid_sensor_position, 0, report)
     _out_top(comp, "OUT_INTERACTION", interaction, 1, report)
     _out_top(comp, "OUT_SENSOR_MASK", mask_switch, 2, report)
+    _out_top(comp, "OUT_INTERACTION_DEBUG", interaction_debug, 3, report)
     _text(comp, "CALIBRATION_CONTRACT",
           "DEPTH_SENSOR_ADAPTER/OUT_POSITION must contain sensor-local XYZ "
           "metres in RGB and occupancy in A. OUT_MASK and OUT_CONFIDENCE are "
           "multiplied exactly once after SENSOR_TO_WORLD calibration. Interaction "
           "uses a bounded 8x8 world-space occupancy-primitive search (64 samples "
-          "per generated point), an explicit low-resolution SDF approximation.", report)
+          "per generated point), an explicit low-resolution SDF approximation. "
+          "OUT_INTERACTION remains signed machine-readable force/occupancy; "
+          "OUT_INTERACTION_DEBUG is a display-only color visualization.", report)
     return comp
 
 
@@ -2648,6 +2696,25 @@ def _first_input(node):
         return None
 
 
+def _install_interaction_debug_output(sensor, pipeline, report):
+    """Add the display-only interaction view without rebuilding other stages."""
+
+    if sensor is None or pipeline is None:
+        raise RuntimeError("interaction debug requires the existing sensor and pipeline")
+    interaction = sensor.op("interaction_field")
+    if interaction is None:
+        raise RuntimeError("interaction_field is missing; build the working pipeline first")
+    interaction_debug = _glsl(
+        sensor, "INTERACTION_DEBUG", "interaction_debug", [interaction], report, False)
+    _out_top(sensor, "OUT_INTERACTION_DEBUG", interaction_debug, 3, report)
+    root_output = _ensure(pipeline, "nullTOP", "OUT_INTERACTION_DEBUG", report)
+    _connect(sensor, root_output, 0, 3, report, replace=True)
+    _style(
+        root_output, 1030, -1160, (0.18, 0.50, 0.28),
+        "OUT_INTERACTION_DEBUG", 185, 70)
+    return interaction_debug
+
+
 def install_depth_anything_sensor_bridge(root=None):
     """Install only the default-off, replaceable sensor bridge and routes.
 
@@ -2701,6 +2768,9 @@ def install_depth_anything_sensor_bridge(root=None):
 
     bridge = _build_depth_anything_sensor_bridge(adapter, report)
     _wire_depth_anything_sensor_routes(adapter, bridge, tuple(fallbacks), report)
+    sensor = root.op("WORKING_PIPELINE/SENSOR_INTERACTION")
+    pipeline = root.op("WORKING_PIPELINE")
+    _install_interaction_debug_output(sensor, pipeline, report)
     try:
         bridge.store("depth_anything_bridge_install_report", report.as_dict())
     except Exception:
@@ -2882,6 +2952,7 @@ def build(root=None):
         ("OUT_STEREO_PREVIEW", stereo, 2),
         ("OUT_TEMPORAL_STATE", contract, 3),
         ("OUT_SENSOR_POSITION", sensor, 0),
+        ("OUT_INTERACTION_DEBUG", sensor, 3),
     )
     output_nodes = []
     for index, (name, source, source_index) in enumerate(outputs):
@@ -2913,6 +2984,7 @@ def build(root=None):
          "OUT_TRIPLE_ARTISTIC_LEFT/CENTER/RIGHT + OUT_TRIPLE_ARTISTIC"],
         ["active_display_output", "OUT_DISPLAY_ACTIVE"],
         ["stereo_output", "OUT_LEFT_EYE, OUT_RIGHT_EYE, OUT_STEREO_PREVIEW"],
+        ["interaction_debug_output", "OUT_INTERACTION_DEBUG (visualization only)"],
         ["openvr_dependency", "none"],
         ["unknown_nodes", "preserved"],
     ], report)

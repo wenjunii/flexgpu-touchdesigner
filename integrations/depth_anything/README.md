@@ -65,7 +65,12 @@ webcam.
 
 `-Backend mock -Capture webcam` exercises the real camera boundary with a
 deterministic depth backend. The webcam still does not open until `-Start` is
-present.
+present. `-CameraBackend auto` is the default; it prefers MSMF on Windows and
+the OpenCV default backend elsewhere. Explicit `msmf`, `dshow`, and `any`
+values are available for bounded device diagnosis. Worker JSON reports the
+requested/selected backend and camera-open milliseconds without including RGB.
+The worker verifies the receiver before camera open, refreshes the result
+connection after a slow backend open, and only then starts reading camera frames.
 
 For the initial RTX 3080 Ti Laptop test:
 
@@ -74,12 +79,14 @@ For the initial RTX 3080 Ti Laptop test:
   -Profile 3080ti_16gb `
   -GpuIndex 0 `
   -CameraIndex 0 `
+  -CameraBackend auto `
   -Start
 ```
 
-The conservative default is ViT-S fp16, 384 model input, 256x144 sensor
-output, and 3 Hz inference. Keep it there for the first combined
-StreamDiffusion + MoGe + interaction soak. Producer and receiver share a hard
+The live-accepted 3080 Ti Laptop rehearsal default is ViT-S fp16, 640x480
+webcam capture, 384 model input, 256x144 sensor output, and 5 Hz inference.
+Use 3 Hz as the first fallback if the combined StreamDiffusion + MoGe +
+interaction workload is thermally unstable. Producer and receiver share a hard
 640x480 / 307200-pixel output ceiling. Results use TCP 9241 only; UDP 9240 is
 reserved metadata and is not opened. Both the worker and receiver require an
 independent explicit trusted-network opt-in before using non-loopback hosts.

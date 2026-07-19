@@ -15,6 +15,23 @@ It is deliberately default-off. Neither initialization nor a preview command
 opens the webcam. The explicit `-Start` switch is required, and the
 TouchDesigner result receiver should be active before that command.
 
+The temporary webcam bridge enables **Mirror Horizontal (Webcam)** by default
+so an audience member moving left sees the interaction move left. Mirroring is
+applied to the packed depth, mask, and confidence together; the uploaded
+principal point and temporal session identity are updated at the same boundary.
+Turn it off when commissioning an unmirrored physical or paid-app sensor and
+use the measured `sensor_to_world` transform for venue alignment.
+
+### Live-accepted laptop rehearsal baseline
+
+The accepted RTX 3080 Ti Laptop starting point is MSMF/automatic 640x480 webcam
+capture, 384-pixel model input, 256x144 RGB-free sensor output, and 5 Hz
+inference. TouchDesigner uses a 0.55 m interaction radius and 0.35 force gain.
+This produced correctly mirrored, visibly responsive interaction in the single
+and triple-surface point views. It is a subjective rehearsal acceptance, not a
+physical depth, latency, venue, or multi-person calibration claim. Use 3 Hz as
+the first thermal fallback on the combined 16 GB workload.
+
 ## Install the replaceable TouchDesigner receiver
 
 Run the bounded installer in the TouchDesigner Textport from an ignored local
@@ -171,12 +188,14 @@ or a probability.
 
 A capture thread continuously drains the webcam into a one-slot handoff. A new
 camera frame replaces any unprocessed frame, so inference cannot accumulate
-camera latency. At 3 Hz, the inference loop always consumes the newest available
+camera latency. At 5 Hz, the inference loop always consumes the newest available
 capture and preserves that frame's capture timestamp.
 
 Failure behavior is closed:
 
-- a result connection is established before the webcam opens;
+- result-receiver availability is verified before the webcam opens, then the
+  connection is refreshed after a potentially slow backend open and before the
+  capture pump reads its first RGB frame;
 - a stale camera frame is discarded and never inferred or sent;
 - repeated capture failure/disconnect clears the pending slot and terminates;
 - any unexpected capture-thread `OSError` or ordinary exception also closes the
@@ -194,20 +213,28 @@ Failure behavior is closed:
 1. Install the TouchDesigner sensor receiver but leave it disabled.
 2. Run the mock worker with `-CalibrationFrames 1 -MaxFrames 3 -Start`.
 3. Confirm three correlated RGB-free frames and then stale invalidation.
-4. Run `-Backend mock -Capture webcam` to validate camera access without loading
-   the learned model.
-5. Install/download the pinned Small model as separate explicit actions.
-6. Run the real backend alone at the 3080 laptop defaults.
-7. Run it alongside StreamDiffusion and MoGe; watch GPU memory, temperature,
+4. Inspect `OUT_INTERACTION_DEBUG`, not raw `OUT_INTERACTION`, for a readable
+   color view. The raw TOP intentionally remains signed RGB force plus alpha
+   occupancy and may look black in a normal image viewer.
+5. Run `-Backend mock -Capture webcam` to validate camera access without loading
+   the learned model. On Windows, `-CameraBackend auto` prefers MSMF; use the
+   explicit `msmf`, `dshow`, or `any` value only while diagnosing a device.
+6. Install/download the pinned Small model as separate explicit actions.
+7. Run the real backend alone at the 3080 laptop defaults.
+8. Run it alongside StreamDiffusion and MoGe; watch GPU memory, temperature,
    inference age, dropped camera frames, and TouchDesigner frame time.
-8. Replace pseudo-metre placement with a measured physical sensor calibration
+9. Replace pseudo-metre placement with a measured physical sensor calibration
    before using audience distance as a real-world quantity.
 
 Mock mode does not require the optional model environment: when that environment
 is absent, the wrapper uses `python` from `PATH` and requires only NumPy. It does
 not open the webcam unless `-Capture webcam -Start` is explicitly supplied.
+Preview and ready JSON report the requested/preferred or selected camera backend.
+The ready and final reports also include bounded camera-open timing and backend
+attempts; they never contain camera pixels. The result connection is still
+verified before any backend opens the webcam and refreshed before capture starts.
 
-If the combined 16 GB laptop workload is unstable, keep the sensor at 3 Hz,
+If the combined 16 GB laptop workload is unstable, reduce the sensor to 3 Hz,
 reduce model input first, then move MoGe or the sensor worker to a second GPU.
 
 ## Licensing

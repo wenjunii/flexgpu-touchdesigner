@@ -69,8 +69,8 @@ touchdesigner/       TD 2025 bootstrap source and integration guide
 | Process status, readiness and AI recovery | Atomic TouchDesigner application heartbeat, read-only alive/ready/stale status, bounded readiness waits, and operator-authorized recovery of a separate AI role; not an autonomous watchdog |
 | StreamDiffusionTD and sensor SDK | Labelled manual boundaries plus opt-in private `.tox` loading with safe demo/simulated fallback; paid/private components remain excluded |
 | Live MoGe-2 generated geometry | Pinned offline worker, newest-only synchronized atlas, strict camera/frame metadata, and default-off TD bridge implemented; real worker, local `.toe` path, and cold-reopen runtime imports live-accepted on the 3080 Ti Laptop |
-| Embody/knowledge MCP integration | Project-scoped context, privacy rules, output audit order, and local MCP configuration implemented; Embody still has to be added to an ignored working TOE and enabled locally |
-| Temporary laptop audience sensor | Default-off result-only TD bridge and optional Depth Anything V2 Small webcam worker implemented; RGB-free mock transport, live routing, and stale zero-gating accepted on the 3080 Ti Laptop; webcam/paid-app acceptance remains local |
+| Embody/knowledge MCP integration | Project-scoped context, privacy rules, output audit order, and local MCP configuration implemented and used against an ignored working TOE; Embody remains optional and untracked |
+| Temporary laptop audience sensor | Default-off result-only TD bridge and optional Depth Anything V2 Small webcam worker implemented; mirrored live interaction, RGB-free transport, stale zero-gating, 5 Hz rehearsal, and gentler force tuning live-accepted on the 3080 Ti Laptop; paid-app and physical-sensor acceptance remain future local gates |
 | Installation and VR | Unchanged single display, selectable three-surface panoramic wrap, artistic multi-angle outputs, and parallel-camera stereo development textures; projector warping/blending, headset runtime, pose/input, compositor submission, and physical validation are user-supplied |
 | SHARP and Gaussian reconstruction | Disabled external-worker adapter contracts; inference is not bundled |
 
@@ -82,11 +82,15 @@ The builder sources and tracked synthetic `projects/FlexShow.toe` are version
 `1.2.1`. The canonical project was rebuilt and its combined installation/stereo
 branches passed the strict local validator in TouchDesigner 2025.32820 on an
 RTX 3080 Ti Laptop 16 GB GPU. This was a short synthetic operator check, not a
-performance or venue test. The project has not been tested here with the
-private StreamDiffusionTD component, a physical depth sensor, projection/LED
-mapping, an OpenXR/OpenVR compositor, or a headset. Treat all GPU budgets as
-commissioning starting points until the complete local system passes thermal,
-latency, visual, and failover soaks.
+performance or venue test. An ignored local working TOE has since been
+live-accepted with the user's private StreamDiffusionTD component, the external
+MoGe-2 worker, and the temporary webcam/Depth Anything rehearsal sensor on that
+laptop. The tracked canonical project has not been validated with a physical
+depth sensor, projection/LED mapping, an OpenXR/OpenVR compositor, or a headset.
+The local acceptance publishes no private component and establishes no physical
+metric, venue, or VR correctness. Treat all GPU budgets as commissioning
+starting points until the target system passes thermal, latency, visual, and
+failover soaks.
 
 ### Verified v1.2.1 synthetic baseline
 
@@ -284,7 +288,23 @@ path and its pseudo-metres are not physical measurement. See
 [docs/DEPTH_ANYTHING_SENSOR.md](docs/DEPTH_ANYTHING_SENSOR.md) for the bounded
 TouchDesigner installer, no-RGB privacy boundary, 3080 defaults, mock/webcam
 acceptance sequence, and how a paid app or physical sensor later replaces the
-worker without changing downstream world contracts.
+worker without changing downstream world contracts. The webcam wrapper exposes
+`-CameraBackend auto|msmf|dshow|any`; Windows `auto` prefers MSMF so a slow
+DirectShow open cannot consume the TouchDesigner result receiver's idle window.
+The temporary bridge also defaults to audience-mirrored horizontal orientation
+and exposes `OUT_INTERACTION_DEBUG` as a readable view without changing the raw
+signed-force `OUT_INTERACTION` contract. The live-accepted 3080 rehearsal
+defaults are 640x480 webcam capture, 384 model input, 256x144 RGB-free sensor
+output, 5 Hz inference, a 0.55 m interaction radius, and 0.35 force gain. Fall
+back to 3 Hz if the combined laptop workload is thermally unstable.
+
+MoGe camera metadata remains authoritative by default. If an inferred scene's
+depth scale is much larger than the audience's room-scale sensor volume, enable
+the explicit **Installation Depth Override** on `RECONSTRUCTION` and calibrate
+its scale, bias, near, and far values in an ignored working TOE. The frame
+controller preserves that opt-in mapping across new synchronized MoGe frames;
+the values are scene/venue calibration and are intentionally not hard-coded in
+the public profile.
 
 Add `-Json` to any operator script for compact machine-readable output. Start
 and Diagnose also accept `-NvidiaSmi C:\path\to\nvidia-smi.exe`. Config selection

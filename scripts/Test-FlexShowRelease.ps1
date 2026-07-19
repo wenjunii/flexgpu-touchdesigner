@@ -5,7 +5,8 @@ Runs the complete non-publishing FlexShow source release verification.
 .DESCRIPTION
 Compiles Python sources, validates shipped profiles, runs the unit suite and
 synthetic benchmark, parses every PowerShell script, smoke-tests the machine
-initializer with synthetic hardware, and checks the exact public surface.
+initializer with synthetic hardware, verifies the default-off Depth Anything
+wrapper's accepted rehearsal defaults, and checks the exact public surface.
 The unit stage includes cold-reopen bridge imports, component-qualified
 TOP-to-POP attribute mappings, and native/fallback Windows process-identity
 regressions.
@@ -35,6 +36,7 @@ $publicChecker = Join-Path $PSScriptRoot 'Test-PublicSync.ps1'
 $initializer = Join-Path $PSScriptRoot 'Initialize-FlexShow.ps1'
 $startWrapper = Join-Path $PSScriptRoot 'Start-FlexShow.ps1'
 $recoverWrapper = Join-Path $PSScriptRoot 'Recover-FlexShow.ps1'
+$depthAnythingWrapper = Join-Path $PSScriptRoot 'Start-DepthAnythingWorker.ps1'
 
 function Invoke-CheckedPython {
     param(
@@ -103,6 +105,27 @@ function Test-PowerShellSources {
         throw "PowerShell parsing failed:`n$($failures -join [Environment]::NewLine)"
     }
     Write-Host "[FlexShow release] parsed $($files.Count) PowerShell script(s)"
+}
+
+function Test-DepthAnythingWrapperPreview {
+    Write-Host '[FlexShow release] Smoke-test Depth Anything wrapper accepted rehearsal defaults'
+    $previewOutput = & $depthAnythingWrapper -Backend mock -Capture mock
+    $preview = @($previewOutput)[-1] | ConvertFrom-Json
+    if ($preview.status -ne 'preview' -or
+        $preview.profile -ne '3080ti_16gb' -or
+        $preview.backend -ne 'mock' -or
+        $preview.capture -ne 'mock' -or
+        $preview.webcam_will_open -or
+        $preview.camera_backend -ne 'auto' -or
+        $preview.camera_resolution[0] -ne 640 -or
+        $preview.camera_resolution[1] -ne 480 -or
+        $preview.input_size -ne 384 -or
+        $preview.output_size[0] -ne 256 -or
+        $preview.output_size[1] -ne 144 -or
+        $preview.inference_hz -ne 5.0 -or
+        $preview.contains_rgb) {
+        throw 'Depth Anything wrapper preview does not match the accepted default-off 3080 rehearsal contract.'
+    }
 }
 
 function Test-InitializerSmoke {
@@ -464,6 +487,7 @@ try {
     }
 
     Test-PowerShellSources
+    Test-DepthAnythingWrapperPreview
     Test-InitializerSmoke `
         -TemporaryDirectory $temporaryDirectory `
         -LocalConfig $localConfig

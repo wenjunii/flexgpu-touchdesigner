@@ -713,7 +713,7 @@ def _apply_calibrated_contracts(root_comp, state):
         max(0.001, _number(_value(sensor, 'Interactionradius', 0.55), 0.55)))
     _set_shader_constant(
         root_comp, interaction_shader, 'forceGain', 'FLEXGPU_FORCE_GAIN',
-        max(0.0, _number(_value(sensor, 'Forcegain', 1.0), 1.0)))
+        max(0.0, _number(_value(sensor, 'Forcegain', 0.35), 0.35)))
     sensor_shader = 'WORKING_PIPELINE/SENSOR_INTERACTION/CALIBRATE_SENSOR_POSITION_PIXEL'
     for index in range(4):
         _set_shader_vec4_constant(
@@ -1670,10 +1670,30 @@ def _apply_camera_metadata_contract(root_comp, runtime, metadata):
     fx, fy, cx, cy = metadata['intrinsics_pixels']
     _set(reconstruction, 'Depthmode', 'metric')
     # The bridge unpacker has already converted packed uint16 depth to metres.
-    _set(reconstruction, 'Depthscale', 1.0)
-    _set(reconstruction, 'Depthbias', 0.0)
-    _set(reconstruction, 'Nearmetres', metadata['near_metres'])
-    _set(reconstruction, 'Farmetres', metadata['far_metres'])
+    # Generated scenes can nevertheless infer tens of metres of depth while
+    # the audience sensor occupies a room-scale volume. Keep raw metadata as
+    # the default, but allow an explicit installation calibration to map both
+    # sources into the same metre-scale interaction world.
+    installation_override = bool(
+        _value(reconstruction, 'Installationdepthoverride', False))
+    if installation_override:
+        depth_scale = max(1.0e-6, _number(
+            _value(reconstruction, 'Installationdepthscale', 1.0), 1.0))
+        depth_bias = _number(
+            _value(reconstruction, 'Installationdepthbias', 0.0), 0.0)
+        near_metres = max(1.0e-4, _number(
+            _value(reconstruction, 'Installationnear', 0.35), 0.35))
+        far_metres = max(near_metres + 1.0e-4, _number(
+            _value(reconstruction, 'Installationfar', 4.5), 4.5))
+    else:
+        depth_scale = 1.0
+        depth_bias = 0.0
+        near_metres = metadata['near_metres']
+        far_metres = metadata['far_metres']
+    _set(reconstruction, 'Depthscale', depth_scale)
+    _set(reconstruction, 'Depthbias', depth_bias)
+    _set(reconstruction, 'Nearmetres', near_metres)
+    _set(reconstruction, 'Farmetres', far_metres)
     _set(reconstruction, 'Fxnormalized', fx / width)
     _set(reconstruction, 'Fynormalized', fy / height)
     _set(reconstruction, 'Cxnormalized', cx / width)
@@ -1696,6 +1716,7 @@ def _apply_camera_metadata_contract(root_comp, runtime, metadata):
     state['source_camera_session_id'] = metadata['session_id']
     state['source_generation_id'] = metadata['generation_id']
     state['source_depth_scale_bias'] = list(metadata['depth_scale_bias'])
+    state['source_installation_depth_override'] = installation_override
     state['source_camera_metadata_status'] = 'accepted'
     state.pop('source_camera_metadata_error', None)
     runtime['source_camera_contract'] = dict(metadata)

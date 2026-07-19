@@ -31,6 +31,7 @@ class ReleaseScriptSourceTests(unittest.TestCase):
             "Parser]::ParseFile",
             "Initialize-FlexShow.ps1",
             "Smoke-test TouchDesigner version inventory and selectors",
+            "Smoke-test Depth Anything wrapper accepted rehearsal defaults",
             "Smoke-test Start/Recover readiness arguments",
             "-Scope Both -SelfTest",
             "-Scope History -Revision HEAD",

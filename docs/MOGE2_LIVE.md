@@ -139,6 +139,14 @@ configured, the interaction route stays disabled until that sensor contract is
 valid and disables itself again on mismatch or staleness; the adapter remains
 enabled so a later valid frame can recover it.
 
+If the generated scene occupies tens of inferred metres while the audience
+sensor occupies a room-scale volume, use the explicit
+`RECONSTRUCTION/Installationdepthoverride` controls to map generated depth into
+the interaction world. Scale, bias, near, and far remain local calibration
+values. With the override disabled, synchronized MoGe camera metadata is
+authoritative. With it enabled, the frame controller preserves the explicit
+installation mapping across every new synchronized result.
+
 ## First live test
 
 Use two PowerShell windows. Start TouchDesigner without a readiness wait,

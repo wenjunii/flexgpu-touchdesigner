@@ -300,6 +300,7 @@ class SensorBridgeConfig:
     result_udp: int = 9240
     stale_ms: float = 800.0
     flip_vertical: bool = True
+    mirror_horizontal: bool = True
     allow_trusted_network: bool = False
 
     def __post_init__(self) -> None:
@@ -323,6 +324,8 @@ class SensorBridgeConfig:
             raise SensorBridgeError("stale_ms is outside the supported range")
         if not isinstance(self.flip_vertical, bool):
             raise SensorBridgeError("flip_vertical must be boolean")
+        if not isinstance(self.mirror_horizontal, bool):
+            raise SensorBridgeError("mirror_horizontal must be boolean")
 
 
 @dataclass(frozen=True)
@@ -570,13 +573,16 @@ def sensor_result_to_touchdesigner_numpy(
     result: ImmutableSensorResult,
     *,
     flip_vertical: bool = True,
+    mirror_horizontal: bool = False,
 ) -> object:
-    """Convert top-left RGBA8 packed bytes to TD's float32 TOP orientation."""
+    """Convert packed bytes to TD orientation with optional audience mirroring."""
 
     if not isinstance(result, ImmutableSensorResult):
         raise SensorBridgeError("result must be an ImmutableSensorResult")
     if not isinstance(flip_vertical, bool):
         raise SensorBridgeError("flip_vertical must be boolean")
+    if not isinstance(mirror_horizontal, bool):
+        raise SensorBridgeError("mirror_horizontal must be boolean")
     try:
         import numpy as np
     except ImportError as exc:  # pragma: no cover - TouchDesigner ships NumPy
@@ -590,17 +596,52 @@ def sensor_result_to_touchdesigner_numpy(
     converted = array.astype(np.float32) * (1.0 / 255.0)
     if flip_vertical:
         converted = np.flip(converted, axis=0)
+    if mirror_horizontal:
+        converted = np.flip(converted, axis=1)
     return np.ascontiguousarray(converted)
 
 
-def derive_frame_state(result: ImmutableSensorResult) -> dict[str, Any]:
+def _normalized_intrinsics_for_upload(
+    result: ImmutableSensorResult,
+    *,
+    mirror_horizontal: bool = False,
+) -> tuple[float, float, float, float]:
+    """Return normalized intrinsics matching the locally oriented packed TOP."""
+
+    if not isinstance(result, ImmutableSensorResult):
+        raise SensorBridgeError("result must be an ImmutableSensorResult")
+    if not isinstance(mirror_horizontal, bool):
+        raise SensorBridgeError("mirror_horizontal must be boolean")
+    cx = result.intrinsics[2] / result.width
+    if mirror_horizontal:
+        cx = 1.0 - cx
+    return (
+        result.intrinsics[0] / result.width,
+        result.intrinsics[1] / result.height,
+        cx,
+        result.intrinsics[3] / result.height,
+    )
+
+
+def derive_frame_state(
+    result: ImmutableSensorResult,
+    *,
+    mirror_horizontal: bool = False,
+) -> dict[str, Any]:
     """Publish the worker's exact sensor calibration identity and capture key."""
 
     if not isinstance(result, ImmutableSensorResult):
         raise SensorBridgeError("result must be an ImmutableSensorResult")
+    if not isinstance(mirror_horizontal, bool):
+        raise SensorBridgeError("mirror_horizontal must be boolean")
     session_payload = (
         result.producer_session_id + "\0" + result.calibration_digest
     ).encode("utf-8")
+    if mirror_horizontal:
+        # Local mirroring changes sensor-space X. Give the temporal pipeline a
+        # distinct session identity without altering the worker's calibration
+        # digest or extending the strict FRAME_STATE schema.
+        session_payload += b"\0mirror-horizontal=1"
     session_id = "depth-anything-" + hashlib.sha256(session_payload).hexdigest()[:24]
     return {
         "version": FRAME_STATE_VERSION,
@@ -847,7 +888,9 @@ class SensorBridgeRuntime:
             raise SensorBridgeError("RESULT_PACKED does not expose copyNumpyArray()")
         copier(
             sensor_result_to_touchdesigner_numpy(
-                result, flip_vertical=self.config.flip_vertical
+                result,
+                flip_vertical=self.config.flip_vertical,
+                mirror_horizontal=self.config.mirror_horizontal,
             )
         )
         return True
@@ -875,6 +918,7 @@ class SensorBridgeRuntime:
             "reserved_result_udp": self.config.result_udp,
             "trusted_network_opt_in": self.config.allow_trusted_network,
             "stale_ms": float(self.config.stale_ms),
+            "mirror_horizontal": self.config.mirror_horizontal,
             "accepted_results": accepted,
             "rejected_results": rejected,
             "receiver_errors": receiver_errors,
@@ -1009,6 +1053,9 @@ def _component_config(bridge_comp: object) -> SensorBridgeConfig:
         result_udp=int(_parameter_value(bridge_comp, "Resultudp", 9240)),
         stale_ms=float(_parameter_value(bridge_comp, "Stalems", 800.0)),
         flip_vertical=_toggle_parameter_value(bridge_comp, "Flipvertical", True),
+        mirror_horizontal=_toggle_parameter_value(
+            bridge_comp, "Mirrorhorizontal", True
+        ),
         allow_trusted_network=_toggle_parameter_value(
             bridge_comp, "Allowtrustednetwork", False
         ),
@@ -1131,7 +1178,11 @@ def tick(bridge_comp: object) -> dict[str, Any]:
                         _GLOBAL_PUBLISHED_KEY = None
             else:
                 frame_written = _write_text_mapping(
-                    _child(bridge_comp, "FRAME_STATE"), derive_frame_state(result)
+                    _child(bridge_comp, "FRAME_STATE"),
+                    derive_frame_state(
+                        result,
+                        mirror_horizontal=config.mirror_horizontal,
+                    ),
                 ) if _child(bridge_comp, "FRAME_STATE") is not None else False
                 calibration_written = _update_constant(
                     _child(bridge_comp, "DEPTH_CALIBRATION"),
@@ -1144,11 +1195,9 @@ def tick(bridge_comp: object) -> dict[str, Any]:
                 )
                 intrinsics_written = _update_constant(
                     _child(bridge_comp, "INTRINSICS_NORMALIZED"),
-                    (
-                        result.intrinsics[0] / result.width,
-                        result.intrinsics[1] / result.height,
-                        result.intrinsics[2] / result.width,
-                        result.intrinsics[3] / result.height,
+                    _normalized_intrinsics_for_upload(
+                        result,
+                        mirror_horizontal=config.mirror_horizontal,
                     ),
                 )
                 if frame_written and calibration_written and intrinsics_written:

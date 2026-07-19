@@ -121,6 +121,7 @@ View these root outputs below `/project1/flexgpu/WORKING_PIPELINE`:
 | `OUT_SOURCE_COLOR` | Exact synchronized generated/source image before completion, for visual comparison |
 | `OUT_COLOR` | Fog/procedural color aligned with completed `OUT_POSITION` and consumed by the point renderer |
 | `OUT_INTERACTION` | RGB force and alpha occupancy texture |
+| `OUT_INTERACTION_DEBUG` | Display-only color view of interaction presence and signed force |
 
 These are inspectable development outputs. `OUT_INSTALLATION` is not projector
 mapping, and the eye textures are not submitted to a headset compositor.
@@ -291,6 +292,15 @@ The bridge is below `WORKING_PIPELINE/SENSOR_INTERACTION/DEPTH_SENSOR_ADAPTER`.
 It receives no RGB, publishes sensor-local XYZ/mask/confidence plus strict
 FRAME_STATE, and selects zero occupancy on stale, error, or disconnect. The
 existing `CALIBRATE_SENSOR_POSITION` remains the only sensor-to-world step.
+Mirror Horizontal is enabled for intuitive laptop rehearsal and changes packed
+depth, mask, confidence, principal point, and temporal session identity
+together. `OUT_INTERACTION_DEBUG` is the readable color view; raw
+`OUT_INTERACTION` remains signed force plus occupancy and may look dark.
+
+The live-accepted 3080 Ti Laptop rehearsal settings are 640x480 webcam capture,
+384 model input, 256x144 sensor output, 5 Hz inference, 0.55 m interaction
+radius, and 0.35 force gain. These are adjustable starting values, not a
+physical-sensor or multi-person venue calibration.
 
 A paid Depth Anything application or physical sensor may later replace the
 temporary worker. It can publish the same packed WorldBus frame, or a local
@@ -299,6 +309,14 @@ Spout/NDI/TOP/API adapter can feed the existing `OUT_POSITION`, `OUT_MASK`,
 interaction, installation, and VR outputs do not change. See
 [docs/DEPTH_ANYTHING_SENSOR.md](../docs/DEPTH_ANYTHING_SENSOR.md) for the
 profile fields, ports, privacy boundary, worker startup, and acceptance test.
+
+Generated MoGe depth and audience depth must occupy the same world scale before
+interaction can overlap. Raw synchronized MoGe camera metadata remains the
+default. For an installation-specific remap, enable
+`RECONSTRUCTION/Installationdepthoverride` and tune the explicit depth scale,
+bias, near, and far parameters in an ignored working TOE. Runtime camera
+metadata updates preserve that opt-in remap instead of overwriting it on every
+new generated frame.
 
 Local `.tox` loading remains off unless `source.auto_load_tox` is explicitly
 `true`. In that mode, `streamdiffusion_tox` must resolve to an existing local

@@ -225,6 +225,7 @@ class FakeBridge:
                 "Allowtrustednetwork": False,
                 "Stalems": 800.0,
                 "Flipvertical": True,
+                "Mirrorhorizontal": True,
                 "Resultvalid": False,
             }
         )
@@ -342,6 +343,11 @@ assert normalized(src) in {{normalized(entry) for entry in sys.path if isinstanc
             state, {"sensor": {"mode": "depth_sensor"}}, "sensor"
         )
         self.assertEqual(validated["calibration_id"], result.calibration_id)
+        mirrored_state = derive_frame_state(result, mirror_horizontal=True)
+        self.assertNotEqual(mirrored_state["session_id"], state["session_id"])
+        self.assertEqual(
+            mirrored_state["calibration_digest"], state["calibration_digest"]
+        )
 
         contains_rgb = sensor_frame().metadata.to_dict()
         contains_rgb["depth_anything_contains_rgb"] = True
@@ -371,6 +377,27 @@ assert normalized(src) in {{normalized(entry) for entry in sys.path if isinstanc
         self.assertEqual(top.arrays[0].dtype.name, "float32")
         expected = sensor_result_to_touchdesigner_numpy(result)
         self.assertEqual(expected.shape, (2, 2, 4))
+        unmirrored = sensor_result_to_touchdesigner_numpy(
+            result, flip_vertical=False, mirror_horizontal=False
+        )
+        mirrored = sensor_result_to_touchdesigner_numpy(
+            result, flip_vertical=False, mirror_horizontal=True
+        )
+        self.assertEqual(mirrored[:, 0, :].tolist(), unmirrored[:, -1, :].tolist())
+        self.assertEqual(mirrored[:, -1, :].tolist(), unmirrored[:, 0, :].tolist())
+        intrinsics = sensor_module._normalized_intrinsics_for_upload(
+            result, mirror_horizontal=False
+        )
+        mirrored_intrinsics = sensor_module._normalized_intrinsics_for_upload(
+            result, mirror_horizontal=True
+        )
+        self.assertEqual(mirrored_intrinsics[:2], intrinsics[:2])
+        self.assertAlmostEqual(mirrored_intrinsics[2], 1.0 - intrinsics[2])
+        self.assertEqual(mirrored_intrinsics[3], intrinsics[3])
+        with self.assertRaisesRegex(SensorBridgeError, "mirror_horizontal"):
+            sensor_result_to_touchdesigner_numpy(
+                result, mirror_horizontal=1  # type: ignore[arg-type]
+            )
         errors = []
 
         def cross_thread():
@@ -425,6 +452,8 @@ class ReceiverLifecycleTests(unittest.TestCase):
         self.assertTrue(selected.allow_trusted_network)
         with self.assertRaisesRegex(SensorBridgeError, "must be boolean"):
             SensorBridgeConfig(allow_trusted_network=1)  # type: ignore[arg-type]
+        with self.assertRaisesRegex(SensorBridgeError, "mirror_horizontal"):
+            SensorBridgeConfig(mirror_horizontal=1)  # type: ignore[arg-type]
         bridge = FakeBridge()
         bridge.par.Allowtrustednetwork.val = "false"
         with self.assertRaisesRegex(SensorBridgeError, "explicit boolean toggle"):

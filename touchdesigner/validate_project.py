@@ -48,6 +48,7 @@ REQUIRED_OPERATORS = (
     PIPELINE_PATH + "/OUT_LEFT_EYE",
     PIPELINE_PATH + "/OUT_RIGHT_EYE",
     PIPELINE_PATH + "/OUT_STEREO_PREVIEW",
+    PIPELINE_PATH + "/OUT_INTERACTION_DEBUG",
 )
 
 OUTPUTS = (
@@ -67,6 +68,7 @@ OUTPUTS = (
     "OUT_LEFT_EYE",
     "OUT_RIGHT_EYE",
     "OUT_STEREO_PREVIEW",
+    "OUT_INTERACTION_DEBUG",
 )
 
 EXPECTED_OPERATOR_TYPES = {
@@ -98,6 +100,7 @@ EXPECTED_OPERATOR_TYPES = {
     PIPELINE_PATH + "/OUT_LEFT_EYE": ("null",),
     PIPELINE_PATH + "/OUT_RIGHT_EYE": ("null",),
     PIPELINE_PATH + "/OUT_STEREO_PREVIEW": ("null",),
+    PIPELINE_PATH + "/OUT_INTERACTION_DEBUG": ("null",),
 }
 
 MAX_SIGNAL_SAMPLES = 262144
@@ -255,7 +258,12 @@ def _active_output_dimensions(state):
     expected = {}
     if _truthy(state.get("world_active")):
         geometry = _positive_state_int(state, "geometry_resolution")
-        for name in ("OUT_POSITION", "OUT_COLOR", "OUT_INTERACTION"):
+        for name in (
+            "OUT_POSITION",
+            "OUT_COLOR",
+            "OUT_INTERACTION",
+            "OUT_INTERACTION_DEBUG",
+        ):
             expected[name] = (geometry, geometry)
         if _truthy(state.get("installation_active")):
             surface_width = _positive_state_int(

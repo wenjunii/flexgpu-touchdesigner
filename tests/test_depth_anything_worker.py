@@ -51,7 +51,9 @@ class DepthAnythingWorkerTests(unittest.TestCase):
         self.assertEqual(payload["profiles"]["3080ti_16gb"]["input_size"], 384)
         self.assertEqual(payload["profiles"]["3080ti_16gb"]["output_width"], 256)
         self.assertEqual(payload["profiles"]["3080ti_16gb"]["output_height"], 144)
-        self.assertEqual(payload["profiles"]["3080ti_16gb"]["inference_hz"], 3.0)
+        self.assertEqual(payload["profiles"]["3080ti_16gb"]["inference_hz"], 5.0)
+        self.assertEqual(payload["profiles"]["4090"]["inference_hz"], 5.0)
+        self.assertEqual(payload["profiles"]["5090"]["inference_hz"], 5.0)
         self.assertEqual(
             payload["output_limits"],
             {"max_width": 640, "max_height": 480, "max_pixels": 307200},
@@ -71,7 +73,93 @@ class DepthAnythingWorkerTests(unittest.TestCase):
         self.assertEqual(plan["status"], "preview")
         self.assertEqual(plan["capture"], "mock")
         self.assertIs(plan["webcam_will_open"], False)
+        self.assertEqual(plan["camera_backend_requested"], "auto")
+        self.assertEqual(
+            plan["camera_backend_preferred"],
+            "msmf" if worker_module.os.name == "nt" else "any",
+        )
         self.assertEqual(plan["output_limits"]["max_pixels"], 307200)
+
+    def test_camera_backend_selection_prefers_msmf_on_windows(self) -> None:
+        fake_cv2 = mock.Mock(CAP_MSMF=1400, CAP_DSHOW=700, CAP_ANY=0)
+        self.assertEqual(
+            worker_module._preferred_camera_backend("auto", platform_name="nt"),
+            "msmf",
+        )
+        self.assertEqual(
+            worker_module._camera_backend_candidates(
+                fake_cv2, "auto", platform_name="nt"
+            ),
+            (("msmf", 1400), ("dshow", 700), ("any", 0)),
+        )
+        self.assertEqual(
+            worker_module._camera_backend_candidates(
+                fake_cv2, "dshow", platform_name="nt"
+            ),
+            (("dshow", 700),),
+        )
+        self.assertEqual(
+            worker_module._camera_backend_candidates(
+                fake_cv2, "auto", platform_name="posix"
+            ),
+            (("any", 0),),
+        )
+        with self.assertRaisesRegex(worker_module.CaptureError, "camera backend"):
+            worker_module._preferred_camera_backend("invalid")
+
+    def test_camera_auto_fallback_reports_selected_backend_and_open_timing(self) -> None:
+        class FakeCapture:
+            def __init__(self, opened: bool) -> None:
+                self.opened = opened
+                self.released = False
+                self.settings = []
+
+            def isOpened(self):
+                return self.opened
+
+            def set(self, key, value):
+                self.settings.append((key, value))
+                return True
+
+            def read(self):
+                return True, object()
+
+            def release(self):
+                self.released = True
+
+        failed = FakeCapture(False)
+        opened = FakeCapture(True)
+        fake_cv2 = mock.Mock(
+            CAP_PROP_FRAME_WIDTH=3,
+            CAP_PROP_FRAME_HEIGHT=4,
+            CAP_PROP_BUFFERSIZE=38,
+        )
+        fake_cv2.VideoCapture.side_effect = [failed, opened]
+        with (
+            mock.patch.dict(sys.modules, {"cv2": fake_cv2}),
+            mock.patch.object(
+                worker_module,
+                "_camera_backend_candidates",
+                return_value=(("msmf", 1400), ("dshow", 700)),
+            ),
+        ):
+            camera = worker_module.OpenCVCamera(
+                index=0, width=640, height=480, backend="auto"
+            )
+        try:
+            diagnostics = camera.diagnostics
+            self.assertTrue(failed.released)
+            self.assertEqual(diagnostics["camera_backend_requested"], "auto")
+            self.assertEqual(diagnostics["camera_backend_selected"], "dshow")
+            self.assertGreaterEqual(diagnostics["camera_open_ms"], 0.0)
+            self.assertEqual(
+                [attempt["backend"] for attempt in diagnostics["camera_open_attempts"]],
+                ["msmf", "dshow"],
+            )
+            self.assertEqual(len(opened.settings), 3)
+        finally:
+            camera.release()
+        self.assertTrue(opened.released)
 
     def test_worker_rejects_output_dimensions_beyond_receiver_limits(self) -> None:
         mapper = worker_module.FrozenPercentileMapper(
@@ -215,10 +303,90 @@ class DepthAnythingWorkerTests(unittest.TestCase):
             self.assertEqual(report["backend_load_count"], 1)
             self.assertEqual(report["backend_inference_count"], 3)
             self.assertIs(report["contains_rgb"], False)
+            self.assertEqual(report["camera_backend_selected"], "synthetic")
+            self.assertEqual(report["camera_open_ms"], 0.0)
             self.assertEqual(frame.metadata.pixel_format, "rgba8")
         finally:
             service.close()
             sink.close()
+
+    def test_webcam_refreshes_verified_result_connection_before_capture(self) -> None:
+        events = []
+
+        class FakeSender:
+            def __init__(self, ordinal: int) -> None:
+                self.ordinal = ordinal
+
+            def close(self) -> None:
+                events.append(f"close-{self.ordinal}")
+
+        class FakeSource:
+            source_name = "webcam"
+            diagnostics = {
+                "camera_backend_requested": "auto",
+                "camera_backend_selected": "msmf",
+                "camera_open_ms": 27_000.0,
+            }
+
+            def release(self) -> None:
+                events.append("source-release")
+
+        class FakePump:
+            def __init__(self, source) -> None:
+                self.source = source
+                events.append("pump-construct")
+
+            def start(self):
+                events.append("pump-start")
+                return self
+
+            def close(self) -> None:
+                events.append("pump-close")
+
+        senders = []
+
+        def make_sender(*_args, **_kwargs):
+            sender = FakeSender(len(senders) + 1)
+            senders.append(sender)
+            events.append(f"connect-{sender.ordinal}")
+            return sender
+
+        def make_source():
+            events.append("camera-open")
+            return FakeSource()
+
+        service = worker_module.SensorWorkerService(
+            mock.sentinel.worker,
+            make_source,
+            output_host="127.0.0.1",
+            output_tcp_port=9241,
+        )
+        with (
+            mock.patch.object(worker_module, "TCPFrameSender", side_effect=make_sender),
+            mock.patch.object(worker_module, "CapturePump", FakePump),
+        ):
+            service.start()
+            self.assertEqual(
+                events,
+                [
+                    "connect-1",
+                    "camera-open",
+                    "close-1",
+                    "connect-2",
+                    "pump-construct",
+                    "pump-start",
+                ],
+            )
+            self.assertIs(service.sender, senders[1])
+            self.assertTrue(service.result_connection_refreshed_after_camera_open)
+            self.assertIs(
+                service.capture_diagnostics[
+                    "result_connection_refreshed_after_camera_open"
+                ],
+                True,
+            )
+            service.close()
+        self.assertEqual(events[-2:], ["pump-close", "close-2"])
 
     def test_unexpected_capture_thread_exceptions_close_service_handoff(self) -> None:
         class FailedCapture:

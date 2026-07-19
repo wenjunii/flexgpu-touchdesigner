@@ -56,6 +56,7 @@ DEFAULT_CACHE_DIR = RUNTIME_ROOT / "depth-anything-cache"
 DEFAULT_OUTPUT_HOST = "127.0.0.1"
 DEFAULT_OUTPUT_TCP_PORT = 9241
 RESERVED_OUTPUT_UDP_PORT = 9240
+CAMERA_BACKENDS = ("auto", "msmf", "dshow", "any")
 
 
 class WorkerError(RuntimeError):
@@ -95,16 +96,16 @@ PROFILES: dict[str, WorkerProfile] = {
         input_size=384,
         output_width=256,
         output_height=144,
-        inference_hz=3.0,
+        inference_hz=5.0,
         precision="fp16",
-        note="Conservative RTX 3080 Ti Laptop starting profile; measure with StreamDiffusion running.",
+        note="Live-accepted RTX 3080 Ti Laptop rehearsal baseline; fall back to 3 Hz if the combined workload is thermally unstable.",
     ),
     "4090": WorkerProfile(
         tier="4090",
         input_size=384,
         output_width=256,
         output_height=144,
-        inference_hz=3.0,
+        inference_hz=5.0,
         precision="fp16",
         note="Same privacy-first baseline; raise rate only after a combined-workload soak.",
     ),
@@ -113,7 +114,7 @@ PROFILES: dict[str, WorkerProfile] = {
         input_size=384,
         output_width=256,
         output_height=144,
-        inference_hz=3.0,
+        inference_hz=5.0,
         precision="fp16",
         note="Same deterministic baseline; higher settings remain an explicit benchmark decision.",
     ),
@@ -580,25 +581,105 @@ class LatestCaptureSlot:
             }
 
 
+def _preferred_camera_backend(
+    requested: str, *, platform_name: Optional[str] = None
+) -> str:
+    """Return the dependency-free backend selected first for a preview."""
+
+    if requested not in CAMERA_BACKENDS:
+        raise CaptureError(
+            "camera backend must be one of: " + ", ".join(CAMERA_BACKENDS)
+        )
+    if requested != "auto":
+        return requested
+    platform = os.name if platform_name is None else platform_name
+    return "msmf" if platform == "nt" else "any"
+
+
+def _camera_backend_candidates(
+    cv2: Any, requested: str, *, platform_name: Optional[str] = None
+) -> tuple[tuple[str, int], ...]:
+    """Resolve a bounded OpenCV backend order without opening the camera."""
+
+    preferred = _preferred_camera_backend(requested, platform_name=platform_name)
+    names = (
+        ("msmf", "dshow", "any")
+        if requested == "auto" and preferred == "msmf"
+        else (preferred,)
+    )
+    attributes = {
+        "msmf": "CAP_MSMF",
+        "dshow": "CAP_DSHOW",
+        "any": "CAP_ANY",
+    }
+    candidates = []
+    for name in names:
+        value = getattr(cv2, attributes[name], None)
+        if isinstance(value, int) and not isinstance(value, bool):
+            candidates.append((name, value))
+    if not candidates:
+        raise DependencyError(
+            "OpenCV does not expose the requested camera backend: " + requested
+        )
+    return tuple(candidates)
+
+
 class OpenCVCamera:
     """Volatile webcam source; this class exposes no recording method."""
 
     source_name = "webcam"
 
-    def __init__(self, *, index: int, width: int, height: int) -> None:
+    def __init__(
+        self, *, index: int, width: int, height: int, backend: str = "auto"
+    ) -> None:
         try:
             import cv2
         except ImportError as exc:
             raise DependencyError("opencv-python is required for webcam capture") from exc
         self.cv2 = cv2
-        backend = getattr(cv2, "CAP_DSHOW", 0) if os.name == "nt" else 0
-        self.capture = cv2.VideoCapture(index, backend)
-        if not self.capture.isOpened():
-            self.capture.release()
-            raise CaptureError(f"unable to open webcam index {index}")
+        self.backend_requested = backend
+        attempts = []
+        selected_capture = None
+        selected_backend = None
+        opened_at = time.perf_counter()
+        for backend_name, backend_id in _camera_backend_candidates(cv2, backend):
+            attempt_started = time.perf_counter()
+            capture = cv2.VideoCapture(index, backend_id)
+            attempt_ms = (time.perf_counter() - attempt_started) * 1000.0
+            opened = bool(capture.isOpened())
+            attempts.append(
+                {
+                    "backend": backend_name,
+                    "open_ms": round(attempt_ms, 3),
+                    "opened": opened,
+                }
+            )
+            if opened:
+                selected_capture = capture
+                selected_backend = backend_name
+                break
+            capture.release()
+        self.open_ms = round((time.perf_counter() - opened_at) * 1000.0, 3)
+        self.open_attempts = tuple(attempts)
+        if selected_capture is None or selected_backend is None:
+            attempted = ", ".join(item["backend"] for item in attempts) or "none"
+            raise CaptureError(
+                f"unable to open webcam index {index}; attempted backends: {attempted}"
+            )
+        self.capture = selected_capture
+        self.backend_selected = selected_backend
         self.capture.set(cv2.CAP_PROP_FRAME_WIDTH, float(width))
         self.capture.set(cv2.CAP_PROP_FRAME_HEIGHT, float(height))
         self.capture.set(cv2.CAP_PROP_BUFFERSIZE, 1.0)
+
+    @property
+    def diagnostics(self) -> dict[str, Any]:
+        return {
+            "camera_backend_requested": self.backend_requested,
+            "camera_backend_selected": self.backend_selected,
+            "camera_open_ms": self.open_ms,
+            "camera_open_attempts": [dict(item) for item in self.open_attempts],
+        }
 
     def read(self) -> tuple[bool, Any]:
         return self.capture.read()
@@ -640,6 +721,15 @@ class SyntheticCapture:
 
     def release(self) -> None:
         self.closed = True
+
+    @property
+    def diagnostics(self) -> dict[str, Any]:
+        return {
+            "camera_backend_requested": "synthetic",
+            "camera_backend_selected": "synthetic",
+            "camera_open_ms": 0.0,
+            "camera_open_attempts": [],
+        }
 
 
 class CapturePump:
@@ -902,6 +992,8 @@ class SensorWorkerService:
         self.stale_after_ns = stale_after_ms * 1_000_000
         self.sender: Optional[TCPFrameSender] = None
         self.capture: Optional[CapturePump] = None
+        self.capture_diagnostics: dict[str, Any] = {}
+        self.result_connection_refreshed_after_camera_open = False
         self.stale_captures = 0
         self.timeout_count = 0
 
@@ -909,12 +1001,31 @@ class SensorWorkerService:
         if self.sender is not None or self.capture is not None:
             raise WorkerError("sensor service is already started")
         # If TouchDesigner is not receiving, fail before opening the webcam.
+        # Camera backends can spend most of the receiver's idle timeout inside
+        # VideoCapture(). Refresh that verified connection after the device is
+        # open, but before the capture pump reads any RGB frame.
         sender = TCPFrameSender(self.output_host, self.output_tcp_port)
+        source = None
         try:
             source = self.capture_factory()
+            diagnostics = getattr(source, "diagnostics", {})
+            if isinstance(diagnostics, Mapping):
+                self.capture_diagnostics = dict(diagnostics)
+            if getattr(source, "source_name", None) == "webcam":
+                sender.close()
+                sender = TCPFrameSender(self.output_host, self.output_tcp_port)
+                self.result_connection_refreshed_after_camera_open = True
+                self.capture_diagnostics[
+                    "result_connection_refreshed_after_camera_open"
+                ] = True
             capture = CapturePump(source).start()
         except Exception:
             sender.close()
+            if source is not None:
+                try:
+                    source.release()
+                except Exception:
+                    pass
             raise
         self.sender = sender
         self.capture = capture
@@ -970,7 +1081,7 @@ class SensorWorkerService:
             if output is not None:
                 self.sender.send(output)
                 sent += 1
-        return {
+        report = {
             "status": "ok",
             "inferred_captures": attempts,
             "sent_frames": sent,
@@ -984,6 +1095,8 @@ class SensorWorkerService:
             "elapsed_s": time.monotonic() - began,
             "contains_rgb": False,
         }
+        report.update(self.capture_diagnostics)
+        return report
 
     def close(self) -> None:
         if self.capture is not None:
@@ -1031,6 +1144,7 @@ def _capture_factory(args: argparse.Namespace, capture_name: str) -> Callable[[]
         index=args.camera_index,
         width=args.camera_width,
         height=args.camera_height,
+        backend=args.camera_backend,
     )
 
 
@@ -1058,6 +1172,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--device", default="cuda:0")
     serve.add_argument("--warmup", type=int, default=1)
     serve.add_argument("--camera-index", type=int, default=0)
+    serve.add_argument("--camera-backend", choices=CAMERA_BACKENDS, default="auto")
     serve.add_argument("--camera-width", type=int, default=1280)
     serve.add_argument("--camera-height", type=int, default=720)
     serve.add_argument("--input-size", type=int)
@@ -1097,6 +1212,8 @@ def _serve_preview(args: argparse.Namespace, profile: WorkerProfile) -> dict[str
         "capture": capture_name,
         "webcam_will_open": bool(args.start and capture_name == "webcam"),
         "camera_index": args.camera_index,
+        "camera_backend_requested": args.camera_backend,
+        "camera_backend_preferred": _preferred_camera_backend(args.camera_backend),
         "input_size": args.input_size or profile.input_size,
         "output_size": [
             profile.output_width if args.output_width is None else args.output_width,
@@ -1219,15 +1336,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         try:
             service.start()
-            _print(
-                {
-                    "status": "ready",
-                    "output_tcp": [args.output_host, args.output_tcp_port],
-                    "capture": capture_name,
-                    "producer_session_id": worker.producer_session_id,
-                    "contains_rgb": False,
-                }
-            )
+            ready = {
+                "status": "ready",
+                "output_tcp": [args.output_host, args.output_tcp_port],
+                "capture": capture_name,
+                "producer_session_id": worker.producer_session_id,
+                "contains_rgb": False,
+            }
+            ready.update(service.capture_diagnostics)
+            _print(ready)
             _print(service.serve(max_frames=args.max_frames, duration_s=args.duration_s))
             return 0
         finally:

@@ -60,6 +60,11 @@ class DepthAnythingWorkerScriptSourceTests(unittest.TestCase):
             "MAX_PIXELS",
             "_validate_output_dimensions",
             '"opened": False',
+            "CAP_MSMF",
+            "--camera-backend",
+            "camera_backend_selected",
+            "camera_open_ms",
+            "result_connection_refreshed_after_camera_open",
         ):
             self.assertIn(marker, source)
 

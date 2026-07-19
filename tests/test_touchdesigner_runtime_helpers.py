@@ -182,6 +182,9 @@ def complete_runtime_root() -> FakeRoot:
             "RECONSTRUCTION", Geometryresolution=384,
             Depthmode="normalized", Depthscale=1.0, Depthbias=0.0,
             Nearmetres=0.35, Farmetres=4.5,
+            Installationdepthoverride=False,
+            Installationdepthscale=1.0, Installationdepthbias=0.0,
+            Installationnear=0.35, Installationfar=4.5,
             Fxnormalized=0.0, Fynormalized=0.0,
             Cxnormalized=0.5, Cynormalized=0.5,
             Cameratoworld0="1 0 0 0", Cameratoworld1="0 1 0 0",
@@ -198,7 +201,7 @@ def complete_runtime_root() -> FakeRoot:
         ),
         "WORKING_PIPELINE/SENSOR_INTERACTION": FakeNode(
             "SENSOR_INTERACTION", Mode="simulated", Interactionradius=0.55,
-            Forcegain=1.0, Sensoragems=-1.0, Sensorframeid=-1,
+            Forcegain=0.35, Sensoragems=-1.0, Sensorframeid=-1,
             Sensortoworld0="1 0 0 0", Sensortoworld1="0 1 0 0",
             Sensortoworld2="0 0 1 0", Sensortoworld3="0 0 0 1",
         ),
@@ -1027,6 +1030,48 @@ class TouchDesignerRuntimeHelperTests(unittest.TestCase):
         ).text
         self.assertIn("const int depthMode = 1; // FLEXGPU_DEPTH_MODE", shader)
         self.assertIn("const float depthScale = 1", shader)
+
+    def test_camera_metadata_preserves_installation_depth_override(self) -> None:
+        helpers = load_helpers()
+        root = complete_runtime_root()
+        reconstruction = root.op("WORKING_PIPELINE/RECONSTRUCTION")
+        reconstruction.par.Installationdepthoverride.val = True
+        reconstruction.par.Installationdepthscale.val = 0.0585
+        reconstruction.par.Installationdepthbias.val = 0.098
+        reconstruction.par.Installationnear.val = 0.35
+        reconstruction.par.Installationfar.val = 4.5
+        frame = self.frame_state(timestamp_ns=200_000_000_000)
+        frame_node = FakeTextNode("frame_state", json.dumps(frame))
+        camera_node = FakeTextNode(
+            "camera_metadata", json.dumps(self.camera_metadata(frame))
+        )
+        frame_node.isTOP = camera_node.isTOP = False
+        root.nodes.update({"frame_state": frame_node, "camera_metadata": camera_node})
+        state = quiet_apply(
+            helpers, root,
+            {"source": {
+                "mode": "demo",
+                "frame_state_operator": "frame_state",
+                "camera_metadata_operator": "camera_metadata",
+            }},
+        )
+
+        with (
+            mock.patch.object(helpers["time"], "perf_counter", return_value=10.0),
+            mock.patch.object(helpers["time"], "time_ns", return_value=200_001_000_000),
+        ):
+            helpers["tick"](root)
+
+        self.assertTrue(state["source_installation_depth_override"])
+        self.assertAlmostEqual(reconstruction.par.Depthscale.val, 0.0585)
+        self.assertAlmostEqual(reconstruction.par.Depthbias.val, 0.098)
+        self.assertAlmostEqual(reconstruction.par.Nearmetres.val, 0.35)
+        self.assertAlmostEqual(reconstruction.par.Farmetres.val, 4.5)
+        shader = root.op(
+            "WORKING_PIPELINE/RECONSTRUCTION/depth_to_position_PIXEL"
+        ).text
+        self.assertIn("const float depthScale = 0.0585", shader)
+        self.assertIn("const float depthBias = 0.098", shader)
 
         with (
             mock.patch.object(helpers["time"], "perf_counter", return_value=10.01),
