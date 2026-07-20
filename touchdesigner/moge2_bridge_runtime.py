@@ -149,6 +149,7 @@ _IDENTITY = (
     0.0, 0.0, 0.0, 1.0,
 )
 _KNOWN_PROFILES = frozenset(("3080ti_16gb", "4090", "5090"))
+_KNOWN_GEOMETRY_PROVIDERS = frozenset(("moge2", "depth_anything"))
 _MAX_ISSUED_REQUESTS = 128
 
 
@@ -237,6 +238,7 @@ def _safe_text(value: object, label: str, maximum_bytes: int = 128) -> str:
 class BridgeConfig:
     """Network and cadence settings mirrored by ``MOGE2_BRIDGE`` parameters."""
 
+    provider: str = "moge2"
     profile: str = "3080ti_16gb"
     worker_host: str = "127.0.0.1"
     worker_input_tcp: int = 9211
@@ -248,6 +250,8 @@ class BridgeConfig:
     flip_vertical: bool = True
 
     def __post_init__(self) -> None:
+        if self.provider not in _KNOWN_GEOMETRY_PROVIDERS:
+            raise BridgeRuntimeError("geometry provider is unsupported")
         if self.profile not in _KNOWN_PROFILES:
             raise BridgeRuntimeError("profile is unsupported")
         object.__setattr__(self, "worker_host", _host(self.worker_host, "worker_host"))
@@ -306,6 +310,7 @@ class ImmutableAtlasResult:
     profile: str
     original_source_width: int
     original_source_height: int
+    geometry_provider: str
 
     @property
     def source_width(self) -> int:
@@ -366,6 +371,9 @@ def validate_moge2_result_frame(
     if source_pixels > limits.max_source_pixels:
         raise BridgeRuntimeError("result source plane exceeds bridge pixel limit")
     extensions = metadata.extensions
+    geometry_provider = str(extensions.get("geometry_provider", "moge2"))
+    if geometry_provider not in _KNOWN_GEOMETRY_PROVIDERS:
+        raise BridgeRuntimeError("geometry_provider is unsupported")
     expected_strings = {
         "moge2_atlas_contract": ATLAS_CONTRACT,
         "moge2_depth_encoding": DEPTH_ENCODING,
@@ -490,6 +498,7 @@ def validate_moge2_result_frame(
         profile=profile,
         original_source_width=original_width,
         original_source_height=original_height,
+        geometry_provider=geometry_provider,
     )
 
 
@@ -630,9 +639,20 @@ def _conservative_identifier(value: str, prefix: str) -> str:
     return prefix + "-" + digest
 
 
-def _consumer_session_id(producer_session_id: str, calibration_digest: str) -> str:
+def _provider_metadata_prefix(geometry_provider: str) -> str:
+    if geometry_provider == "depth_anything":
+        return "depth-anything"
+    return "moge2"
+
+
+def _consumer_session_id(
+    producer_session_id: str,
+    calibration_digest: str,
+    geometry_provider: str,
+) -> str:
     payload = (producer_session_id + "\0" + calibration_digest).encode("utf-8")
-    return "moge2-session-" + hashlib.sha256(payload).hexdigest()[:24]
+    prefix = _provider_metadata_prefix(geometry_provider)
+    return prefix + "-session-" + hashlib.sha256(payload).hexdigest()[:24]
 
 
 def derive_result_mappings(
@@ -661,8 +681,13 @@ def derive_result_mappings(
         sort_keys=True,
     ).encode("ascii")
     calibration_digest = hashlib.sha256(canonical).hexdigest()
-    calibration_id = "moge2-" + calibration_digest[:16]
-    session_id = _consumer_session_id(result.producer_session_id, calibration_digest)
+    prefix = _provider_metadata_prefix(result.geometry_provider)
+    calibration_id = prefix + "-" + calibration_digest[:16]
+    session_id = _consumer_session_id(
+        result.producer_session_id,
+        calibration_digest,
+        result.geometry_provider,
+    )
     frame_state = {
         "version": FRAME_STATE_VERSION,
         "session_id": session_id,
@@ -921,6 +946,11 @@ class BridgeRuntime:
                     self._rejected_results += 1
                 self._record_error("result_rejected")
                 continue
+            if result.geometry_provider != self.config.provider:
+                with self._state_lock:
+                    self._rejected_results += 1
+                self._record_error("foreign_geometry_provider")
+                continue
             with self._state_lock:
                 source_session = self._session_id
                 highest_source_frame = self._highest_accepted_source_frame_id
@@ -966,6 +996,8 @@ class BridgeRuntime:
                 self._latest_result = result
                 self._latest_received_monotonic_ns = local_monotonic
                 self._highest_accepted_source_frame_id = result.source_frame_id
+                if self._last_error == "send_failed":
+                    self._last_error = "none"
                 for issued_frame_id in tuple(self._issued_requests):
                     if issued_frame_id <= result.source_frame_id:
                         del self._issued_requests[issued_frame_id]
@@ -1034,6 +1066,7 @@ class BridgeRuntime:
             "moge2_request_contract": REQUEST_CONTRACT,
             "moge2_profile": self.config.profile,
             "moge2_source_orientation": "top_left" if selected_flip else "touchdesigner_native",
+            "geometry_provider": self.config.provider,
         }
         frame = make_frame(metadata, payload, _worldbus_limits(self.limits))
         queued = False
@@ -1155,6 +1188,7 @@ class BridgeRuntime:
             bridge_state = "running" if stored_latest is None or result_fresh else "stale"
         return {
             "state": bridge_state,
+            "geometry_provider": self.config.provider,
             "profile": self.config.profile,
             "capture_fps": float(self.config.capture_fps),
             "sent_frames": sent,
@@ -1164,6 +1198,12 @@ class BridgeRuntime:
             "outgoing_pending": int(queue_stats.get("pending", 0)),
             "latest_result_frame_id": -1 if latest is None else latest.frame_id,
             "latest_source_frame_id": -1 if latest is None else latest.source_frame_id,
+            "last_accepted_result_frame_id": (
+                -1 if stored_latest is None else stored_latest.frame_id
+            ),
+            "last_accepted_source_frame_id": (
+                -1 if stored_latest is None else stored_latest.source_frame_id
+            ),
             "result_fresh": result_fresh,
             "result_age_ms": -1.0 if result_age_ns is None else result_age_ns / 1_000_000.0,
             "last_error": last_error,
@@ -1286,6 +1326,7 @@ def _component_config(bridge_comp: object) -> BridgeConfig:
     if isinstance(capture_fps, int):
         capture_fps = float(capture_fps)
     return BridgeConfig(
+        provider=str(_parameter_value(bridge_comp, "Provider", "moge2")),
         profile=str(_parameter_value(bridge_comp, "Profile", "3080ti_16gb")),
         worker_host=str(_parameter_value(bridge_comp, "Workerhost", "127.0.0.1")),
         worker_input_tcp=int(_parameter_value(bridge_comp, "Workerinputtcp", 9211)),
@@ -1312,6 +1353,20 @@ _GLOBAL_DISABLED_STATUS = {
     "detail": "enable the bridge first, then start the external worker",
     "last_error": "none",
 }
+
+
+def _runtime_detail(*, published: bool, current: Mapping[str, Any]) -> str:
+    """Describe worker/result lifecycle separately from atlas upload failures."""
+
+    if published:
+        return "synchronized atlas uploaded and ready"
+    if bool(current.get("result_fresh", False)):
+        return "fresh result received; waiting for confirmed atlas upload"
+    if int(current.get("accepted_results", 0)) > 0:
+        return "last synchronized atlas expired; keep the external worker running"
+    if str(current.get("last_error", "none")) == "send_failed":
+        return "worker input is offline; start the external worker after the bridge"
+    return "waiting for the first synchronized result from the external worker"
 
 
 def tick(bridge_comp: object) -> dict[str, Any]:
@@ -1475,12 +1530,7 @@ def tick(bridge_comp: object) -> dict[str, Any]:
         )
     _set_parameter(bridge_comp, "Resultvalid", published)
     current = runtime.status()
-    detail = (
-        "synchronized atlas uploaded and ready"
-        if published
-        else "waiting for confirmed synchronized atlas upload"
-    )
-    current["detail"] = detail
+    current["detail"] = _runtime_detail(published=published, current=current)
     status_dat = _child(bridge_comp, "STATUS")
     if status_dat is not None:
         _write_status(status_dat, current)

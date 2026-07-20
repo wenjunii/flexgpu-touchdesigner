@@ -2,9 +2,11 @@
 
 This integration temporarily turns a laptop webcam into the audience-sensor
 boundary while no physical depth sensor is available. It is optional and
-default-off. It is **not** the generated-world depth path: MoGe-2 reconstructs
-the StreamDiffusion image, while this worker estimates only audience
-interaction depth.
+default-off. This particular worker is **not** the generated-world depth path:
+it estimates only audience interaction depth. A second, webcam-free worker
+uses the same pinned V2 Small model as a selectable StreamDiffusion-image
+geometry provider; see
+[DEPTH_ANYTHING_GEOMETRY.md](../../docs/DEPTH_ANYTHING_GEOMETRY.md).
 
 The camera and model run in an isolated external process. Camera RGB remains
 in volatile process memory. The worker has no RGB recording path and sends

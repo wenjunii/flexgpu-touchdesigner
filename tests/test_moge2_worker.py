@@ -8,6 +8,7 @@ import time
 import unittest
 from dataclasses import asdict
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,6 +59,7 @@ def source_frame(
     generation_id: str = "generation-a",
     producer_session_id: str = "stream-session-a",
     private_extensions: bool = False,
+    geometry_provider: str = "moge2",
 ):
     payload = bytes(
         component
@@ -82,6 +84,7 @@ def source_frame(
         "camera_to_world": IDENTITY,
         "generation_id": generation_id,
         "producer_session_id": producer_session_id,
+        "geometry_provider": geometry_provider,
     }
     if private_extensions:
         metadata.update(
@@ -311,6 +314,55 @@ class MoGe2WorkerTests(unittest.TestCase):
                 output_tcp_port=0,
             )
 
+    def test_result_receiver_connection_retries_during_touchdesigner_startup(self) -> None:
+        sender = mock.Mock()
+        service = worker_module.MoGe2WorkerService(
+            self.make_worker(),
+            input_host="127.0.0.1",
+            input_tcp_port=0,
+            input_udp_port=0,
+            output_host="127.0.0.1",
+            output_tcp_port=9221,
+            output_connect_timeout_s=2.0,
+            output_connect_retry_s=0.01,
+        )
+        try:
+            with (
+                mock.patch.object(
+                    worker_module, "TCPFrameSender",
+                    side_effect=[ConnectionRefusedError(), sender],
+                ) as connect,
+                mock.patch.object(worker_module.time, "sleep") as sleep,
+            ):
+                self.assertIs(service.start(), service)
+            self.assertIs(service.sender, sender)
+            self.assertEqual(connect.call_count, 2)
+            sleep.assert_called_once()
+        finally:
+            service.close()
+
+    def test_result_receiver_timeout_has_actionable_error(self) -> None:
+        service = worker_module.MoGe2WorkerService(
+            self.make_worker(),
+            input_host="127.0.0.1",
+            input_tcp_port=0,
+            input_udp_port=0,
+            output_host="127.0.0.1",
+            output_tcp_port=9221,
+            output_connect_timeout_s=0.0,
+        )
+        with (
+            mock.patch.object(
+                worker_module, "TCPFrameSender",
+                side_effect=ConnectionRefusedError(),
+            ),
+            self.assertRaisesRegex(
+                worker_module.WorkerError,
+                "select the matching geometry provider",
+            ),
+        ):
+            service.start()
+
     @unittest.skipUnless(HAS_RUNTIME_ARRAYS, "optional NumPy/Pillow runtime is absent")
     def test_invalid_depth_and_mask_are_sanitized_before_packing(self) -> None:
         worker = self.make_worker(DirtyBackend())
@@ -336,6 +388,73 @@ class MoGe2WorkerTests(unittest.TestCase):
         atlas = make_frame(metadata, source.payload * 2)
         with self.assertRaisesRegex(worker_module.WorkerError, "rgba8"):
             self.make_worker().process_frame(atlas)
+
+    @unittest.skipUnless(HAS_RUNTIME_ARRAYS, "optional NumPy/Pillow runtime is absent")
+    def test_depth_anything_provider_identity_uses_the_same_atomic_atlas(self) -> None:
+        worker = worker_module.MoGe2Worker(
+            worker_module.MockBackend(),
+            profile=worker_module.PROFILES["3080ti_16gb"],
+            provider="depth_anything",
+            producer_session_id="depth-anything-worker-test",
+        )
+        output = worker.process_frame(
+            source_frame(1, geometry_provider="depth_anything")
+        )
+        self.assertEqual(
+            output.metadata.extensions["geometry_provider"], "depth_anything"
+        )
+        self.assertEqual(output.metadata.pixel_format, "rgba8_atlas")
+        with self.assertRaisesRegex(worker_module.WorkerError, "provider"):
+            worker.process_frame(source_frame(2, geometry_provider="moge2"))
+
+    @unittest.skipUnless(HAS_RUNTIME_ARRAYS, "optional NumPy/Pillow runtime is absent")
+    def test_depth_anything_geometry_backend_freezes_relative_depth(self) -> None:
+        import numpy as np
+
+        module = worker_module._load_depth_anything_module()
+
+        class RelativeBackend:
+            load_count = 1
+            inference_count = 0
+
+            def infer(self, rgb, *, input_size, output_width, output_height):
+                del rgb, input_size
+                self.inference_count += 1
+                return np.linspace(
+                    0.1, 1.0, output_width * output_height, dtype=np.float32
+                ).reshape(output_height, output_width)
+
+        backend = object.__new__(worker_module.DepthAnythingGeometryBackend)
+        backend._module = module
+        backend._backend = RelativeBackend()
+        backend.input_size = 384
+        backend.default_fov_x_deg = 60.0
+        backend._mapper_arguments = {
+            "mode": "session_frozen",
+            "percentile_low": 2.0,
+            "percentile_high": 98.0,
+            "calibration_frames": 1,
+            "raw_order": "near_is_larger",
+            "pseudo_near_m": 0.5,
+            "pseudo_far_m": 4.0,
+            "foreground_far_m": 4.0,
+        }
+        backend._mapper = module.FrozenPercentileMapper(
+            **backend._mapper_arguments
+        )
+        output = backend.infer(
+            np.zeros((8, 8, 3), dtype=np.uint8),
+            num_tokens=1200,
+            fov_x_deg=None,
+        )
+        self.assertEqual(output.depth.shape, (8, 8))
+        self.assertEqual(output.mask.shape, (8, 8))
+        self.assertTrue(backend.calibration_locked)
+        self.assertEqual(backend.calibration_observed_frames, 1)
+        self.assertAlmostEqual(float(output.intrinsics[0, 0]), 0.8660254, places=5)
+        backend.begin_source_session()
+        self.assertFalse(backend.calibration_locked)
+        self.assertEqual(backend.calibration_observed_frames, 0)
 
     @unittest.skipUnless(HAS_RUNTIME_ARRAYS, "optional NumPy/Pillow runtime is absent")
     def test_tcp_loopback_uses_newest_input_and_persistent_backend(self) -> None:

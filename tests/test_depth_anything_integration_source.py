@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 INITIALIZE = ROOT / "scripts" / "Initialize-DepthAnything.ps1"
 START = ROOT / "scripts" / "Start-DepthAnythingWorker.ps1"
+GEOMETRY_START = ROOT / "scripts" / "Start-DepthAnythingGeometryWorker.ps1"
 REQUIREMENTS = ROOT / "integrations" / "depth_anything" / "requirements-runtime.txt"
 README = ROOT / "integrations" / "depth_anything" / "README.md"
 DOC = ROOT / "docs" / "DEPTH_ANYTHING_SENSOR.md"
@@ -91,6 +92,28 @@ class DepthAnythingIntegrationSourceTests(unittest.TestCase):
             "newest",
         ):
             self.assertIn(marker, documentation)
+
+    def test_generated_geometry_wrapper_is_separate_preview_first_and_no_camera(self) -> None:
+        source = GEOMETRY_START.read_text(encoding="utf-8")
+        for marker in (
+            "[switch]$Start",
+            "if (-not $Start)",
+            "generated_image_geometry",
+            "geometry_provider = 'depth_anything'",
+            "'--provider', 'depth_anything'",
+            "[int]$InputTcpPort = 9251",
+            "[int]$InputUdpPort = 9250",
+            "[int]$OutputTcpPort = 9261",
+            "$ListenerWaitSeconds = 120.0",
+            "'--output-connect-timeout-s'",
+            "listener_wait_seconds = $ListenerWaitSeconds",
+            ".venv\\depth-anything",
+            "contains_generated_rgb = $true",
+            "opens_webcam = $false",
+        ):
+            self.assertIn(marker, source)
+        self.assertNotIn("camera-index", source)
+        self.assertNotIn("Start-Process", source)
 
 
 if __name__ == "__main__":

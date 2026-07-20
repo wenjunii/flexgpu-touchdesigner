@@ -36,7 +36,7 @@ authorizes forceful shutdown. Diagnose is always read-only; its legacy
 .\scripts\Initialize-FlexShow.ps1 -ListTouchDesigner
 .\scripts\Initialize-FlexShow.ps1 -ListOnly
 .\scripts\Initialize-FlexShow.ps1 -Topology auto -Experience installation -Completion hybrid -TouchDesignerVersion 2025.32820
-.\scripts\Initialize-FlexShow.ps1 -Topology single -Experience installation -Completion hybrid -DisplayProfile venue_1080p -DisplayMode single -TouchDesignerVersion 2025.32820 -Project .\projects\FlexShow-local.toe -Output .\config\local-venue-1080p.json
+.\scripts\Initialize-FlexShow.ps1 -Topology single -Experience installation -Completion hybrid -DisplayProfile venue_1080p -DisplayMode single -GeometryProvider moge2 -TouchDesignerVersion 2025.32820 -Project .\projects\FlexShow-local.toe -Output .\config\local-venue-1080p.json
 .\scripts\Start-FlexShow.ps1
 .\scripts\Diagnose-FlexShow.ps1
 .\scripts\Start-FlexShow.ps1 -Config config\presets\single-4090.json -Experience vr
@@ -61,6 +61,9 @@ or numerically newest candidate automatically. `-Project` selects one existing
 mosaic as 5760x1080. `-DisplayMode` selects `single`, `panoramic_wrap`, or
 `artistic_multi_angle` without removing the fixed outputs. These display
 settings do not raise diffusion, MoGe inference, geometry, or point budgets.
+`-GeometryProvider moge2` or `depth_anything` writes the matching strict frame
+state and camera-metadata paths for cold start; `SHOW_CONTROL` can still switch
+providers after the project is open.
 It never starts TouchDesigner and does not generate network-node profiles.
 Dual-local output deliberately keeps `tier: auto`: the planner resolves the AI
 and world process tiers independently, so a 5090 AI card cannot give its point

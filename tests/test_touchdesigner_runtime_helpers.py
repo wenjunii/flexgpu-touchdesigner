@@ -185,6 +185,9 @@ def complete_runtime_root() -> FakeRoot:
             Installationdepthoverride=False,
             Installationdepthscale=1.0, Installationdepthbias=0.0,
             Installationnear=0.35, Installationfar=4.5,
+            Depthanythingdepthoverride=True,
+            Depthanythingdepthscale=1.0, Depthanythingdepthbias=0.0,
+            Depthanythingnear=0.5, Depthanythingfar=4.0,
             Fxnormalized=0.0, Fynormalized=0.0,
             Cxnormalized=0.5, Cynormalized=0.5,
             Cameratoworld0="1 0 0 0", Cameratoworld1="0 1 0 0",
@@ -1080,6 +1083,36 @@ class TouchDesignerRuntimeHelperTests(unittest.TestCase):
             helpers["tick"](root)
         self.assertEqual(state["source_camera_metadata_status"], "held")
         self.assertNotIn("source_camera_metadata_error", state)
+
+    def test_depth_anything_does_not_reuse_moge_installation_scale(self) -> None:
+        helpers = load_helpers()
+        root = complete_runtime_root()
+        reconstruction = root.op("WORKING_PIPELINE/RECONSTRUCTION")
+        reconstruction.par.Installationdepthoverride.val = True
+        reconstruction.par.Installationdepthscale.val = 0.0585
+        reconstruction.par.Installationdepthbias.val = 0.098
+        reconstruction.par.Installationnear.val = 0.35
+        reconstruction.par.Installationfar.val = 4.5
+        frame = self.frame_state(timestamp_ns=210_000_000_000)
+        metadata = self.camera_metadata(
+            frame, near_metres=0.5, far_metres=4.0)
+        state = {"source": {"geometry_provider": "depth_anything"}}
+        runtime = {"state": state}
+
+        helpers["_apply_camera_metadata_contract"](root, runtime, metadata)
+        helpers["_apply_calibrated_contracts"](root, state)
+
+        self.assertTrue(state["source_installation_depth_override"])
+        self.assertEqual(state["source_depth_override_provider"], "depth_anything")
+        self.assertAlmostEqual(reconstruction.par.Depthscale.val, 1.0)
+        self.assertAlmostEqual(reconstruction.par.Depthbias.val, 0.0)
+        self.assertAlmostEqual(reconstruction.par.Nearmetres.val, 0.5)
+        self.assertAlmostEqual(reconstruction.par.Farmetres.val, 4.0)
+        shader = root.op(
+            "WORKING_PIPELINE/RECONSTRUCTION/depth_to_position_PIXEL"
+        ).text
+        self.assertIn("const float depthScale = 1", shader)
+        self.assertIn("const float depthBias = 0", shader)
 
     def test_dynamic_source_and_sensor_use_independent_calibration_identities(self) -> None:
         helpers = load_helpers()
@@ -2301,6 +2334,19 @@ class TouchDesignerRuntimeHelperTests(unittest.TestCase):
         self.assertIn('"Float", "Proceduralmix", 0.72', source)
         self.assertIn("fogBase * max(0.0, fogDensity)", source)
         self.assertIn("clamp(proceduralMix, 0.0, 1.0)", source)
+
+    def test_geometry_provider_switch_updates_strict_runtime_metadata(self) -> None:
+        helpers = load_helpers()
+        self.assertIn("select_geometry_provider", helpers)
+        source = BOOTSTRAP_PATH.read_text(encoding="utf-8")
+        for marker in (
+            "source_frame_state_operator_path",
+            "source_camera_metadata_operator_path",
+            "frame_lifecycle', {}).pop('source'",
+            "source_provider_switch_status",
+            "waiting_for_fresh_",
+        ):
+            self.assertIn(marker, source)
 
     def test_runtime_builder_preserves_held_activity_without_recursive_decay(self) -> None:
         source = (ROOT / "touchdesigner" / "runtime_pipeline.py").read_text(

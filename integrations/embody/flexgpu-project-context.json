@@ -13,7 +13,7 @@
       "touchdesigner/bootstrap_project.py",
       "touchdesigner/validate_project.py"
     ],
-    "intent": "StreamDiffusionTD RGB to synchronized MoGe-2 metric depth and a persistent interactive point world, with single, triple-surface, and later headset views."
+    "intent": "StreamDiffusionTD RGB to selectable synchronized MoGe-2 metric depth or Depth Anything pseudo-metric depth and a persistent interactive point world, with single, triple-surface, and later headset views."
   },
   "network": {
     "root_operator": "/project1/flexgpu",
@@ -23,6 +23,7 @@
     "managed_scope": "/project1/flexgpu/WORKING_PIPELINE",
     "source_adapter": "/project1/flexgpu/WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER",
     "moge2_bridge": "/project1/flexgpu/WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER/MOGE2_BRIDGE",
+    "depth_anything_geometry_bridge": "/project1/flexgpu/WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER/DEPTH_ANYTHING_GEOMETRY_BRIDGE",
     "sensor_adapter": "/project1/flexgpu/WORKING_PIPELINE/SENSOR_INTERACTION/DEPTH_SENSOR_ADAPTER",
     "depth_anything_bridge": "/project1/flexgpu/WORKING_PIPELINE/SENSOR_INTERACTION/DEPTH_SENSOR_ADAPTER/DEPTH_ANYTHING_BRIDGE",
     "completion": "/project1/flexgpu/WORKING_PIPELINE/COMPLETION",
@@ -36,7 +37,7 @@
       {
         "name": "source_color",
         "path": "/project1/flexgpu/WORKING_PIPELINE/OUT_SOURCE_COLOR",
-        "purpose": "Exact synchronized StreamDiffusionTD/MoGe source reference."
+        "purpose": "Exact synchronized StreamDiffusionTD/selected-geometry-provider source reference."
       },
       {
         "name": "completed_color",
@@ -150,9 +151,17 @@
       "Start the MoGe-2 worker from a separate PowerShell.",
       "Confirm Synchronized Result Valid is on, Source Frame ID increases, and STATUS says synchronized atlas uploaded and ready."
     ],
+    "depth_anything_geometry_start_order": [
+      "Open the saved FlexGPU working TOE and let frame callbacks compile.",
+      "Set STREAMDIFFUSION_ADAPTER Geometry Source to depth_anything.",
+      "Enable DEPTH_ANYTHING_GEOMETRY_BRIDGE and confirm Result TCP 9261 is listening.",
+      "Start Start-DepthAnythingGeometryWorker.ps1 from a separate PowerShell.",
+      "Allow the first 12 real inference frames to freeze relative-depth calibration.",
+      "Confirm Synchronized Result Valid is on, Source Frame ID increases, geometry_provider is depth_anything, and STATUS says synchronized atlas uploaded and ready."
+    ],
     "shutdown_order": [
       "Stop or pause StreamDiffusionTD generation.",
-      "Stop the external MoGe-2 worker.",
+      "Stop the selected external MoGe-2 or Depth Anything geometry worker.",
       "Save only after the live project has been visually accepted.",
       "Close TouchDesigner normally; never force quit with unsaved work."
     ]
@@ -187,7 +196,7 @@
     "cold_start_guard": "If recursive errors report ModuleNotFoundError for flexgpu in bridge_runtime or sensor_runtime, do not start the live worker. Re-run the approved FlexGPU runtime bootstrap, reload the generated DAT modules, and confirm the bridge compilation errors are gone first.",
     "acceptance_order": [
       "recursive operator and shader errors",
-      "MoGe synchronized frame freshness",
+      "selected generated-geometry provider synchronized frame freshness",
       "source/completed-color orientation",
       "position signal validity and metric depth behavior",
       "single installation visual",

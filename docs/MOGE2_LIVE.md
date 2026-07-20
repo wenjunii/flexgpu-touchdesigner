@@ -5,6 +5,11 @@ RGB, metric-depth, mask, and confidence set for the existing FlexGPU point
 world. MoGe-2 runs in an isolated external process; TouchDesigner never imports
 PyTorch or the model.
 
+MoGe-2 remains the default generated-geometry provider. A separate selectable
+Depth Anything relative-depth path is documented in
+[DEPTH_ANYTHING_GEOMETRY.md](DEPTH_ANYTHING_GEOMETRY.md); switching providers
+does not rewire the point world or audience sensor.
+
 ```text
 prompt -> StreamDiffusionTD RGB -> MOGE2_BRIDGE -> MoGe-2 worker
                                       ^                 |
@@ -164,10 +169,32 @@ In the second window, preview a deterministic mock worker:
 .\scripts\Start-MoGe2Worker.ps1 -Backend mock -Start
 ```
 
+Selecting `moge2` on `SHOW_CONTROL` now enables and initializes the matching
+bridge automatically. The worker also waits up to 120 seconds for TouchDesigner
+to finish opening result port `9221`, eliminating the normal cold-start race.
+If the listener still does not appear, the timeout names the provider/bridge
+action instead of returning an immediate Windows `10061` error.
+Override the bounded wait only when needed with
+`-ListenerWaitSeconds <seconds>`; `0` restores fail-fast diagnosis.
+Live provider changes also move strict `FRAME_STATE` and `CAMERA_METADATA`
+lifecycle readers to the selected bridge and retire the previous session, so
+stale Depth Anything metadata cannot zero-gate a fresh MoGe result.
+
 The expected bridge status is `synchronized atlas uploaded and ready`;
 `Resultvalid` turns on only after the Script TOP confirms the exact staged
 atlas upload, `FRAME_STATE` and `CAMERA_METADATA` become populated, and all
 four route switches change together. Stop the mock with Ctrl+C.
+
+The show worker is intended to remain running. If a command includes
+`-DurationSeconds`, it is a bounded test: after that duration the process exits,
+the last result exceeds the freshness window, and `Resultvalid` correctly turns
+off. The bridge then reports `last synchronized atlas expired; keep the
+external worker running`. A later `send_failed` means no worker is listening on
+the input port; it does not mean the previously accepted atlas upload failed.
+For an installation run, omit `-DurationSeconds` and leave the worker window
+open. `latest_*_frame_id` describes only the currently fresh result, while
+`last_accepted_*_frame_id` preserves the final accepted IDs for diagnosis after
+worker loss.
 
 If both `bridge_runtime` and `sensor_runtime` report
 `ModuleNotFoundError: No module named 'flexgpu'` immediately after reopening a

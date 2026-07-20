@@ -83,6 +83,7 @@ def result_frame(
     profile: str = "3080ti_16gb",
     original_width: int = 2,
     original_height: int = 2,
+    geometry_provider: str = "moge2",
 ):
     source = bytes(
         (
@@ -114,6 +115,7 @@ def result_frame(
         model_source_revision="0" * 40,
         model_revision="1" * 40,
         extra_extensions={
+            "geometry_provider": geometry_provider,
             "moge2_profile": profile,
             "moge2_source_width": original_width,
             "moge2_source_height": original_height,
@@ -261,6 +263,7 @@ class FakeBridgeComp:
         self.par = FakeParameters(
             {
                 "Enabled": True,
+                "Provider": "moge2",
                 "Profile": "3080ti_16gb",
                 "Workerhost": "127.0.0.1",
                 "Workerinputtcp": 9211,
@@ -461,6 +464,26 @@ assert normalized(src) in {{
         np.testing.assert_allclose(converted, expected, rtol=0.0, atol=1e-7)
         self.assertEqual(converted.dtype, np.float32)
 
+    def test_result_mapping_identity_tracks_geometry_provider(self) -> None:
+        moge_state, _ = derive_result_mappings(
+            validate_moge2_result_frame(result_frame(geometry_provider="moge2"))
+        )
+        depth_anything_state, _ = derive_result_mappings(
+            validate_moge2_result_frame(
+                result_frame(geometry_provider="depth_anything")
+            )
+        )
+        self.assertTrue(moge_state["calibration_id"].startswith("moge2-"))
+        self.assertTrue(moge_state["session_id"].startswith("moge2-session-"))
+        self.assertTrue(
+            depth_anything_state["calibration_id"].startswith("depth-anything-")
+        )
+        self.assertTrue(
+            depth_anything_state["session_id"].startswith(
+                "depth-anything-session-"
+            )
+        )
+
     def test_result_contract_mismatch_fails_closed(self) -> None:
         valid = result_frame()
         metadata = valid.metadata.to_dict()
@@ -625,6 +648,7 @@ class BridgeThreadingTests(unittest.TestCase):
         self.assertEqual(
             sent.metadata.extensions["moge2_request_contract"], REQUEST_CONTRACT
         )
+        self.assertEqual(sent.metadata.extensions["geometry_provider"], "moge2")
         self.assertEqual(sent.metadata.extensions["moge2_source_orientation"], "top_left")
         self.assertTrue(sent.metadata.extensions["producer_session_id"].startswith("td-moge2-"))
         self.assertTrue(sent.metadata.generation_id.startswith("generation-"))
@@ -690,6 +714,25 @@ class BridgeThreadingTests(unittest.TestCase):
         self.assertIsNone(self.runtime.latest_result())
         self.assertEqual(self.runtime.status()["last_error"], "result_rejected")
 
+    def test_foreign_geometry_provider_is_rejected_before_touchdesigner(self) -> None:
+        self.runtime.start()
+        receiver = self.receiver_factory.instances[0]
+        issued = self.issue_request()
+        receiver.frames.put(
+            result_frame(
+                source_session_id=self.runtime.producer_session_id,
+                source_frame_id=issued.frame_id,
+                source_timestamp_ns=issued.timestamp_ns,
+                generation_id="generation-a",
+                geometry_provider="depth_anything",
+            )
+        )
+        wait_until(lambda: self.runtime.status()["rejected_results"] == 1)
+        self.assertIsNone(self.runtime.latest_result())
+        self.assertEqual(
+            self.runtime.status()["last_error"], "foreign_geometry_provider"
+        )
+
     def test_foreign_session_is_rejected_and_worker_clock_skew_is_normalized(self) -> None:
         self.runtime.start()
         receiver = self.receiver_factory.instances[0]
@@ -722,6 +765,7 @@ class BridgeThreadingTests(unittest.TestCase):
         self.runtime.start()
         receiver = self.receiver_factory.instances[0]
         issued = self.issue_request()
+        self.runtime._record_error("send_failed")
         receiver.frames.put(
             result_frame(
                 1,
@@ -733,10 +777,18 @@ class BridgeThreadingTests(unittest.TestCase):
         )
         wait_until(lambda: self.runtime.latest_result() is not None)
         self.assertTrue(self.runtime.status()["result_fresh"])
+        self.assertEqual(self.runtime.status()["last_error"], "none")
         self.clock.advance(1100)
         self.assertIsNone(self.runtime.latest_result())
-        self.assertFalse(self.runtime.status()["result_fresh"])
-        self.assertEqual(self.runtime.status()["state"], "stale")
+        stale = self.runtime.status()
+        self.assertFalse(stale["result_fresh"])
+        self.assertEqual(stale["state"], "stale")
+        self.assertEqual(stale["latest_result_frame_id"], -1)
+        self.assertEqual(stale["latest_source_frame_id"], -1)
+        self.assertEqual(stale["last_accepted_result_frame_id"], 1)
+        self.assertEqual(
+            stale["last_accepted_source_frame_id"], issued.frame_id
+        )
 
     def test_issued_request_fields_and_profile_are_correlated_exactly(self) -> None:
         self.runtime.start()
@@ -803,6 +855,7 @@ class ModuleCallbackTests(unittest.TestCase):
                     "state": "running",
                     "last_error": "none",
                     "accepted_results": 1,
+                    "result_fresh": self.current_result is not None,
                 }
 
             def upload_result_to_top(self, script_top, result):
@@ -881,12 +934,40 @@ class ModuleCallbackTests(unittest.TestCase):
             self.assertIn("atlas_cook_unavailable", created[0].errors)
 
             created[0].current_result = None
-            bridge_module.tick(component)
+            stale = bridge_module.tick(component)
             self.assertFalse(component.par.Resultvalid.val)
+            self.assertEqual(
+                stale["detail"],
+                "last synchronized atlas expired; keep the external worker running",
+            )
             self.assertFalse(bridge_module.on_script_top_cook(output))
             bridge_module.stop(component)
             self.assertFalse(component.par.Resultvalid.val)
             self.assertEqual(created[0].stopped, 1)
+
+    def test_runtime_detail_distinguishes_worker_and_upload_states(self) -> None:
+        self.assertEqual(
+            bridge_module._runtime_detail(
+                published=False,
+                current={
+                    "accepted_results": 0,
+                    "result_fresh": False,
+                    "last_error": "send_failed",
+                },
+            ),
+            "worker input is offline; start the external worker after the bridge",
+        )
+        self.assertEqual(
+            bridge_module._runtime_detail(
+                published=False,
+                current={
+                    "accepted_results": 0,
+                    "result_fresh": True,
+                    "last_error": "none",
+                },
+            ),
+            "fresh result received; waiting for confirmed atlas upload",
+        )
 
 
 if __name__ == "__main__":

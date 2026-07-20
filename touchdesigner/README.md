@@ -11,9 +11,9 @@ wrap and artistic multi-angle three-surface views.
 
 The repository does not bundle your `StreamDiffusionTD.tox`, model weights, a
 sensor SDK/calibration, an OpenXR/OpenVR runtime, projection mapping, or
-SHARP/Gaussian inference. It does include a pinned external MoGe-2 worker and a
-default-off live bridge; PyTorch and the checkpoint remain outside
-TouchDesigner. The demo is the fallback for building and testing everything
+SHARP/Gaussian inference. It does include pinned external MoGe-2 and Depth
+Anything V2 Small generated-geometry workers with default-off live bridges;
+PyTorch and checkpoints remain outside TouchDesigner. The demo is the fallback for building and testing everything
 downstream before those site-specific pieces are available.
 
 The builder is safe to run in an existing project:
@@ -134,8 +134,9 @@ Select `single`, `panoramic_wrap`, or `artistic_multi_angle` with the
 `OUT_DISPLAY_ACTIVE`; all fixed outputs remain available.
 
 Panoramic left/center/right cameras share one origin. Tune
-`POINT_RENDER/Wrapyawdegrees` and `Surfacefovdegrees` to match the physical wall
-angles and overlap. Artistic side cameras additionally use
+`POINT_RENDER/Wrapyawdegrees` and `Wrapfovdegrees` to match the physical wall
+angles and overlap. `Surfacefovdegrees` is retained for the artistic cameras
+only. Artistic side cameras additionally use
 `Artisticyawdegrees` and `Artisticoffsetmetres`; this produces parallax and
 intentional discontinuities at the seams.
 
@@ -148,9 +149,38 @@ later reconstruction stage creates geometry beyond the source view.
 Each surface is rendered independently and receives only local
 view-disocclusion fog around point silhouettes. The completion color texture is
 never painted behind the whole view, which avoids a stretched, dark duplicate
-of the generated image. The public mosaics simply place left, center, and right
-horizontally. Use the individual surface TOPs for three projectors or LED
-processors; use a mosaic only when a downstream mapper expects one canvas.
+of the generated image. Panoramic feeds additionally pass through
+`COVERAGE_WRAP_LEFT/CENTER/RIGHT`: a procedural atmosphere generated from point
+occupancy and one continuous three-panel noise domain. It makes unseen regions
+read as fog rather than rectangular black panels, but does not invent hidden
+objects or copy the source image. Artistic and single outputs bypass that
+stage. The public mosaics simply place left, center, and right horizontally.
+Use the individual surface TOPs for three projectors or LED processors; use a
+mosaic only when a downstream mapper expects one canvas.
+
+### Use the live show controls
+
+For an existing ignored working TOE, run the bounded upgrade from TouchDesigner
+after adding this checkout's `touchdesigner` folder to `sys.path`:
+
+```python
+import importlib, runtime_pipeline as rp; importlib.reload(rp); rp.install_show_control_upgrade(op('/project1/flexgpu'))
+```
+
+Open `/project1/flexgpu/WORKING_PIPELINE/SHOW_CONTROL`. Its two parameter pages
+provide:
+
+- MoGe-2 or Depth Anything generated geometry selection;
+- single, panoramic-wrap, or artistic display selection;
+- completion mode and fog density;
+- interaction strength and low-latency smoothing;
+- panoramic yaw, independent FOV, coverage, and noise;
+- 3080 Ti 16 GB, 4090, and 5090 geometry/point/capture presets.
+
+The controls update only public managed operators. They do not start workers,
+change private StreamDiffusionTD parameters, or change the commissioned output
+sizes. `Apply All Show Controls` reapplies the displayed values after reopening
+an older working TOE.
 
 Runtime config controls per-surface resolution. Defaults are deliberately
 conservative: 640x360 on the 3080 Ti Laptop, 960x540 on the 4090, and 1280x720
@@ -171,6 +201,7 @@ MoGe inference, geometry texture resolution, or point count:
   -Completion hybrid `
   -DisplayProfile venue_1080p `
   -DisplayMode single `
+  -GeometryProvider moge2 `
   -TouchDesignerVersion 2025.32820 `
   -Project .\projects\FlexShow-local.toe `
   -Output .\config\local-venue-1080p.json
@@ -267,21 +298,44 @@ confidence; strict `FRAME_STATE` and `CAMERA_METADATA` DATs drive lifecycle and
 camera reconstruction. The bridge is disabled after installation and
 TouchDesigner never imports MoGe or Torch.
 
-Enable the bridge's result receiver before starting
-`scripts/Start-MoGe2Worker.ps1`; the worker opens its return TCP connection at
-startup. Use the deterministic mock first, then the pinned real backend. Do not
-use `-WaitReadyMs` for the initial TouchDesigner launch because readiness
-depends on the separate worker's first returned frame.
+Select `moge2` on `SHOW_CONTROL`; that enables and initializes the matching
+bridge listener. `scripts/Start-MoGe2Worker.ps1` then waits up to 120 seconds
+for result port `9221`, so it may be started while TouchDesigner is finishing
+its cold-start callbacks. Use the deterministic mock first, then the pinned
+real backend. Override the bounded wait with `-ListenerWaitSeconds` only when
+needed. Do not use `-WaitReadyMs` for the initial TouchDesigner launch because
+readiness depends on the separate worker's first returned frame.
 
 See [docs/MOGE2_LIVE.md](../docs/MOGE2_LIVE.md) for the exact source
 configuration, 3080 Ti starting profile, startup order, two-GPU/two-computer
 settings, orientation check, and acceptance sequence.
 
+## Add alternative Depth Anything generated geometry
+
+Depth Anything V2 Small can reconstruct the same StreamDiffusionTD image as a
+second selectable point-cloud path. It is separate from the webcam audience
+sensor and opens no camera. Install its isolated bridge into an ignored working
+TOE:
+
+```python
+from pathlib import Path; import importlib, sys; root = Path(r'C:\path\to\flexgpu-touchdesigner'); sys.path.insert(0, str(root / 'touchdesigner')); import runtime_pipeline as rp; importlib.reload(rp); rp.install_depth_anything_geometry_bridge(op('/project1/flexgpu'))
+```
+
+Select `depth_anything` on `SHOW_CONTROL`; it enables and initializes
+`DEPTH_ANYTHING_GEOMETRY_BRIDGE`. Then start
+`scripts/Start-DepthAnythingGeometryWorker.ps1` in another PowerShell. The
+launcher waits up to 120 seconds for result port `9261`. MoGe remains the
+default and can be selected again without rewiring. See
+[docs/DEPTH_ANYTHING_GEOMETRY.md](../docs/DEPTH_ANYTHING_GEOMETRY.md).
+The generated-geometry path is live-accepted on the 3080 Ti Laptop with
+single, panoramic, and artistic outputs at 1920x1080 per surface; reaccept it
+after changing GPU, worker quality, TouchDesigner, or the private source.
+
 ## Rehearse audience interaction with the laptop webcam
 
-The optional Depth Anything sensor emulator is separate from MoGe: MoGe
-reconstructs the generated StreamDiffusion image, while this branch estimates
-only audience interaction from the laptop camera. Install its default-off,
+The optional Depth Anything sensor emulator is separate from both generated
+geometry providers: this branch estimates only audience interaction from the
+laptop camera. Install its default-off,
 bounded receiver into an ignored local `.toe`:
 
 ```python
@@ -376,6 +430,7 @@ receiver-cook DAT/CHOP is not valid producer metadata.
 | `STARTUP` | Environment-aware helper module and startup callbacks |
 | `WORKING_PIPELINE/SOURCES` | Demo RGB/depth plus private StreamDiffusionTD adapter |
 | `WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER/MOGE2_BRIDGE` | Default-off external-worker generated RGB/metric-depth/mask/confidence path with strict frame and camera metadata |
+| `WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER/DEPTH_ANYTHING_GEOMETRY_BRIDGE` | Default-off selectable generated RGB/pseudo-metric-depth/mask/confidence path using isolated ports and strict provider/frame metadata |
 | `WORKING_PIPELINE/ROLE_BRIDGE` | Atomic RGBA32F RGB/raw-depth/mask/confidence path over local, Shared Mem, or Touch TCP routes |
 | `WORKING_PIPELINE/RECONSTRUCTION` | Aligned color and depth-to-position GLSL |
 | `WORKING_PIPELINE/SENSOR_INTERACTION` | Calibrated sensor validity plus bounded 8x8 world-space occupancy interaction |
@@ -483,9 +538,11 @@ The 5090 preset intentionally defaults to 262,144 points: a 512-square
 position texture has exactly that many samples. Raise geometry resolution
 explicitly before requesting a larger physically reachable point budget.
 
-The generated dashboard is not a finished control surface: its Apply and
-Emergency Reset pulses are not wired to callbacks. Launcher environment values
-remain authoritative for `single`, `dual_local`, and `dual_network`.
+The outer generated dashboard is still a status/launcher shell: its Apply and
+Emergency Reset pulses are not wired to callbacks. The working pipeline's
+`SHOW_CONTROL` COMP is the finished live visual control surface described
+above. Launcher environment values remain authoritative for `single`,
+`dual_local`, and `dual_network` startup.
 
 To reapply environment values manually:
 

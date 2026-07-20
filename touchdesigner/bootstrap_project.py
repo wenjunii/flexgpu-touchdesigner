@@ -809,7 +809,8 @@ def _temporal_signature(root_comp, state):
              (0, 0, 1, 0), (0, 0, 0, 1))[index])))
     # Configured local adapter/calibration identities are safe fingerprints;
     # no file is read and no private component is imported here.
-    for key in ('mode', 'streamdiffusion_tox', 'replay_path', 'rgb_operator',
+    for key in ('mode', 'geometry_provider', 'streamdiffusion_tox',
+                'replay_path', 'rgb_operator',
                 'depth_operator', 'mask_operator', 'confidence_operator',
                 'frame_state_operator', 'camera_metadata_operator',
                 'calibration_path'):
@@ -1289,6 +1290,38 @@ def _configure_source_adapter(root_comp, state, source):
     if adapter is None:
         state['source_adapter_error'] = 'source adapter component is missing'
         return False
+    configured_geometry_provider = source.get('geometry_provider')
+    geometry_provider = str(
+        configured_geometry_provider or 'moge2').lower()
+    if geometry_provider not in ('moge2', 'depth_anything'):
+        state['source_adapter_error'] = 'geometry_provider is unsupported'
+        return False
+    if (not _set(adapter, 'Geometrysource', geometry_provider) and
+            configured_geometry_provider is not None):
+        state['source_adapter_error'] = (
+            'generated geometry selector is missing; install the geometry bridge')
+        return False
+    state['source_geometry_provider'] = geometry_provider
+    selected_bridge_name = (
+        'DEPTH_ANYTHING_GEOMETRY_BRIDGE'
+        if geometry_provider == 'depth_anything' else 'MOGE2_BRIDGE')
+    selected_bridge = root_comp.op(
+        'WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER/' +
+        selected_bridge_name)
+    if selected_bridge is not None:
+        _set(selected_bridge, 'Enabled', True)
+        runtime_dat = selected_bridge.op('bridge_runtime')
+        if runtime_dat is not None:
+            try:
+                runtime_dat.module.tick(selected_bridge)
+                state['source_bridge_listener_status'] = 'started'
+            except Exception:
+                # The bridge frame callback retries once embedded modules have
+                # finished compiling. External workers also wait for this
+                # listener, closing the cold-start race without blocking TD.
+                state['source_bridge_listener_status'] = 'pending_compile'
+    else:
+        state['source_bridge_listener_status'] = 'missing'
     search_root = _auto_load_tox(root_comp, adapter, state, source, 'source')
     if search_root is None:
         return False
@@ -1323,6 +1356,64 @@ def _configure_source_adapter(root_comp, state, source):
             root_comp, state, calibration_path, 'source'):
         return False
     state['source_adapter_status'] = 'ready'
+    return True
+
+def select_geometry_provider(root_comp=None, provider='moge2'):
+    """Switch strict source lifecycle metadata with the visual provider.
+
+    Generated RGB/depth TOP routing is controlled by SHOW_CONTROL, while
+    strict frame freshness and camera metadata live in the runtime state.
+    Update both halves atomically so a stopped previous provider cannot gate a
+    fresh selected provider to zero inside TEMPORAL_WORLD.
+    """
+    root_comp = root_comp or op('/project1/flexgpu')
+    if root_comp is None:
+        return False
+    selected = str(provider or 'moge2').strip().lower()
+    if selected not in ('moge2', 'depth_anything'):
+        return False
+    runtime = _runtime(root_comp)
+    if runtime is None:
+        return False
+    bridge_name = (
+        'DEPTH_ANYTHING_GEOMETRY_BRIDGE'
+        if selected == 'depth_anything' else 'MOGE2_BRIDGE')
+    bridge = root_comp.op(
+        'WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER/' + bridge_name)
+    if bridge is None:
+        return False
+    frame_state = bridge.op('FRAME_STATE')
+    camera_metadata = bridge.op('CAMERA_METADATA')
+    if frame_state is None or camera_metadata is None:
+        return False
+
+    state = runtime['state']
+    source = _mapping(state.get('source'))
+    source['geometry_provider'] = selected
+    source['frame_state_operator'] = str(frame_state.path)
+    source['camera_metadata_operator'] = str(camera_metadata.path)
+    state['source'] = source
+    state['source_geometry_provider'] = selected
+    state['source_frame_state_operator_path'] = str(frame_state.path)
+    state['source_camera_metadata_operator_path'] = str(camera_metadata.path)
+    state['source_provider_switch_status'] = 'waiting_for_fresh_' + selected
+    for key in (
+        'source_camera_session_id', 'source_generation_id',
+        'source_camera_metadata_status', 'source_camera_metadata_error',
+    ):
+        state.pop(key, None)
+    runtime.setdefault('frame_lifecycle', {}).pop('source', None)
+    runtime['source_session_id'] = None
+    runtime.pop('source_camera_contract', None)
+    runtime.pop('source_camera_rejected_identity', None)
+    runtime.pop('source_camera_rejected_error', None)
+
+    sources = root_comp.op('WORKING_PIPELINE/SOURCES')
+    temporal = root_comp.op('WORKING_PIPELINE/TEMPORAL_WORLD')
+    _set(sources, 'Newframe', False)
+    _set(sources, 'Sourcevalid', False)
+    _set(temporal, 'Newframe', False)
+    _set(temporal, 'Sourcevalid', False)
     return True
 
 def _configure_sensor_adapter(root_comp, state, sensor):
@@ -1674,17 +1765,34 @@ def _apply_camera_metadata_contract(root_comp, runtime, metadata):
     # the audience sensor occupies a room-scale volume. Keep raw metadata as
     # the default, but allow an explicit installation calibration to map both
     # sources into the same metre-scale interaction world.
-    installation_override = bool(
-        _value(reconstruction, 'Installationdepthoverride', False))
+    provider = str(_mapping(state.get('source')).get(
+        'geometry_provider', state.get(
+            'source_geometry_provider', 'moge2'))).strip().lower()
+    if provider == 'depth_anything':
+        installation_override = bool(_value(
+            reconstruction, 'Depthanythingdepthoverride', False))
+        scale_parameter = 'Depthanythingdepthscale'
+        bias_parameter = 'Depthanythingdepthbias'
+        near_parameter = 'Depthanythingnear'
+        far_parameter = 'Depthanythingfar'
+    else:
+        installation_override = bool(
+            _value(reconstruction, 'Installationdepthoverride', False))
+        scale_parameter = 'Installationdepthscale'
+        bias_parameter = 'Installationdepthbias'
+        near_parameter = 'Installationnear'
+        far_parameter = 'Installationfar'
     if installation_override:
         depth_scale = max(1.0e-6, _number(
-            _value(reconstruction, 'Installationdepthscale', 1.0), 1.0))
+            _value(reconstruction, scale_parameter, 1.0), 1.0))
         depth_bias = _number(
-            _value(reconstruction, 'Installationdepthbias', 0.0), 0.0)
+            _value(reconstruction, bias_parameter, 0.0), 0.0)
         near_metres = max(1.0e-4, _number(
-            _value(reconstruction, 'Installationnear', 0.35), 0.35))
+            _value(reconstruction, near_parameter, metadata['near_metres']),
+            metadata['near_metres']))
         far_metres = max(near_metres + 1.0e-4, _number(
-            _value(reconstruction, 'Installationfar', 4.5), 4.5))
+            _value(reconstruction, far_parameter, metadata['far_metres']),
+            metadata['far_metres']))
     else:
         depth_scale = 1.0
         depth_bias = 0.0
@@ -1717,6 +1825,7 @@ def _apply_camera_metadata_contract(root_comp, runtime, metadata):
     state['source_generation_id'] = metadata['generation_id']
     state['source_depth_scale_bias'] = list(metadata['depth_scale_bias'])
     state['source_installation_depth_override'] = installation_override
+    state['source_depth_override_provider'] = provider
     state['source_camera_metadata_status'] = 'accepted'
     state.pop('source_camera_metadata_error', None)
     runtime['source_camera_contract'] = dict(metadata)
@@ -2269,6 +2378,10 @@ def _apply_working_pipeline(root_comp, state):
             _set_resolution(root_comp.op(
                 'WORKING_PIPELINE/POINT_RENDER/METRIC_RENDER_%s_%s' %
                 (mode, side)), triple_width, triple_height)
+            if mode == 'WRAP':
+                _set_resolution(root_comp.op(
+                    'WORKING_PIPELINE/TRIPLE_DISPLAY/COVERAGE_WRAP_%s' % side),
+                    triple_width, triple_height)
             _set_resolution(root_comp.op(
                 'WORKING_PIPELINE/TRIPLE_DISPLAY/GRADE_%s_%s' %
                 (mode, side)), triple_width, triple_height)
@@ -2324,6 +2437,30 @@ def _apply_working_pipeline(root_comp, state):
                 'sensor_calibration_error') or state.get(
                 'calibration_error') or 'depth-sensor adapter is not installed'
             state['sensor_fallback'] = 'simulated (%s)' % reason
+
+    # Mirror applied runtime values into the optional public show-control
+    # surface. Parameter callbacks may reapply the same public values, but
+    # never reach into private StreamDiffusionTD or sensor components.
+    show_control = root_comp.op('WORKING_PIPELINE/SHOW_CONTROL')
+    if show_control is not None:
+        source_state = _mapping(state.get('source'))
+        geometry_provider = str(source_state.get(
+            'geometry_provider', state.get(
+                'source_geometry_provider', 'moge2'))).lower()
+        _set(show_control, 'Qualityprofile', state['tier'])
+        _set(show_control, 'Geometryprovider', geometry_provider)
+        _set(show_control, 'Displaymode', state['display_mode'])
+        _set(show_control, 'Completionmode', state['completion'])
+        _set(show_control, 'Geometryresolution', state['geometry_resolution'])
+        _set(show_control, 'Pointbudget', state['point_budget'])
+        _set(show_control, 'Pointsize', state['point_size_px'])
+        _set(show_control, 'Geometryfps', state['geometry_fps'])
+        if 'fog_density' in render_config:
+            _set(show_control, 'Fogdensity', state['fog_density'])
+        sensor_state = _mapping(state.get('sensor'))
+        if 'force_gain' in sensor_state:
+            _set(show_control, 'Interactionstrength',
+                 sensor_state.get('force_gain'))
 
     bridge = root_comp.op('WORKING_PIPELINE/ROLE_BRIDGE')
     _set(bridge, 'Mode', state['bridge_mode'])

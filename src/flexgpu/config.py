@@ -171,6 +171,7 @@ RUNTIME_SECTION_FIELDS = {
     },
     "source": {
         "mode",
+        "geometry_provider",
         "streamdiffusion_tox",
         "replay_path",
         "rgb_operator",
@@ -832,12 +833,24 @@ def _validate_runtime_sections(
         mode = source.get("mode")
         if mode is not None and mode not in {"demo", "streamdiffusion", "worldbus", "replay"}:
             errors.append("source.mode is unsupported")
+        geometry_provider = source.get("geometry_provider")
+        if (
+            geometry_provider is not None
+            and geometry_provider not in {"moge2", "depth_anything"}
+        ):
+            errors.append("source.geometry_provider is unsupported")
         for key in sorted(
             RUNTIME_SECTION_FIELDS["source"].difference(
-                {"mode", "auto_load_tox", "stale_timeout_ms"}
+                {
+                    "mode",
+                    "geometry_provider",
+                    "auto_load_tox",
+                    "stale_timeout_ms",
+                }
             )
         ):
             _runtime_string(source, key, "source", errors)
+        _runtime_string(source, "geometry_provider", "source", errors)
         _runtime_bool(source, "auto_load_tox", "source", errors)
         _runtime_integer(source, "stale_timeout_ms", "source", errors, 1, 600000)
         if mode == "replay" and not source.get("replay_path"):

@@ -14,6 +14,7 @@ contract remains unchanged.
 from __future__ import print_function
 
 import os
+import re
 
 
 BUILD_VERSION = "1.2.1"
@@ -207,6 +208,27 @@ void main()
     vec3 force = accumulatedForce * max(0.0, forceGain) /
                  float(occupancyGridSize);
     fragColor = TDOutputSwizzle(vec4(force, combinedOccupancy));
+}
+''',
+    "interaction_smoothing": r'''// CONTRACT: INTERACTION + HISTORY -> low-latency smoothed INTERACTION
+out vec4 fragColor;
+
+void main()
+{
+    const float interactionSmoothing = 0.35; // FLEXGPU_INTERACTION_SMOOTHING
+    vec2 uv = vUV.st;
+    vec4 current = texture(sTD2DInputs[0], uv);
+    vec4 history = texture(sTD2DInputs[1], uv);
+    float amount = clamp(interactionSmoothing, 0.0, 0.92);
+    // Keep attack responsive and release slightly faster than attack. This
+    // removes low-rate sensor judder without leaving a delayed interaction
+    // ghost after the audience moves away.
+    float attackBlend = mix(1.0, 0.20, amount);
+    float releaseBlend = mix(1.0, 0.55, amount);
+    float blend = current.a >= history.a ? attackBlend : releaseBlend;
+    vec3 force = mix(history.rgb, current.rgb, blend);
+    float occupancy = mix(history.a, current.a, blend);
+    fragColor = TDOutputSwizzle(vec4(force, occupancy));
 }
 ''',
     "interaction_debug": r'''// CONTRACT: INTERACTION -> display-only signed force/occupancy color
@@ -486,6 +508,75 @@ void main()
     color = color / (1.0 + color); // inexpensive tone map
     color *= mix(0.84, 1.0, vignette);
     fragColor = TDOutputSwizzle(vec4(color, 1.0));
+}
+''',
+    "panoramic_coverage": r'''// CONTRACT: WRAP POINT_RENDER -> procedural atmospheric coverage
+out vec4 fragColor;
+
+float hash21(vec2 p)
+{
+    p = fract(p * vec2(197.17, 431.39));
+    p += dot(p, p + 37.23);
+    return fract(p.x * p.y);
+}
+
+void main()
+{
+    const float wrapCoverage = 0.55; // FLEXGPU_WRAP_COVERAGE
+    const float wrapNoise = 0.42; // FLEXGPU_WRAP_NOISE
+    const float wrapPanelIndex = 1.0; // FLEXGPU_WRAP_PANEL_INDEX
+    vec2 uv = vUV.st;
+    vec4 points = texture(sTD2DInputs[0], uv);
+    vec2 texel = 1.0 / vec2(textureSize(sTD2DInputs[0], 0));
+
+    // A wider neighbourhood extends only the atmosphere surrounding real
+    // points. It never reprojects or stretches the generated RGB image.
+    float nearby = 0.0;
+    for (int ring = 1; ring <= 4; ++ring) {
+        vec2 d = texel * float(ring * 3);
+        nearby = max(nearby, texture(sTD2DInputs[0], uv + vec2(d.x, 0.0)).a);
+        nearby = max(nearby, texture(sTD2DInputs[0], uv - vec2(d.x, 0.0)).a);
+        nearby = max(nearby, texture(sTD2DInputs[0], uv + vec2(0.0, d.y)).a);
+        nearby = max(nearby, texture(sTD2DInputs[0], uv - vec2(0.0, d.y)).a);
+    }
+
+    // The panel index turns three local UV domains into one 3:1 panorama, so
+    // low-frequency noise does not restart at every projector seam.
+    vec2 panoramaUV = vec2((uv.x + wrapPanelIndex) / 3.0, uv.y);
+    float coarse = hash21(floor(panoramaUV * vec2(180.0, 108.0)));
+    float fine = hash21(floor(panoramaUV * vec2(720.0, 405.0)));
+    float grain = mix(0.72, mix(coarse, fine, 0.35),
+                      clamp(wrapNoise, 0.0, 1.0));
+    float horizon = exp(-pow((uv.y - 0.46) * 2.7, 2.0));
+    float upperMist = smoothstep(0.94, 0.45, uv.y);
+    float empty = 1.0 - step(0.002, points.a);
+    float localHaze = empty * nearby * (0.18 + 0.36 * grain);
+    float proceduralMist = empty *
+        (0.18 + 0.28 * horizon + 0.10 * upperMist) *
+        (0.72 + 0.28 * grain);
+    float coverage = clamp(max(localHaze, proceduralMist) *
+                           max(0.0, wrapCoverage), 0.0, 0.55);
+
+    // A low, continuous atmospheric floor keeps an empty side wall from
+    // reading as a failed black projector. It is generated in panorama space
+    // and remains intentionally abstract: no generated RGB pixels are copied,
+    // mirrored, or stretched into the disoccluded region.
+    float panoramaWave = 0.5 + 0.5 *
+        sin((panoramaUV.x * 2.0 + panoramaUV.y * 0.35) * 6.2831853);
+    float continuousFill = empty * clamp(wrapCoverage, 0.0, 1.0) *
+        (0.30 + 0.42 * horizon + 0.12 * upperMist) *
+        (0.76 + 0.24 * panoramaWave);
+    float dust = empty * smoothstep(0.82, 0.98, fine) *
+        (0.05 + 0.12 * horizon) * clamp(wrapNoise, 0.0, 1.0);
+    vec3 coolMist = vec3(0.055, 0.065, 0.075);
+    vec3 warmMist = vec3(0.180, 0.135, 0.095);
+    vec3 mistColor = mix(coolMist, warmMist,
+                         horizon * (0.38 + 0.32 * panoramaWave));
+    vec3 color = points.rgb + mistColor *
+        (coverage * 0.95 + continuousFill * 0.82 + dust);
+    float alpha = max(points.a, max(coverage * 0.55,
+                                   continuousFill * 0.45));
+    fragColor = TDOutputSwizzle(vec4(color, alpha));
 }
 ''',
     "view_completion": r'''// CONTRACT: POINT_RENDER -> view-aware fog/thickness-completed VIEW
@@ -781,6 +872,220 @@ def onExit():
 '''
 
 
+SHOW_CONTROL_CALLBACKS = r'''# Parameter Execute DAT callbacks for public show controls.
+import re
+
+_FLOAT_PATTERN = r'[-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?'
+
+def _controls():
+    return parent()
+
+def _pipeline():
+    return parent().parent()
+
+def _set(node, name, value):
+    if node is None:
+        return False
+    try:
+        getattr(node.par, name).val = value
+        return True
+    except Exception:
+        try:
+            wanted = str(name).lower()
+            for parameter in node.pars():
+                if str(parameter.name).lower() == wanted:
+                    parameter.val = value
+                    return True
+        except Exception:
+            pass
+    return False
+
+def _value(name, fallback=None):
+    controls = _controls()
+    try:
+        return getattr(controls.par, name).eval()
+    except Exception:
+        try:
+            wanted = str(name).lower()
+            for parameter in controls.pars():
+                if str(parameter.name).lower() == wanted:
+                    return parameter.eval()
+        except Exception:
+            pass
+    return fallback
+
+def _patch_float(dat, symbol, marker, value):
+    if dat is None:
+        return False
+    pattern = (
+        r'(const\s+float\s+' + re.escape(symbol) + r'\s*=\s*)' +
+        _FLOAT_PATTERN + r'(\s*;\s*//\s*' + re.escape(marker) + r')')
+    replacement = r'\g<1>' + ('%.6g' % float(value)) + r'\g<2>'
+    updated, count = re.subn(pattern, replacement, str(dat.text), count=1)
+    if count == 1:
+        dat.text = updated
+        return True
+    return False
+
+def _apply_fog():
+    pipeline = _pipeline()
+    density = max(0.0, min(1.5, float(_value('Fogdensity', 0.35))))
+    _set(pipeline.op('COMPLETION'), 'Fogdensity', density)
+    _set(pipeline.op('INSTALLATION_OUTPUT'), 'Fogdensity', density)
+    _set(pipeline.op('TRIPLE_DISPLAY'), 'Fogdensity', density)
+    _set(pipeline.op('STEREO_PREVIEW'), 'Fogdensity', density)
+    _patch_float(pipeline.op('COMPLETION/fog_completion_PIXEL'),
+                 'fogDensity', 'FLEXGPU_FOG_DENSITY', density)
+    _patch_float(pipeline.op('INSTALLATION_OUTPUT/installation_grade_PIXEL'),
+                 'viewFogDensity', 'FLEXGPU_VIEW_FOG_DENSITY', density)
+    for mode in ('WRAP', 'ARTISTIC'):
+        for side in ('LEFT', 'CENTER', 'RIGHT'):
+            _patch_float(
+                pipeline.op('TRIPLE_DISPLAY/GRADE_%s_%s_PIXEL' % (mode, side)),
+                'viewFogDensity', 'FLEXGPU_VIEW_FOG_DENSITY', density)
+    for eye in ('LEFT', 'RIGHT'):
+        _patch_float(
+            pipeline.op('STEREO_PREVIEW/GRADE_%s_EYE_PIXEL' % eye),
+            'viewFogDensity', 'FLEXGPU_VIEW_FOG_DENSITY', density)
+
+def _apply_quality_profile():
+    controls = _controls()
+    profile = str(_value('Qualityprofile', '3080ti_16gb'))
+    presets = {
+        '3080ti_16gb': (384, 120000, 4.2, 5, 'Stream 512 / geometry 384 / 5 Hz'),
+        '4090': (512, 250000, 3.4, 10, 'Stream 512+ / geometry 512 / 10 Hz'),
+        '5090': (512, 262144, 3.0, 15, 'Stream 512+ / geometry 512 / 15 Hz'),
+    }
+    geometry, points, point_size, geometry_fps, hint = presets.get(
+        profile, presets['3080ti_16gb'])
+    _set(controls, 'Geometryresolution', geometry)
+    _set(controls, 'Pointbudget', points)
+    _set(controls, 'Pointsize', point_size)
+    _set(controls, 'Geometryfps', geometry_fps)
+    _set(controls, 'Profilehint', hint)
+    for name in ('Geometryresolution', 'Pointbudget', 'Pointsize', 'Geometryfps'):
+        apply_parameter(name)
+
+def _activate_geometry_bridge(provider):
+    pipeline = _pipeline()
+    adapter = pipeline.op('SOURCES/STREAMDIFFUSION_ADAPTER')
+    selected = str(provider).strip().lower()
+    bridge_name = (
+        'DEPTH_ANYTHING_GEOMETRY_BRIDGE'
+        if selected == 'depth_anything' else 'MOGE2_BRIDGE')
+    bridge = adapter.op(bridge_name) if adapter is not None else None
+    if bridge is None:
+        return False
+    _set(bridge, 'Enabled', True)
+    runtime_dat = bridge.op('bridge_runtime')
+    if runtime_dat is not None:
+        try:
+            runtime_dat.module.tick(bridge)
+        except Exception:
+            # A saved TOE can still be compiling its embedded module. The
+            # bridge's frame callback retries after compilation completes, and
+            # the external worker now waits for the listener instead of
+            # failing immediately.
+            pass
+    return True
+
+def _switch_runtime_geometry_contract(provider):
+    root = _pipeline().parent()
+    helpers = root.op('STARTUP/runtime_helpers') if root is not None else None
+    if helpers is None:
+        return False
+    try:
+        return bool(helpers.module.select_geometry_provider(root, provider))
+    except Exception:
+        # During a cold compile, startup/frame callbacks will finish loading
+        # runtime_helpers. Visual routing remains fail-closed until its strict
+        # metadata contract can be selected.
+        return False
+
+def apply_parameter(name):
+    pipeline = _pipeline()
+    key = str(name).lower()
+    if key == 'geometryprovider':
+        provider = _value('Geometryprovider', 'moge2')
+        _activate_geometry_bridge(provider)
+        _set(pipeline.op('SOURCES/STREAMDIFFUSION_ADAPTER'),
+             'Geometrysource', provider)
+        _switch_runtime_geometry_contract(provider)
+    elif key == 'displaymode':
+        _set(pipeline, 'Displaymode', _value('Displaymode', 'single'))
+    elif key == 'completionmode':
+        _set(pipeline.op('COMPLETION'), 'Mode',
+             _value('Completionmode', 'hybrid'))
+    elif key == 'fogdensity':
+        _apply_fog()
+    elif key == 'interactionstrength':
+        strength = max(0.0, min(2.0, float(_value('Interactionstrength', 0.35))))
+        _set(pipeline.op('SENSOR_INTERACTION'), 'Forcegain', strength)
+        _patch_float(pipeline.op('SENSOR_INTERACTION/interaction_field_PIXEL'),
+                     'forceGain', 'FLEXGPU_FORCE_GAIN', strength)
+    elif key == 'interactionsmoothing':
+        amount = max(0.0, min(0.92, float(_value('Interactionsmoothing', 0.35))))
+        _set(pipeline.op('SENSOR_INTERACTION'), 'Interactionsmoothing', amount)
+        _patch_float(pipeline.op('SENSOR_INTERACTION/INTERACTION_SMOOTH_PIXEL'),
+                     'interactionSmoothing',
+                     'FLEXGPU_INTERACTION_SMOOTHING', amount)
+    elif key == 'wrapyawdegrees':
+        _set(pipeline.op('POINT_RENDER'), 'Wrapyawdegrees',
+             float(_value('Wrapyawdegrees', 30.0)))
+    elif key == 'wrapfovdegrees':
+        _set(pipeline.op('POINT_RENDER'), 'Wrapfovdegrees',
+             float(_value('Wrapfovdegrees', 78.0)))
+    elif key in ('wrapcoverage', 'wrapnoise'):
+        parameter = 'Wrapcoverage' if key == 'wrapcoverage' else 'Wrapnoise'
+        symbol = 'wrapCoverage' if key == 'wrapcoverage' else 'wrapNoise'
+        marker = 'FLEXGPU_WRAP_COVERAGE' if key == 'wrapcoverage' else \
+                 'FLEXGPU_WRAP_NOISE'
+        value = max(0.0, min(1.0, float(_value(parameter, 0.4))))
+        _set(pipeline.op('TRIPLE_DISPLAY'), parameter, value)
+        for side in ('LEFT', 'CENTER', 'RIGHT'):
+            _patch_float(
+                pipeline.op('TRIPLE_DISPLAY/COVERAGE_WRAP_%s_PIXEL' % side),
+                symbol, marker, value)
+    elif key == 'qualityprofile':
+        _apply_quality_profile()
+    elif key == 'geometryresolution':
+        geometry = max(64, min(2048, int(_value('Geometryresolution', 384))))
+        _set(pipeline.op('RECONSTRUCTION'), 'Geometryresolution', geometry)
+        _set(_pipeline().parent().op('AI_PIPELINE'), 'Geometryresolution', geometry)
+    elif key == 'pointbudget':
+        points = max(1000, min(10000000, int(_value('Pointbudget', 120000))))
+        _set(pipeline.op('POINT_RENDER'), 'Maxpoints', points)
+        _set(_pipeline().parent().op('WORLD_CORE'), 'Pointbudget', points)
+    elif key == 'pointsize':
+        _set(pipeline.op('POINT_RENDER'), 'Pointsize',
+             max(0.25, min(128.0, float(_value('Pointsize', 4.2)))))
+    elif key == 'geometryfps':
+        fps = max(1, min(60, int(_value('Geometryfps', 5))))
+        for bridge_name in ('MOGE2_BRIDGE', 'DEPTH_ANYTHING_GEOMETRY_BRIDGE'):
+            bridge = pipeline.op(
+                'SOURCES/STREAMDIFFUSION_ADAPTER/' + bridge_name)
+            _set(bridge, 'Capturefps', fps)
+            _set(bridge, 'Profile', _value('Qualityprofile', '3080ti_16gb'))
+
+def apply_all():
+    for name in (
+        'Geometryprovider', 'Displaymode', 'Completionmode', 'Fogdensity',
+        'Interactionstrength', 'Interactionsmoothing', 'Wrapyawdegrees',
+        'Wrapfovdegrees', 'Wrapcoverage', 'Wrapnoise',
+        'Geometryresolution', 'Pointbudget', 'Pointsize', 'Geometryfps'):
+        apply_parameter(name)
+
+def onValueChange(par, prev):
+    apply_parameter(par.name)
+    return
+
+def onPulse(par):
+    if str(par.name).lower() == 'applyall':
+        apply_all()
+    return
+'''
+
+
 class BuildReport(object):
     """Small report object that is also safe to inspect from the Textport."""
 
@@ -944,6 +1249,42 @@ def _set(node, names, value):
         return True
     except Exception:
         return False
+
+
+def _value(node, names, fallback=None):
+    if isinstance(names, str):
+        names = (names,)
+    parameter = _par(node, *names)
+    if parameter is None:
+        return fallback
+    try:
+        return parameter.eval()
+    except Exception:
+        try:
+            return parameter.val
+        except Exception:
+            return fallback
+
+
+def _patch_shader_float(dat, symbol, marker, value):
+    """Patch one marked GLSL float constant without changing other source."""
+
+    if dat is None:
+        return False
+    number = r"[-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?"
+    pattern = (
+        r"(const\s+float\s+" + re.escape(str(symbol)) + r"\s*=\s*)" +
+        number + r"(\s*;\s*//\s*" + re.escape(str(marker)) + r")")
+    try:
+        updated, count = re.subn(
+            pattern, r"\g<1>" + ("%.6g" % float(value)) + r"\g<2>",
+            str(dat.text), count=1)
+        if count == 1:
+            dat.text = updated
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _expr(node, names, expression):
@@ -1190,29 +1531,49 @@ def _moge2_runtime_source(report):
     )
 
 
-def _build_moge2_bridge(adapter, input_rgb, report):
-    """Build a default-off, external-worker bridge without loading PyTorch in TD."""
+def _build_moge2_bridge(
+        adapter, input_rgb, report, name="MOGE2_BRIDGE", provider="moge2",
+        input_tcp=9211, input_udp=9210, result_tcp=9221, result_udp=9220):
+    """Build a default-off generated-image geometry bridge.
 
-    comp = _ensure(adapter, "baseCOMP", "MOGE2_BRIDGE", report)
-    _style(comp, 360, 180, (0.20, 0.39, 0.56),
-           "Opt-in MoGe-2 worker: newest RGB -> synchronized RGB/metric depth",
-           310, 135)
-    page = _page(comp, "MoGe-2 Bridge")
+    The MoGe and Depth Anything providers intentionally share the same
+    synchronized atlas decoder but use distinct provider identities and ports.
+    No model runtime is imported into TouchDesigner.
+    """
+
+    is_depth_anything = provider == "depth_anything"
+    title = "Depth Anything Geometry" if is_depth_anything else "MoGe-2"
+    comp = _ensure(adapter, "baseCOMP", name, report)
+    _style(
+        comp, -350 if is_depth_anything else 360,
+        -50 if is_depth_anything else 180,
+        (0.20, 0.48, 0.42) if is_depth_anything else (0.20, 0.39, 0.56),
+        "Opt-in %s worker: newest RGB -> synchronized RGB/pseudo-metric depth"
+        % title,
+        330, 135)
+    page = _page(comp, title + " Bridge")
     _custom(comp, page, "Toggle", "Enabled", False)
+    provider_par = _custom(
+        comp, page, "Str", "Provider", provider, label="Geometry Provider")
+    _set(comp, provider_par.name if provider_par is not None else "Provider", provider)
     _custom(comp, page, "Menu", "Profile", "3080ti_16gb",
             ("3080ti_16gb", "4090", "5090"))
     _custom(comp, page, "Str", "Workerhost", "127.0.0.1",
             label="Worker Host")
-    _custom(comp, page, "Int", "Workerinputtcp", 9211,
+    _custom(comp, page, "Int", "Workerinputtcp", input_tcp,
             label="Worker Input TCP")
-    _custom(comp, page, "Int", "Workerinputudp", 9210,
+    _custom(comp, page, "Int", "Workerinputudp", input_udp,
             label="Worker Input UDP")
     _custom(comp, page, "Str", "Resultbindhost", "127.0.0.1",
             label="Result Bind Host")
-    _custom(comp, page, "Int", "Resulttcp", 9221,
+    _custom(comp, page, "Int", "Resulttcp", result_tcp,
             label="Result TCP")
-    _custom(comp, page, "Int", "Resultudp", 9220,
+    _custom(comp, page, "Int", "Resultudp", result_udp,
             label="Result UDP")
+    _set(comp, "Workerinputtcp", input_tcp)
+    _set(comp, "Workerinputudp", input_udp)
+    _set(comp, "Resulttcp", result_tcp)
+    _set(comp, "Resultudp", result_udp)
     _custom(comp, page, "Int", "Capturefps", 5,
             label="Geometry Capture FPS")
     _custom(comp, page, "Toggle", "Flipvertical", True,
@@ -1290,10 +1651,12 @@ def _build_moge2_bridge(adapter, input_rgb, report):
                              ["detail", "enable only after the worker is listening"]],
            report)
     _text(comp, "README_FIRST",
-          "MOGE-2 LIVE BRIDGE (DEFAULT OFF)\n\n"
+          ("%s LIVE GEOMETRY BRIDGE (DEFAULT OFF)\n\n" % title.upper()) +
           "IN_RGB must be the exact StreamDiffusionTD image. The external worker "
-          "owns PyTorch/MoGe and returns a WorldBus rgba8_atlas. This COMP publishes "
-          "the returned RGB with its metric depth/mask/confidence so frames cannot "
+          "owns the model and returns a WorldBus rgba8_atlas. This COMP publishes "
+          "the returned RGB with its depth/mask/confidence so frames cannot "
+          "cross. The MoGe provider's returned RGB with its metric depth remains "
+          "synchronized. Frames cannot "
           "cross. TD operator access remains on the main thread; socket threads move "
           "bounded immutable bytes only. FRAME_STATE and CAMERA_METADATA describe "
           "the same confirmed atlas upload. Resultvalid stays false until a forced "
@@ -1301,9 +1664,32 @@ def _build_moge2_bridge(adapter, input_rgb, report):
           "text in metadata.",
           report)
     try:
-        comp.store("moge2_bridge_runtime_dat", runtime_dat.path)
+        comp.store("generated_geometry_bridge_runtime_dat", runtime_dat.path)
     except Exception:
         pass
+    # The bounded installer creates operators through regular TD Python, which
+    # does not auto-place them. Keep the generated bridge readable without
+    # moving any private or user-authored operator.
+    _style(rgb_in, -500, 250, (0.20, 0.48, 0.42), "Generated RGB input")
+    _style(atlas, -275, 250, (0.20, 0.48, 0.42), "Synchronized atlas")
+    _style(scale_bias, -275, 50, (0.20, 0.48, 0.42), "Depth scale / bias")
+    for index, node in enumerate((rgb, depth, confidence, mask)):
+        y = 350 - index * 200
+        _style(node, 0, y, (0.20, 0.48, 0.42), node.name)
+        output = comp.op(("OUT_RGB", "OUT_DEPTH", "OUT_CONFIDENCE", "OUT_MASK")[index])
+        _style(output, 250, y, (0.20, 0.48, 0.42), output.name)
+        shader_source = comp.op((
+            "UNPACK_RGB_PIXEL", "UNPACK_DEPTH_METRES_PIXEL",
+            "UNPACK_CONFIDENCE_PIXEL", "UNPACK_MASK_PIXEL")[index])
+        _style(shader_source, 0, y + 110, (0.16, 0.32, 0.28), "Managed shader")
+    for index, node in enumerate((
+            runtime_dat, execute, script_callbacks,
+            comp.op("FRAME_STATE"), comp.op("CAMERA_METADATA"),
+            comp.op("STATUS"), comp.op("README_FIRST"))):
+        if node is not None:
+            _style(node, -500 if index < 3 else 500,
+                   50 - (index if index < 3 else index - 3) * 150,
+                   (0.16, 0.32, 0.28), node.name)
     return comp
 
 
@@ -1326,6 +1712,67 @@ def _wire_moge2_routes(adapter, moge2, fallbacks, report):
         _expr(route, "index",
               "1 if (op('MOGE2_BRIDGE').par.Enabled and "
               "op('MOGE2_BRIDGE').par.Resultvalid) else 0")
+        routes.append(route)
+    for index, (name, route) in enumerate(zip(
+        ("OUT_RGB", "OUT_DEPTH", "OUT_CONFIDENCE", "OUT_MASK"), routes)):
+        _out_top(adapter, name, route, index, report)
+    return tuple(routes)
+
+
+def _build_depth_anything_geometry_bridge(adapter, input_rgb, report):
+    """Build the isolated generated-image Depth Anything geometry provider."""
+
+    return _build_moge2_bridge(
+        adapter, input_rgb, report,
+        name="DEPTH_ANYTHING_GEOMETRY_BRIDGE",
+        provider="depth_anything",
+        input_tcp=9251,
+        input_udp=9250,
+        result_tcp=9261,
+        result_udp=9260,
+    )
+
+
+def _wire_generated_geometry_routes(adapter, depth_anything, moge2_routes, report):
+    """Select MoGe or Depth Anything as one atomic geometry source.
+
+    MoGe keeps its established fallback behavior. Selecting Depth Anything
+    fails closed to zero until that provider confirms a fresh atlas, preventing
+    accidental mixing with a stale MoGe or placeholder frame.
+    """
+
+    if len(moge2_routes) != 4 or any(node is None for node in moge2_routes):
+        raise RuntimeError("generated geometry selection requires four MoGe routes")
+    zero = _ensure(
+        adapter, "constantTOP", "DEPTH_ANYTHING_GEOMETRY_FAIL_CLOSED_ZERO", report)
+    _style(zero, 325, -500, (0.20, 0.48, 0.42),
+           "Selected Depth Anything invalid -> zero")
+    _set_resolution(zero, 384, 384)
+    _set(zero, "format", "rgba32float")
+    for names in (("colorr", "color1r"), ("colorg", "color1g"),
+                  ("colorb", "color1b"), ("colora", "color1a", "alpha")):
+        _set(zero, names, 0.0)
+    route_specs = (
+        ("GENERATED_GEOMETRY_RGB_ROUTE", moge2_routes[0], 0),
+        ("GENERATED_GEOMETRY_DEPTH_ROUTE", moge2_routes[1], 1),
+        ("GENERATED_GEOMETRY_CONFIDENCE_ROUTE", moge2_routes[2], 2),
+        ("GENERATED_GEOMETRY_MASK_ROUTE", moge2_routes[3], 3),
+    )
+    routes = []
+    selector = (
+        "parent().par.Geometrysource.eval() == 'depth_anything'")
+    valid = (
+        "op('DEPTH_ANYTHING_GEOMETRY_BRIDGE').par.Enabled and "
+        "op('DEPTH_ANYTHING_GEOMETRY_BRIDGE').par.Resultvalid")
+    for name, moge2_route, output_index in route_specs:
+        route = _ensure(adapter, "switchTOP", name, report)
+        _connect(moge2_route, route, 0, 0, report, replace=True)
+        _connect(depth_anything, route, 1, output_index, report, replace=True)
+        _connect(zero, route, 2, 0, report, replace=True)
+        _expr(route, "index",
+              "((1 if (%s) else 2) if (%s) else 0)" % (valid, selector))
+        _style(route, 325, (575, 275, -25, -350)[output_index],
+               (0.20, 0.48, 0.42), name)
         routes.append(route)
     for index, (name, route) in enumerate(zip(
         ("OUT_RGB", "OUT_DEPTH", "OUT_CONFIDENCE", "OUT_MASK"), routes)):
@@ -1548,6 +1995,8 @@ def _build_sources(parent, report):
            "REPLACE THESE TWO TOPs WITH StreamDiffusionTD.tox OUTPUTS", 300, 130)
     adapter_page = _page(adapter, "Adapter")
     _custom(adapter, adapter_page, "Toggle", "Enabled", False)
+    _custom(adapter, adapter_page, "Menu", "Geometrysource", "moge2",
+            ("moge2", "depth_anything"), label="Generated Geometry Source")
     _custom(adapter, adapter_page, "Str", "RGBContract", TOP_CONTRACTS["RGB"])
     _custom(adapter, adapter_page, "Str", "DepthContract", TOP_CONTRACTS["DEPTH"])
     tox_rgb = _ensure(adapter, "constantTOP", "REPLACE_WITH_STREAMDIFFUSION_RGB", report)
@@ -1571,21 +2020,28 @@ def _build_sources(parent, report):
     _set(tox_mask, ("colorg", "color1g"), 1.0)
     _set(tox_mask, ("colorb", "color1b"), 1.0)
     moge2 = _build_moge2_bridge(adapter, tox_rgb, report)
-    _wire_moge2_routes(
+    moge2_routes = _wire_moge2_routes(
         adapter, moge2, (tox_rgb, tox_depth, tox_confidence, tox_mask), report)
+    depth_anything_geometry = _build_depth_anything_geometry_bridge(
+        adapter, tox_rgb, report)
+    _wire_generated_geometry_routes(
+        adapter, depth_anything_geometry, moge2_routes, report)
     _table(adapter, "ADAPTER_CONTRACT", [
         ["output", "required contract", "replace node"],
-        ["OUT_RGB", TOP_CONTRACTS["RGB"], "MOGE2_RGB_ROUTE"],
-        ["OUT_DEPTH", TOP_CONTRACTS["DEPTH"], "MOGE2_DEPTH_ROUTE"],
-        ["OUT_CONFIDENCE", TOP_CONTRACTS["CONFIDENCE"], "MOGE2_CONFIDENCE_ROUTE"],
-        ["OUT_MASK", "R valid mask normalized 0..1", "MOGE2_MASK_ROUTE"],
+        ["OUT_RGB", TOP_CONTRACTS["RGB"], "GENERATED_GEOMETRY_RGB_ROUTE"],
+        ["OUT_DEPTH", TOP_CONTRACTS["DEPTH"], "GENERATED_GEOMETRY_DEPTH_ROUTE"],
+        ["OUT_CONFIDENCE", TOP_CONTRACTS["CONFIDENCE"],
+         "GENERATED_GEOMETRY_CONFIDENCE_ROUTE"],
+        ["OUT_MASK", "R valid mask normalized 0..1",
+         "GENERATED_GEOMETRY_MASK_ROUTE"],
     ], report)
     _text(adapter, "README_FIRST", "STREAMDIFFUSIONTD ADAPTER BOUNDARY\n\n"
           "Demo mode works without this branch. Later place StreamDiffusionTD.tox here, "
           "wire its image to OUT_RGB, depth estimate to OUT_DEPTH, and optional "
           "validity/confidence to OUT_CONFIDENCE. Increment Session Epoch when a "
           "model, prompt generation, calibration, or producer session changes. "
-          "If the TOX emits only RGB, keep DEMO_DEPTH or replace OUT_DEPTH with any depth model. "
+          "If the TOX emits only RGB, choose MoGe-2 or Depth Anything on "
+          "Geometry Source; each bridge returns synchronized generated RGB and depth. "
           "Do not modify downstream POSITION/COLOR contracts.", report)
 
     rgb_switch = _ensure(comp, "switchTOP", "RGB_SOURCE", report)
@@ -1866,6 +2322,16 @@ def _build_reconstruction(parent, report):
             label="Installation Near (metres)")
     _custom(comp, page, "Float", "Installationfar", 4.50,
             label="Installation Far (metres)")
+    _custom(comp, page, "Toggle", "Depthanythingdepthoverride", True,
+            label="Depth Anything Depth Override")
+    _custom(comp, page, "Float", "Depthanythingdepthscale", 1.0,
+            label="Depth Anything Depth Scale")
+    _custom(comp, page, "Float", "Depthanythingdepthbias", 0.0,
+            label="Depth Anything Depth Bias")
+    _custom(comp, page, "Float", "Depthanythingnear", 0.5,
+            label="Depth Anything Near (metres)")
+    _custom(comp, page, "Float", "Depthanythingfar", 4.0,
+            label="Depth Anything Far (metres)")
     _custom(comp, page, "Float", "Fxnormalized", 0.0,
             label="fx / image width (0 = 60 degree default)")
     _custom(comp, page, "Float", "Fynormalized", 0.0,
@@ -1914,6 +2380,26 @@ def _build_reconstruction(parent, report):
     return comp
 
 
+def _build_interaction_smoothing(comp, interaction, report):
+    """Add bounded GPU smoothing after the world-space interaction shader."""
+
+    seed = _ensure(comp, "constantTOP", "INTERACTION_SMOOTH_SEED", report)
+    _set_resolution(seed, 384, 384)
+    _expr(seed, ("resolutionw", "resw"), "op('interaction_field').width")
+    _expr(seed, ("resolutionh", "resh"), "op('interaction_field').height")
+    _set(seed, "format", "rgba32float")
+    for names in (("colorr", "color1r"), ("colorg", "color1g"),
+                  ("colorb", "color1b"), ("colora", "color1a", "alpha")):
+        _set(seed, names, 0.0)
+    history = _ensure(comp, "feedbackTOP", "INTERACTION_SMOOTH_HISTORY", report)
+    _connect(seed, history, 0, 0, report, replace=True)
+    smoothed = _glsl(
+        comp, "INTERACTION_SMOOTH", "interaction_smoothing",
+        [interaction, history], report, True)
+    _set(history, ("targettop", "target", "top"), smoothed.path)
+    return smoothed
+
+
 def _build_sensor(parent, report):
     comp = _ensure(parent, "baseCOMP", "SENSOR_INTERACTION", report)
     _style(comp, -730, 300, (0.18, 0.46, 0.34),
@@ -1925,6 +2411,8 @@ def _build_sensor(parent, report):
     _custom(comp, page, "Float", "Interactionradius", 0.55,
             label="Interaction Radius (metres)")
     _custom(comp, page, "Float", "Forcegain", 0.35, label="Force Gain")
+    _custom(comp, page, "Float", "Interactionsmoothing", 0.35,
+            label="Interaction Smoothing")
     _custom(comp, page, "Float", "Sensoragems", -1.0,
             label="Sensor Age (ms; -1 unknown)")
     _custom(comp, page, "Int", "Sensorframeid", -1, label="Sensor Frame ID")
@@ -2033,8 +2521,11 @@ def _build_sensor(parent, report):
     valid_sensor_position = _glsl(
         comp, "APPLY_SENSOR_VALIDITY", "sensor_validity",
         [sensor_position, mask_switch, confidence_switch], report, True)
-    interaction = _glsl(comp, "interaction_field", "interaction_field",
-                        [position, valid_sensor_position], report, False)
+    raw_interaction = _glsl(
+        comp, "interaction_field", "interaction_field",
+        [position, valid_sensor_position], report, False)
+    interaction = _build_interaction_smoothing(
+        comp, raw_interaction, report)
     interaction_debug = _glsl(
         comp, "INTERACTION_DEBUG", "interaction_debug", [interaction], report, False)
     _out_top(comp, "OUT_SENSOR_POSITION", valid_sensor_position, 0, report)
@@ -2207,7 +2698,9 @@ def _build_point_render(parent, report):
     _custom(comp, page, "Float", "Ipdmetres", 0.064,
             label="Preview Inter-Pupillary Distance (metres)")
     _custom(comp, page, "Float", "Surfacefovdegrees", 60.0,
-            label="Triple Surface Camera FOV (degrees)")
+            label="Artistic Surface Camera FOV (degrees)")
+    _custom(comp, page, "Float", "Wrapfovdegrees", 78.0,
+            label="Panoramic Surface Camera FOV (degrees)")
     _custom(comp, page, "Float", "Wrapyawdegrees", 30.0,
             label="Panoramic Side Yaw (degrees)")
     _custom(comp, page, "Float", "Artisticyawdegrees", 18.0,
@@ -2379,7 +2872,7 @@ def _build_point_render(parent, report):
                 _set(camera, "rx", 0.0)
                 _expr(camera, "ry", yaw_expression)
                 _set(camera, "rz", 0.0)
-                _expr(camera, "fov", "parent().par.Surfacefovdegrees.eval()")
+                _expr(camera, "fov", "parent().par.Wrapfovdegrees.eval()")
                 _set(camera, "near", 0.05)
                 _set(camera, "far", 100.0)
                 _set(camera, "ipdshift", 0.0)
@@ -2520,6 +3013,10 @@ def _build_triple_display(parent, report):
             label="Per-Surface Fog Density")
     _custom(comp, page, "Float", "Fogradius", 2.0,
             label="Per-Surface Fog Radius")
+    _custom(comp, page, "Float", "Wrapcoverage", 0.55,
+            label="Panoramic Procedural Coverage")
+    _custom(comp, page, "Float", "Wrapnoise", 0.42,
+            label="Panoramic Coverage Noise")
 
     inputs = {}
     input_index = 0
@@ -2532,14 +3029,43 @@ def _build_triple_display(parent, report):
     fog_plate = _in_top(comp, "FOG_PLATE_IN", input_index, report)
 
     graded = {}
+    coverage = {}
     output_index = 0
     layouts = {}
     for mode in ("WRAP", "ARTISTIC"):
-        for side in ("LEFT", "CENTER", "RIGHT"):
+        for side_index, side in enumerate(("LEFT", "CENTER", "RIGHT")):
             key = mode + "_" + side
+            grade_input = inputs[key]
+            if mode == "WRAP":
+                coverage[key] = _glsl(
+                    comp, "COVERAGE_" + key, "panoramic_coverage",
+                    [inputs[key]], report, False)
+                coverage_source = comp.op("COVERAGE_" + key + "_PIXEL")
+                _patch_shader_float(
+                    coverage_source, "wrapCoverage",
+                    "FLEXGPU_WRAP_COVERAGE",
+                    _value(comp, "Wrapcoverage", 0.55))
+                _patch_shader_float(
+                    coverage_source, "wrapNoise",
+                    "FLEXGPU_WRAP_NOISE",
+                    _value(comp, "Wrapnoise", 0.42))
+                _patch_shader_float(
+                    coverage_source, "wrapPanelIndex",
+                    "FLEXGPU_WRAP_PANEL_INDEX", float(side_index))
+                _set_resolution(coverage[key], 960, 540)
+                grade_input = coverage[key]
             graded[key] = _glsl(
                 comp, "GRADE_" + key, "installation_grade",
-                [inputs[key], fog_plate], report, False)
+                [grade_input, fog_plate], report, False)
+            grade_source = comp.op("GRADE_" + key + "_PIXEL")
+            _patch_shader_float(
+                grade_source, "viewFogDensity",
+                "FLEXGPU_VIEW_FOG_DENSITY",
+                _value(comp, "Fogdensity", 0.35))
+            _patch_shader_float(
+                grade_source, "viewFogRadius",
+                "FLEXGPU_VIEW_FOG_RADIUS",
+                _value(comp, "Fogradius", 2.0))
             _set_resolution(graded[key], 960, 540)
             _out_top(comp, "OUT_" + key, graded[key], output_index, report)
             output_index += 1
@@ -2782,6 +3308,69 @@ def install_depth_anything_sensor_bridge(root=None):
     return bridge
 
 
+def install_depth_anything_geometry_bridge(root=None):
+    """Install only the alternative generated-image Depth Anything branch.
+
+    This does not touch the webcam/audience sensor bridge. It reuses the
+    adapter's current generated RGB input, adds isolated ports and routes, and
+    leaves ``Geometrysource`` on its existing value (MoGe by default).
+    """
+
+    global LAST_REPORT
+    report = BuildReport()
+    LAST_REPORT = report
+    if root is None:
+        root = _op(ROOT_PATH)
+    elif isinstance(root, str):
+        root = _op(root)
+    if root is None:
+        raise RuntimeError("FlexGPU root %s does not exist" % ROOT_PATH)
+    adapter = root.op(
+        "WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER")
+    if adapter is None:
+        raise RuntimeError(
+            "StreamDiffusion adapter is missing; build the working pipeline first")
+
+    existing = adapter.op(
+        "DEPTH_ANYTHING_GEOMETRY_BRIDGE/bridge_runtime")
+    if existing is not None:
+        try:
+            existing.module.stop(
+                adapter.op("DEPTH_ANYTHING_GEOMETRY_BRIDGE"))
+        except Exception:
+            pass
+
+    page = _page(adapter, "Adapter")
+    _custom(adapter, page, "Menu", "Geometrysource", "moge2",
+            ("moge2", "depth_anything"), label="Generated Geometry Source")
+    moge2_routes = tuple(adapter.op(name) for name in (
+        "MOGE2_RGB_ROUTE", "MOGE2_DEPTH_ROUTE",
+        "MOGE2_CONFIDENCE_ROUTE", "MOGE2_MASK_ROUTE"))
+    if any(route is None for route in moge2_routes):
+        raise RuntimeError(
+            "MoGe route boundary is missing; install the MoGe bridge first")
+    input_rgb = _first_input(adapter.op("MOGE2_BRIDGE"))
+    if input_rgb is None:
+        input_rgb = _first_input(moge2_routes[0])
+    if input_rgb is None:
+        input_rgb = adapter.op("REPLACE_WITH_STREAMDIFFUSION_RGB")
+    if input_rgb is None:
+        raise RuntimeError("could not preserve the generated RGB source")
+
+    bridge = _build_depth_anything_geometry_bridge(adapter, input_rgb, report)
+    _wire_generated_geometry_routes(adapter, bridge, moge2_routes, report)
+    try:
+        bridge.store(
+            "depth_anything_geometry_install_report", report.as_dict())
+    except Exception:
+        pass
+    print("[FlexGPU runtime] Depth Anything geometry bridge installed disabled: "
+          "%s (%d created, %d reused, %d warnings)" %
+          (bridge.path, len(report.created), len(report.reused),
+           len(report.warnings)))
+    return bridge
+
+
 def install_moge2_bridge(root=None):
     """Install only the opt-in MoGe-2 branch into an existing working adapter.
 
@@ -2813,15 +3402,21 @@ def install_moge2_bridge(root=None):
             pass
 
     fallback_names = (
-        ("OUT_RGB", "MOGE2_RGB_ROUTE", "REPLACE_WITH_STREAMDIFFUSION_RGB"),
-        ("OUT_DEPTH", "MOGE2_DEPTH_ROUTE", "REPLACE_WITH_DEPTH_ESTIMATE"),
-        ("OUT_CONFIDENCE", "MOGE2_CONFIDENCE_ROUTE", "REPLACE_WITH_CONFIDENCE"),
-        ("OUT_MASK", "MOGE2_MASK_ROUTE", "REPLACE_WITH_VALID_MASK"),
+        ("OUT_RGB", "GENERATED_GEOMETRY_RGB_ROUTE", "MOGE2_RGB_ROUTE",
+         "REPLACE_WITH_STREAMDIFFUSION_RGB"),
+        ("OUT_DEPTH", "GENERATED_GEOMETRY_DEPTH_ROUTE", "MOGE2_DEPTH_ROUTE",
+         "REPLACE_WITH_DEPTH_ESTIMATE"),
+        ("OUT_CONFIDENCE", "GENERATED_GEOMETRY_CONFIDENCE_ROUTE",
+         "MOGE2_CONFIDENCE_ROUTE", "REPLACE_WITH_CONFIDENCE"),
+        ("OUT_MASK", "GENERATED_GEOMETRY_MASK_ROUTE", "MOGE2_MASK_ROUTE",
+         "REPLACE_WITH_VALID_MASK"),
     )
     fallbacks = []
-    for output_name, route_name, placeholder_name in fallback_names:
+    for output_name, selector_name, route_name, placeholder_name in fallback_names:
         output = adapter.op(output_name)
         source = _first_input(output)
+        if source is not None and str(getattr(source, "name", "")) == selector_name:
+            source = _first_input(source)
         if source is not None and str(getattr(source, "name", "")) == route_name:
             source = _first_input(source)
         if source is None:
@@ -2831,7 +3426,15 @@ def install_moge2_bridge(root=None):
         fallbacks.append(source)
 
     bridge = _build_moge2_bridge(adapter, fallbacks[0], report)
-    _wire_moge2_routes(adapter, bridge, tuple(fallbacks), report)
+    routes = _wire_moge2_routes(adapter, bridge, tuple(fallbacks), report)
+    depth_anything = adapter.op("DEPTH_ANYTHING_GEOMETRY_BRIDGE")
+    if depth_anything is not None:
+        page = _page(adapter, "Adapter")
+        _custom(adapter, page, "Menu", "Geometrysource", "moge2",
+                ("moge2", "depth_anything"),
+                label="Generated Geometry Source")
+        _wire_generated_geometry_routes(
+            adapter, depth_anything, routes, report)
     try:
         bridge.store("moge2_bridge_install_report", report.as_dict())
     except Exception:
@@ -2841,6 +3444,263 @@ def install_moge2_bridge(root=None):
           (bridge.path, len(report.created), len(report.reused),
            len(report.warnings)))
     return bridge
+
+
+def _build_show_control(pipeline, report):
+    """Create one public control surface without owning private components."""
+
+    control = _ensure(pipeline, "baseCOMP", "SHOW_CONTROL", report)
+    _style(
+        control, -1080, 640, (0.52, 0.28, 0.16),
+        "Live show controls: source, display, completion, interaction and quality",
+        310, 155)
+    adapter = pipeline.op("SOURCES/STREAMDIFFUSION_ADAPTER")
+    completion = pipeline.op("COMPLETION")
+    sensor = pipeline.op("SENSOR_INTERACTION")
+    render = pipeline.op("POINT_RENDER")
+    triple = pipeline.op("TRIPLE_DISPLAY")
+
+    show_page = _page(control, "Show Controls")
+    _custom(
+        control, show_page, "Menu", "Geometryprovider",
+        _value(adapter, "Geometrysource", "moge2"),
+        ("moge2", "depth_anything"), label="Geometry Provider")
+    _custom(
+        control, show_page, "Menu", "Displaymode",
+        _value(pipeline, "Displaymode", "single"),
+        ("single", "panoramic_wrap", "artistic_multi_angle"),
+        label="Display Mode")
+    _custom(
+        control, show_page, "Menu", "Completionmode",
+        _value(completion, "Mode", "hybrid"),
+        ("fog", "procedural", "hybrid"), label="Completion Mode")
+    _custom(
+        control, show_page, "Float", "Fogdensity",
+        _value(completion, "Fogdensity", 0.35), label="Fog Density")
+    _custom(
+        control, show_page, "Float", "Interactionstrength",
+        _value(sensor, "Forcegain", 0.35), label="Interaction Strength")
+    _custom(
+        control, show_page, "Float", "Interactionsmoothing",
+        _value(sensor, "Interactionsmoothing", 0.35),
+        label="Interaction Smoothing")
+    _custom(
+        control, show_page, "Float", "Wrapyawdegrees",
+        _value(render, "Wrapyawdegrees", 30.0),
+        label="Panoramic Side Yaw")
+    _custom(
+        control, show_page, "Float", "Wrapfovdegrees",
+        _value(render, "Wrapfovdegrees", 78.0),
+        label="Panoramic Surface FOV")
+    _custom(
+        control, show_page, "Float", "Wrapcoverage",
+        _value(triple, "Wrapcoverage", 0.55),
+        label="Panoramic Coverage")
+    _custom(
+        control, show_page, "Float", "Wrapnoise",
+        _value(triple, "Wrapnoise", 0.42),
+        label="Panoramic Coverage Noise")
+    _custom(control, show_page, "Pulse", "Applyall", False,
+            label="Apply All Show Controls")
+
+    quality_page = _page(control, "Quality")
+    bridge = adapter.op("MOGE2_BRIDGE") if adapter is not None else None
+    _custom(
+        control, quality_page, "Menu", "Qualityprofile",
+        _value(bridge, "Profile", "3080ti_16gb"),
+        ("3080ti_16gb", "4090", "5090"), label="GPU Quality Profile")
+    reconstruction = pipeline.op("RECONSTRUCTION")
+    _custom(
+        control, quality_page, "Int", "Geometryresolution",
+        int(_value(reconstruction, "Geometryresolution", 384)),
+        label="Geometry Resolution")
+    _custom(
+        control, quality_page, "Int", "Pointbudget",
+        int(_value(render, "Maxpoints", 120000)), label="Point Budget")
+    _custom(
+        control, quality_page, "Float", "Pointsize",
+        _value(render, "Pointsize", 4.2), label="Point Size")
+    _custom(
+        control, quality_page, "Int", "Geometryfps",
+        int(_value(bridge, "Capturefps", 5)), label="Geometry Capture FPS")
+    _custom(
+        control, quality_page, "Str", "Profilehint",
+        "Stream 512 / geometry 384 / 5 Hz",
+        label="Profile Guidance")
+
+    callbacks = _ensure(
+        control, "parameterexecuteDAT", "show_control_callbacks",
+        report, optional=True)
+    if callbacks is not None:
+        try:
+            callbacks.text = SHOW_CONTROL_CALLBACKS
+        except Exception as exc:
+            report.warn("Could not update %s: %s" % (callbacks.path, exc))
+        _set(callbacks, "op", control.path)
+        _set(callbacks, "pars", "*")
+        _set(callbacks, "valuechange", True)
+        _set(callbacks, "onpulse", True)
+        _set(callbacks, "active", True)
+        _style(
+            callbacks, -260, 130, (0.36, 0.22, 0.16),
+            "Applies only public managed parameters", 250, 100)
+    _table(control, "CONTROL_TARGETS", [
+        ["control", "managed target"],
+        ["Geometry Provider", "STREAMDIFFUSION_ADAPTER/Geometrysource"],
+        ["Display Mode", "WORKING_PIPELINE/Displaymode"],
+        ["Completion / Fog", "COMPLETION + view-grade shader constants"],
+        ["Interaction", "SENSOR_INTERACTION force + low-latency smoothing"],
+        ["Panoramic", "wrap camera yaw/FOV + procedural atmosphere"],
+        ["Quality", "geometry grid, point budget/size, bridge capture FPS"],
+    ], report)
+    _text(
+        control, "README_FIRST",
+        "SHOW CONTROL\n\n"
+        "These controls update only the public FlexGPU managed network. GPU "
+        "profiles never modify private StreamDiffusionTD internals or output "
+        "resolution: all installation walls remain at the configured 1920x1080. "
+        "Panoramic Coverage adds procedural atmosphere only in empty wrap views; "
+        "it never stretches the source image. Use Apply All after reopening an "
+        "older saved TOE if you want every displayed value reapplied.",
+        report)
+    return control
+
+
+def install_show_control_upgrade(root=None):
+    """Install panoramic coverage, interaction smoothing and show controls.
+
+    The bounded upgrade changes only public operators below WORKING_PIPELINE.
+    Single and artistic rendering inputs remain untouched, no node is removed,
+    and the current TOE is not saved.
+    """
+
+    global LAST_REPORT
+    report = BuildReport()
+    LAST_REPORT = report
+    if root is None:
+        root = _op(ROOT_PATH)
+    elif isinstance(root, str):
+        root = _op(root)
+    if root is None:
+        raise RuntimeError("FlexGPU root %s does not exist" % ROOT_PATH)
+    pipeline = root.op(PIPELINE_NAME)
+    if pipeline is None:
+        raise RuntimeError("WORKING_PIPELINE is missing; build it first")
+
+    render = pipeline.op("POINT_RENDER")
+    if render is None:
+        raise RuntimeError("POINT_RENDER is missing")
+    render_page = _page(render, "Render")
+    _custom(render, render_page, "Float", "Wrapfovdegrees", 78.0,
+            label="Panoramic Surface Camera FOV (degrees)")
+    for side in ("LEFT", "CENTER", "RIGHT"):
+        camera = render.op("CAMERA_WRAP_" + side)
+        if camera is not None:
+            _expr(camera, "fov", "parent().par.Wrapfovdegrees.eval()")
+
+    sensor = pipeline.op("SENSOR_INTERACTION")
+    if sensor is None:
+        raise RuntimeError("SENSOR_INTERACTION is missing")
+    sensor_page = _page(sensor, "Sensor")
+    _custom(sensor, sensor_page, "Float", "Interactionsmoothing", 0.35,
+            label="Interaction Smoothing")
+    raw_interaction = sensor.op("interaction_field")
+    if raw_interaction is None:
+        raise RuntimeError("managed interaction field is missing")
+    interaction = _build_interaction_smoothing(
+        sensor, raw_interaction, report)
+    _out_top(sensor, "OUT_INTERACTION", interaction, 1, report)
+    debug = sensor.op("INTERACTION_DEBUG")
+    if debug is not None:
+        _connect(interaction, debug, 0, 0, report, replace=True)
+
+    # Rebuild only the public triple-display stage. Preserve the commissioned
+    # per-wall resolution while its six inputs and output connector order stay
+    # stable; artistic grade inputs remain direct.
+    existing_triple = pipeline.op("TRIPLE_DISPLAY")
+    reference_grade = (
+        existing_triple.op("GRADE_WRAP_CENTER")
+        if existing_triple is not None else None)
+    surface_width = int(_value(reference_grade, ("resolutionw", "resw"), 1920))
+    surface_height = int(_value(reference_grade, ("resolutionh", "resh"), 1080))
+    triple = _build_triple_display(pipeline, report)
+    for mode in ("WRAP", "ARTISTIC"):
+        for side in ("LEFT", "CENTER", "RIGHT"):
+            if mode == "WRAP":
+                _set_resolution(
+                    triple.op("COVERAGE_WRAP_" + side),
+                    surface_width, surface_height)
+            _set_resolution(
+                triple.op("GRADE_%s_%s" % (mode, side)),
+                surface_width, surface_height)
+        _set_resolution(
+            triple.op(mode + "_MOSAIC"),
+            surface_width * 3, surface_height)
+        _set_resolution(
+            triple.op(mode + "_MOSAIC_FALLBACK"),
+            surface_width * 3, surface_height)
+    control = _build_show_control(pipeline, report)
+    try:
+        control.store("show_control_upgrade_report", report.as_dict())
+    except Exception:
+        pass
+    print("[FlexGPU runtime] show-control upgrade ready: %s "
+          "(%d created, %d reused, %d warnings)" %
+          (control.path, len(report.created), len(report.reused),
+           len(report.warnings)))
+    return control
+
+
+def install_venue_1080p_outputs(root=None):
+    """Set the single wall and every triple-wall feed to native 1920x1080.
+
+    This bounded upgrade changes only public managed TOP resolutions. It does
+    not rebuild the working pipeline, change GPU/geometry budgets, touch
+    private adapters, alter stereo preview resolution, or save the TOE.
+    """
+
+    if root is None:
+        root = _op(ROOT_PATH)
+    elif isinstance(root, str):
+        root = _op(root)
+    if root is None:
+        raise RuntimeError("FlexGPU root %s does not exist" % ROOT_PATH)
+    pipeline = root.op(PIPELINE_NAME)
+    if pipeline is None:
+        raise RuntimeError("WORKING_PIPELINE is missing; build it first")
+
+    wall_width, wall_height = 1920, 1080
+    for path in (
+        "POINT_RENDER/METRIC_RENDER_CENTER",
+        "POINT_RENDER/METRIC_MONO_FALLBACK",
+        "INSTALLATION_OUTPUT/installation_grade",
+    ):
+        _set_resolution(pipeline.op(path), wall_width, wall_height)
+    for mode in ("WRAP", "ARTISTIC"):
+        for side in ("LEFT", "CENTER", "RIGHT"):
+            _set_resolution(
+                pipeline.op("POINT_RENDER/METRIC_RENDER_%s_%s" % (mode, side)),
+                wall_width, wall_height)
+            if mode == "WRAP":
+                _set_resolution(
+                    pipeline.op("TRIPLE_DISPLAY/COVERAGE_WRAP_" + side),
+                    wall_width, wall_height)
+            _set_resolution(
+                pipeline.op("TRIPLE_DISPLAY/GRADE_%s_%s" % (mode, side)),
+                wall_width, wall_height)
+        _set_resolution(
+            pipeline.op("TRIPLE_DISPLAY/%s_MOSAIC" % mode),
+            wall_width * 3, wall_height)
+        _set_resolution(
+            pipeline.op("TRIPLE_DISPLAY/%s_MOSAIC_FALLBACK" % mode),
+            wall_width * 3, wall_height)
+    try:
+        pipeline.store("venue_output_profile", "venue_1080p")
+    except Exception:
+        pass
+    print("[FlexGPU runtime] venue outputs ready: single and six wall feeds "
+          "1920x1080; mosaics 5760x1080; TOE remains unsaved")
+    return pipeline
 
 
 def build(root=None):
@@ -2885,6 +3745,7 @@ def build(root=None):
     installation = _build_installation(pipeline, report)
     triple = _build_triple_display(pipeline, report)
     stereo = _build_stereo(pipeline, report)
+    _build_show_control(pipeline, report)
 
     # These wires are owned by the builder and are repaired on every rebuild.
     # This migrates older 1.0.0 networks whose connectors fell back to
@@ -2983,6 +3844,7 @@ def build(root=None):
         ["triple_artistic_output",
          "OUT_TRIPLE_ARTISTIC_LEFT/CENTER/RIGHT + OUT_TRIPLE_ARTISTIC"],
         ["active_display_output", "OUT_DISPLAY_ACTIVE"],
+        ["show_control", "SHOW_CONTROL (public live parameters only)"],
         ["stereo_output", "OUT_LEFT_EYE, OUT_RIGHT_EYE, OUT_STEREO_PREVIEW"],
         ["interaction_debug_output", "OUT_INTERACTION_DEBUG (visualization only)"],
         ["openvr_dependency", "none"],
@@ -2993,8 +3855,11 @@ def build(root=None):
           "OUT_TRIPLE_WRAP or OUT_TRIPLE_ARTISTIC for three-surface mosaics, "
           "and OUT_DISPLAY_ACTIVE for the mode selected on WORKING_PIPELINE. "
           "Each triple mode also exposes independent LEFT/CENTER/RIGHT TOPs. "
-          "OUT_STEREO_PREVIEW for a desktop stereo view. The animated RGB/depth "
-          "and sensor sources work immediately. Later, replace only the two "
+          "Open OUT_STEREO_PREVIEW for a desktop stereo view. "
+          "Open SHOW_CONTROL for geometry provider, display, completion, "
+          "interaction, panoramic coverage and GPU quality presets. "
+          "The animated RGB/depth and sensor sources work immediately. "
+          "Later, replace only the two "
           "labelled TOPs inside SOURCES/STREAMDIFFUSION_ADAPTER and turn on the "
           "source toggles; reconstruction, persistence, completion and outputs "
           "do not change. ROLE_BRIDGE automatically sends or receives those "

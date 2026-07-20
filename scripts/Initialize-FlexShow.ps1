@@ -16,6 +16,9 @@ param(
     [ValidateSet('single', 'panoramic_wrap', 'artistic_multi_angle')]
     [string]$DisplayMode = 'single',
 
+    [ValidateSet('moge2', 'depth_anything')]
+    [string]$GeometryProvider = 'moge2',
+
     [int]$AIIndex = -1,
 
     [int]$RenderIndex = -1,
@@ -537,6 +540,25 @@ if ($DisplayProfile -eq 'venue_1080p') {
     $render.triple_surface_width = 1920
     $render.triple_surface_height = 1080
 }
+$geometryContract = if ($GeometryProvider -eq 'depth_anything') {
+    [ordered]@{
+        frame_state_operator = 'DEPTH_ANYTHING_GEOMETRY_BRIDGE/FRAME_STATE'
+        camera_metadata_operator = 'DEPTH_ANYTHING_GEOMETRY_BRIDGE/CAMERA_METADATA'
+    }
+}
+else {
+    [ordered]@{
+        frame_state_operator = 'MOGE2_BRIDGE/FRAME_STATE'
+        camera_metadata_operator = 'MOGE2_BRIDGE/CAMERA_METADATA'
+    }
+}
+$source = [ordered]@{
+    mode = 'streamdiffusion'
+    geometry_provider = $GeometryProvider
+    frame_state_operator = $geometryContract.frame_state_operator
+    camera_metadata_operator = $geometryContract.camera_metadata_operator
+    stale_timeout_ms = 1200
+}
 $configuration = [ordered]@{
     '$schema' = './flexshow.schema.json'
     topology = $resolvedTopology
@@ -548,6 +570,7 @@ $configuration = [ordered]@{
         render = [ordered]@{ uuid = $renderGpu.Uuid }
     }
     processes = $processes
+    source = $source
     render = $render
     transport = $transport
     runtime_dir = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot '.flexgpu\local'))
@@ -566,6 +589,7 @@ $result = [ordered]@{
     tier = $tier
     display_profile = $DisplayProfile
     display_mode = $DisplayMode
+    geometry_provider = $GeometryProvider
     render = $render
     ai_tier = $aiTier
     render_tier = $renderTier
@@ -583,6 +607,7 @@ else {
     Write-Host "[FlexShow] local preset: $outputPath"
     Write-Host "[FlexShow] topology=$resolvedTopology tier=$tier AI-tier=$aiTier render-tier=$renderTier"
     Write-Host "[FlexShow] display-profile=$DisplayProfile display-mode=$DisplayMode"
+    Write-Host "[FlexShow] geometry-provider=$GeometryProvider"
     Write-Host "[FlexShow] AI GPU $($aiGpu.Index): $($aiGpu.Name)"
     Write-Host "[FlexShow] render GPU $($renderGpu.Index): $($renderGpu.Name)"
     Write-Host "[FlexShow] TouchDesigner $($touchDesignerSelection.version) [$($touchDesignerSelection.selection)]: $touchDesignerPath"

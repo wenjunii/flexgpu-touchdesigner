@@ -25,6 +25,19 @@ class MoGe2WorkerScriptSourceTests(unittest.TestCase):
         self.assertNotIn("Start-Process", source)
         self.assertNotIn("DownloadModel", source.split("if (-not $Start)", 1)[0])
 
+    def test_worker_waits_for_touchdesigner_result_listener(self) -> None:
+        worker = (ROOT / "tools" / "moge2_worker.py").read_text(
+            encoding="utf-8")
+        self.assertIn('"--output-connect-timeout-s"', worker)
+        self.assertIn("did not become", worker)
+        self.assertIn('"ready within %.1f seconds; select the matching "', worker)
+        self.assertIn('"geometry provider and enable its bridge"', worker)
+
+        launcher = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("$ListenerWaitSeconds = 120.0", launcher)
+        self.assertIn("'--output-connect-timeout-s'", launcher)
+        self.assertIn("listener_wait_seconds = $ListenerWaitSeconds", launcher)
+
     def test_network_warning_and_private_runtime_boundary_are_explicit(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
         self.assertIn("not authenticated or encrypted", source)

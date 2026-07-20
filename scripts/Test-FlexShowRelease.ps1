@@ -381,6 +381,7 @@ echo 1, GPU-high, 00000000:02:00.0, NVIDIA GeForce RTX 4090, 24564, 555.10
         -Topology auto `
         -DisplayProfile venue_1080p `
         -DisplayMode panoramic_wrap `
+        -GeometryProvider depth_anything `
         -NvidiaSmi $fakeSmi `
         -TouchDesignerExe $fakeTouchDesigner `
         -Output $LocalConfig `
@@ -395,6 +396,7 @@ echo 1, GPU-high, 00000000:02:00.0, NVIDIA GeForce RTX 4090, 24564, 555.10
         $result.render_tier -ne '3080ti_16gb' -or
         $result.display_profile -ne 'venue_1080p' -or
         $result.display_mode -ne 'panoramic_wrap' -or
+        $result.geometry_provider -ne 'depth_anything' -or
         $result.ai_gpu.index -ne 1 -or $result.render_gpu.index -ne 0) {
         throw 'Initializer smoke test returned an unexpected GPU assignment.'
     }
@@ -406,6 +408,9 @@ echo 1, GPU-high, 00000000:02:00.0, NVIDIA GeForce RTX 4090, 24564, 555.10
         $written.gpu.render.uuid -ne $result.render_gpu.uuid -or
         $written.processes.ai.executable -ne $fakeTouchDesigner -or
         $written.processes.world.executable -ne $fakeTouchDesigner -or
+        $written.source.geometry_provider -ne 'depth_anything' -or
+        $written.source.frame_state_operator -ne 'DEPTH_ANYTHING_GEOMETRY_BRIDGE/FRAME_STATE' -or
+        $written.source.camera_metadata_operator -ne 'DEPTH_ANYTHING_GEOMETRY_BRIDGE/CAMERA_METADATA' -or
         $written.render.display_mode -ne 'panoramic_wrap' -or
         $written.render.installation_width -ne 1920 -or
         $written.render.installation_height -ne 1080 -or

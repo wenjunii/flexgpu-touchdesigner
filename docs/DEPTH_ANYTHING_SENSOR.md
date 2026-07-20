@@ -5,7 +5,7 @@ a physical depth sensor arrives. It stays separate from generated-image
 geometry:
 
 ```text
-StreamDiffusion RGB -> MoGe-2 -> generated point world
+StreamDiffusion RGB -> MoGe-2 OR Depth Anything geometry -> generated point world
 
 laptop webcam -> optional Depth Anything V2 Small -> audience interaction
 physical/paid sensor later -------------------------> same interaction adapter

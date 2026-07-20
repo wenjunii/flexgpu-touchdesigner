@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -57,6 +58,9 @@ MAX_SESSION_ID_BYTES = 64
 RUNTIME_ROOT = (REPOSITORY_ROOT / "runtime").resolve()
 DEFAULT_MODEL_PATH = RUNTIME_ROOT / "moge2-model" / MODEL_FILENAME
 DEFAULT_CACHE_PATH = RUNTIME_ROOT / "moge2-cache"
+DEFAULT_DEPTH_ANYTHING_MODEL_DIR = RUNTIME_ROOT / "depth-anything-v2-small"
+DEFAULT_DEPTH_ANYTHING_CACHE_DIR = RUNTIME_ROOT / "depth-anything-cache"
+GEOMETRY_PROVIDERS = frozenset(("moge2", "depth_anything"))
 
 
 class WorkerError(RuntimeError):
@@ -69,6 +73,10 @@ class DependencyError(WorkerError):
 
 class ModelError(WorkerError):
     """The pinned local checkpoint is missing or invalid."""
+
+
+class CalibrationPending(WorkerError):
+    """A relative-depth provider is still freezing its session calibration."""
 
 
 @dataclass(frozen=True)
@@ -190,6 +198,8 @@ class MockBackend:
     model_id = "flexgpu/mock-plane"
     model_revision = "0" * 40
     precision = "mock"
+    geometry_provider = "moge2"
+    model_source_revision = MOGE_SOURCE_REVISION
 
     def __init__(self) -> None:
         self.load_count = 1
@@ -240,6 +250,8 @@ class MoGe2Backend:
     model_id = MODEL_REPOSITORY
     model_revision = MODEL_REVISION
     precision = "fp16"
+    geometry_provider = "moge2"
+    model_source_revision = MOGE_SOURCE_REVISION
 
     def __init__(
         self,
@@ -322,6 +334,146 @@ class MoGe2Backend:
         )
 
 
+def _load_depth_anything_module() -> Any:
+    """Load the pinned sensor module lazily without importing its camera path."""
+
+    module_name = "flexgpu_depth_anything_geometry_backend"
+    existing = sys.modules.get(module_name)
+    if existing is not None:
+        return existing
+    path = REPOSITORY_ROOT / "tools" / "depth_anything_worker.py"
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise DependencyError("Depth Anything worker module could not be loaded")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
+    return module
+
+
+class DepthAnythingGeometryBackend:
+    """Persistent generated-image relative depth mapped to a stable metre slab."""
+
+    geometry_provider = "depth_anything"
+    precision = "fp16"
+
+    def __init__(
+        self,
+        *,
+        model_dir: Path,
+        cache_dir: Path,
+        device: str,
+        warmup: int = 1,
+        input_size: int = 384,
+        calibration_frames: int = 12,
+        percentile_low: float = 2.0,
+        percentile_high: float = 98.0,
+        raw_order: str = "near_is_larger",
+        pseudo_near_m: float = 0.5,
+        pseudo_far_m: float = 4.0,
+        foreground_far_m: float = 4.0,
+        default_fov_x_deg: float = 60.0,
+    ) -> None:
+        if (
+            isinstance(input_size, bool)
+            or not isinstance(input_size, int)
+            or not 196 <= input_size <= 1024
+        ):
+            raise WorkerError("Depth Anything input_size must be between 196 and 1024")
+        if (
+            isinstance(default_fov_x_deg, bool)
+            or not math.isfinite(float(default_fov_x_deg))
+            or not 1.0 <= float(default_fov_x_deg) < 179.0
+        ):
+            raise WorkerError("Depth Anything default field of view is invalid")
+        module = _load_depth_anything_module()
+        self._module = module
+        self.model_id = str(module.MODEL_REPOSITORY)
+        self.model_revision = str(module.MODEL_REVISION)
+        self.model_source_revision = str(module.MODEL_REVISION)
+        self.input_size = input_size
+        self.default_fov_x_deg = float(default_fov_x_deg)
+        self._mapper_arguments = {
+            "mode": "session_frozen",
+            "percentile_low": percentile_low,
+            "percentile_high": percentile_high,
+            "calibration_frames": calibration_frames,
+            "raw_order": raw_order,
+            "pseudo_near_m": pseudo_near_m,
+            "pseudo_far_m": pseudo_far_m,
+            "foreground_far_m": foreground_far_m,
+        }
+        self._backend = module.DepthAnythingBackend(
+            model_dir=model_dir,
+            cache_dir=cache_dir,
+            device=device,
+            warmup=warmup,
+        )
+        self._mapper = module.FrozenPercentileMapper(**self._mapper_arguments)
+
+    @property
+    def load_count(self) -> int:
+        return int(self._backend.load_count)
+
+    @property
+    def inference_count(self) -> int:
+        return int(self._backend.inference_count)
+
+    @property
+    def calibration_locked(self) -> bool:
+        return bool(self._mapper.locked)
+
+    @property
+    def calibration_observed_frames(self) -> int:
+        return int(self._mapper.observed_frames)
+
+    def begin_source_session(self) -> None:
+        self._mapper = self._module.FrozenPercentileMapper(**self._mapper_arguments)
+
+    def infer(
+        self,
+        rgb: Any,
+        *,
+        num_tokens: int,
+        fov_x_deg: Optional[float],
+    ) -> BackendOutput:
+        del num_tokens
+        height, width = rgb.shape[:2]
+        relative_depth = self._backend.infer(
+            rgb,
+            input_size=self.input_size,
+            output_width=width,
+            output_height=height,
+        )
+        mapped = self._mapper.observe_and_map(relative_depth)
+        if mapped is None:
+            raise CalibrationPending(
+                "Depth Anything session calibration is still collecting frames"
+            )
+        selected_fov = (
+            self.default_fov_x_deg if fov_x_deg is None else float(fov_x_deg)
+        )
+        fx = 0.5 / math.tan(math.radians(selected_fov) * 0.5)
+        fy = fx * width / height
+        try:
+            import numpy as np
+        except ImportError as exc:
+            raise DependencyError("NumPy is required for Depth Anything geometry") from exc
+        intrinsics = np.asarray(
+            [[fx, 0.0, 0.5], [0.0, fy, 0.5], [0.0, 0.0, 1.0]],
+            dtype=np.float32,
+        )
+        return BackendOutput(
+            depth=mapped.depth_metres,
+            mask=mapped.foreground_mask,
+            intrinsics=intrinsics,
+        )
+
+
 def _resize_rgb(frame: WorldFrame, max_edge: int) -> tuple[Any, bytes]:
     if frame.metadata.pixel_format != "rgba8":
         raise WorkerError("MoGe-2 input frames must use WorldBus pixel_format rgba8")
@@ -388,6 +540,7 @@ class MoGe2Worker:
         backend: Any,
         *,
         profile: WorkerProfile,
+        provider: Optional[str] = None,
         num_tokens: Optional[int] = None,
         max_edge: Optional[int] = None,
         depth_scale: float = 0.001,
@@ -395,6 +548,18 @@ class MoGe2Worker:
     ) -> None:
         self.backend = backend
         self.profile = profile
+        self.provider = (
+            str(getattr(backend, "geometry_provider", "moge2"))
+            if provider is None
+            else provider
+        )
+        if self.provider not in GEOMETRY_PROVIDERS:
+            raise WorkerError("geometry provider is unsupported")
+        backend_provider = str(getattr(backend, "geometry_provider", self.provider))
+        if backend_provider != self.provider and not (
+            isinstance(backend, MockBackend) and backend_provider == "moge2"
+        ):
+            raise WorkerError("backend and requested geometry provider disagree")
         self.num_tokens = profile.num_tokens if num_tokens is None else num_tokens
         self.max_edge = profile.max_edge if max_edge is None else max_edge
         if (
@@ -416,7 +581,7 @@ class MoGe2Worker:
         if not math.isfinite(self.depth_scale) or self.depth_scale <= 0.0:
             raise WorkerError("depth_scale must be a finite positive number")
         self.producer_session_id = (
-            "moge2-worker-" + uuid.uuid4().hex
+            self.provider.replace("_", "-") + "-worker-" + uuid.uuid4().hex
             if producer_session_id is None
             else producer_session_id
         )
@@ -466,6 +631,13 @@ class MoGe2Worker:
         source_session = (
             "" if raw_source_session is None else str(raw_source_session)
         )
+        source_provider = str(
+            source.metadata.extensions.get("geometry_provider", "moge2")
+        )
+        if source_provider != self.provider:
+            raise WorkerError(
+                "source geometry provider does not match this worker"
+            )
         fov_key = (
             source_session,
             source.metadata.generation_id,
@@ -478,6 +650,11 @@ class MoGe2Worker:
             if self._active_source_key is not None:
                 self._roll_output_session()
             self._active_source_key = fov_key
+            begin_source_session = getattr(
+                self.backend, "begin_source_session", None
+            )
+            if callable(begin_source_session):
+                begin_source_session()
             self._fov_key = None
             self._fov_x_deg = None
             self._locked_intrinsics = None
@@ -535,6 +712,7 @@ class MoGe2Worker:
             output_intrinsics[3] * height,
         )
         safe_extensions = {
+            "geometry_provider": self.provider,
             "moge2_profile": self.profile.tier,
             "moge2_precision": str(self.backend.precision),
             "moge2_num_tokens": self.num_tokens,
@@ -559,7 +737,9 @@ class MoGe2Worker:
             source_timestamp_ns=source.metadata.timestamp_ns,
             source_producer_session_id=source_session or None,
             model_id=str(self.backend.model_id),
-            model_source_revision=MOGE_SOURCE_REVISION,
+            model_source_revision=str(
+                getattr(self.backend, "model_source_revision", MOGE_SOURCE_REVISION)
+            ),
             model_revision=str(self.backend.model_revision),
             extra_extensions=safe_extensions,
         )
@@ -581,6 +761,8 @@ class MoGe2WorkerService:
         input_udp_port: int,
         output_host: str,
         output_tcp_port: int,
+        output_connect_timeout_s: float = 120.0,
+        output_connect_retry_s: float = 0.25,
     ) -> None:
         if not isinstance(input_host, str) or not input_host:
             raise WorkerError("input_host must be a non-empty string")
@@ -589,6 +771,19 @@ class MoGe2WorkerService:
         input_tcp_port = _port(input_tcp_port, "input_tcp_port", allow_zero=True)
         input_udp_port = _port(input_udp_port, "input_udp_port", allow_zero=True)
         output_tcp_port = _port(output_tcp_port, "output_tcp_port", allow_zero=False)
+        try:
+            output_connect_timeout_s = float(output_connect_timeout_s)
+            output_connect_retry_s = float(output_connect_retry_s)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise WorkerError("output connection timing must be numeric") from exc
+        if (not math.isfinite(output_connect_timeout_s) or
+                not 0.0 <= output_connect_timeout_s <= 300.0):
+            raise WorkerError(
+                "output_connect_timeout_s must be between 0 and 300 seconds")
+        if (not math.isfinite(output_connect_retry_s) or
+                not 0.01 <= output_connect_retry_s <= 5.0):
+            raise WorkerError(
+                "output_connect_retry_s must be between 0.01 and 5 seconds")
         self.worker = worker
         self.receiver = WorldBusReceiver(
             host=input_host,
@@ -597,16 +792,33 @@ class MoGe2WorkerService:
         )
         self.output_host = output_host
         self.output_tcp_port = output_tcp_port
+        self.output_connect_timeout_s = output_connect_timeout_s
+        self.output_connect_retry_s = output_connect_retry_s
         self.sender: Optional[TCPFrameSender] = None
         self.failures = 0
+        self.skipped = 0
         self.errors: list[str] = []
 
     def start(self) -> "MoGe2WorkerService":
         if self.sender is not None:
             raise WorkerError("MoGe-2 worker service is already started")
         self.receiver.start()
+        deadline = time.monotonic() + self.output_connect_timeout_s
         try:
-            self.sender = TCPFrameSender(self.output_host, self.output_tcp_port)
+            while self.sender is None:
+                try:
+                    self.sender = TCPFrameSender(
+                        self.output_host, self.output_tcp_port)
+                except OSError as exc:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0.0:
+                        raise WorkerError(
+                            "TouchDesigner result receiver %s:%d did not become "
+                            "ready within %.1f seconds; select the matching "
+                            "geometry provider and enable its bridge" % (
+                                self.output_host, self.output_tcp_port,
+                                self.output_connect_timeout_s)) from exc
+                    time.sleep(min(self.output_connect_retry_s, remaining))
         except Exception:
             self.receiver.close()
             raise
@@ -661,6 +873,9 @@ class MoGe2WorkerService:
             received += 1
             try:
                 output = self.worker.process_frame(source)
+            except CalibrationPending:
+                self.skipped += 1
+                continue
             except (WorkerError, WorldBusError, ValueError) as exc:
                 self.failures += 1
                 self.errors.append(type(exc).__name__ + ": " + str(exc))
@@ -673,6 +888,7 @@ class MoGe2WorkerService:
             "received_frames": received,
             "sent_frames": sent,
             "failed_frames": self.failures,
+            "skipped_frames": self.skipped,
             "elapsed_s": time.monotonic() - began,
             "input_queue": self.receiver.frames.stats,
             "input_errors": self.receiver.errors,
@@ -699,6 +915,30 @@ class MoGe2WorkerService:
 def _make_backend(args: argparse.Namespace) -> Any:
     if args.backend == "mock":
         return MockBackend()
+    if args.backend == "depth_anything":
+        model_dir = _safe_runtime_path(
+            args.model_dir or DEFAULT_DEPTH_ANYTHING_MODEL_DIR,
+            "Depth Anything model directory",
+        )
+        cache_dir = _safe_runtime_path(
+            args.cache_dir or DEFAULT_DEPTH_ANYTHING_CACHE_DIR,
+            "Depth Anything cache directory",
+        )
+        return DepthAnythingGeometryBackend(
+            model_dir=model_dir,
+            cache_dir=cache_dir,
+            device=args.device,
+            warmup=args.warmup,
+            input_size=args.input_size,
+            calibration_frames=args.calibration_frames,
+            percentile_low=args.percentile_low,
+            percentile_high=args.percentile_high,
+            raw_order=args.raw_order,
+            pseudo_near_m=args.pseudo_near_m,
+            pseudo_far_m=args.pseudo_far_m,
+            foreground_far_m=args.foreground_far_m,
+            default_fov_x_deg=args.horizontal_fov_deg,
+        )
     model_path = _safe_runtime_path(
         args.model_path or DEFAULT_MODEL_PATH,
         "model path",
@@ -724,20 +964,39 @@ def build_parser() -> argparse.ArgumentParser:
 
     serve = actions.add_parser("serve", help="bind WorldBus input and stream MoGe atlases")
     serve.add_argument("--profile", choices=sorted(PROFILES), default="3080ti_16gb")
-    serve.add_argument("--backend", choices=("moge2", "mock"), default="moge2")
+    serve.add_argument(
+        "--backend", choices=("moge2", "depth_anything", "mock"), default="moge2"
+    )
+    serve.add_argument("--provider", choices=sorted(GEOMETRY_PROVIDERS))
     serve.add_argument("--model-path")
+    serve.add_argument("--model-dir")
     serve.add_argument("--cache-dir")
     serve.add_argument("--device", default="cuda:0")
     serve.add_argument("--warmup", type=int, default=1)
     serve.add_argument("--num-tokens", type=int)
     serve.add_argument("--max-edge", type=int)
     serve.add_argument("--depth-scale", type=float, default=0.001)
+    serve.add_argument("--input-size", type=int, default=384)
+    serve.add_argument("--calibration-frames", type=int, default=12)
+    serve.add_argument("--percentile-low", type=float, default=2.0)
+    serve.add_argument("--percentile-high", type=float, default=98.0)
+    serve.add_argument(
+        "--raw-order",
+        choices=("near_is_larger", "near_is_smaller"),
+        default="near_is_larger",
+    )
+    serve.add_argument("--pseudo-near-m", type=float, default=0.5)
+    serve.add_argument("--pseudo-far-m", type=float, default=4.0)
+    serve.add_argument("--foreground-far-m", type=float, default=4.0)
+    serve.add_argument("--horizontal-fov-deg", type=float, default=60.0)
     serve.add_argument("--producer-session-id")
     serve.add_argument("--input-host", default="127.0.0.1")
     serve.add_argument("--input-tcp-port", type=int, default=9211)
     serve.add_argument("--input-udp-port", type=int, default=9210)
     serve.add_argument("--output-host", default="127.0.0.1")
     serve.add_argument("--output-tcp-port", type=int, required=True)
+    serve.add_argument("--output-connect-timeout-s", type=float, default=120.0)
+    serve.add_argument("--output-connect-retry-s", type=float, default=0.25)
     serve.add_argument("--max-frames", type=int)
     serve.add_argument("--duration-s", type=float)
     return parser
@@ -763,9 +1022,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         profile = _profile(args.profile)
         backend = _make_backend(args)
+        provider = args.provider or (
+            "depth_anything" if args.backend == "depth_anything" else "moge2"
+        )
         worker = MoGe2Worker(
             backend,
             profile=profile,
+            provider=provider,
             num_tokens=args.num_tokens,
             max_edge=args.max_edge,
             depth_scale=args.depth_scale,
@@ -778,6 +1041,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             input_udp_port=args.input_udp_port,
             output_host=args.output_host,
             output_tcp_port=args.output_tcp_port,
+            output_connect_timeout_s=args.output_connect_timeout_s,
+            output_connect_retry_s=args.output_connect_retry_s,
         ).start()
         _print(
             {
@@ -787,6 +1052,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "output_tcp": (args.output_host, args.output_tcp_port),
                 "profile": profile.tier,
                 "backend": args.backend,
+                "geometry_provider": worker.provider,
                 "producer_session_id": worker.producer_session_id,
             }
         )

@@ -16,14 +16,17 @@ real-time generated point world.  It supports:
   GPU.
 - A default-off, replaceable no-RGB audience-sensor bridge plus optional laptop
   webcam/Depth Anything V2 Small rehearsal worker.
+- Selectable MoGe-2 or Depth Anything V2 Small generated-image geometry,
+  isolated from the audience-sensor path.
 
 It does **not** bundle StreamDiffusionTD, a depth sensor SDK, an OpenXR/OpenVR
 headset runtime, or model weights. The built-in demo generators make the point
 world visible without those dependencies. Later, replace the labelled source
 TOPs with outputs from your own `StreamDiffusionTD.tox`; the downstream TOP
-contracts stay the same. A pinned external MoGe-2 worker and default-off live
-TouchDesigner bridge are included for image-derived generated geometry, while
-the checkpoint remains an explicit ignored local download. Real sensor input,
+contracts stay the same. Pinned external MoGe-2 and Depth Anything V2 Small
+workers plus default-off live TouchDesigner bridges are included for
+image-derived generated geometry, while checkpoints remain explicit ignored
+local downloads. Real sensor input,
 headset submission, SHARP, and Gaussian inference are user-supplied adapters.
 
 ## Prerequisites
@@ -69,6 +72,7 @@ touchdesigner/       TD 2025 bootstrap source and integration guide
 | Process status, readiness and AI recovery | Atomic TouchDesigner application heartbeat, read-only alive/ready/stale status, bounded readiness waits, and operator-authorized recovery of a separate AI role; not an autonomous watchdog |
 | StreamDiffusionTD and sensor SDK | Labelled manual boundaries plus opt-in private `.tox` loading with safe demo/simulated fallback; paid/private components remain excluded |
 | Live MoGe-2 generated geometry | Pinned offline worker, newest-only synchronized atlas, strict camera/frame metadata, and default-off TD bridge implemented; real worker, local `.toe` path, and cold-reopen runtime imports live-accepted on the 3080 Ti Laptop |
+| Depth Anything generated geometry | Selectable default-off alternative using the same synchronized generated RGB/depth atlas boundary, isolated ports, frozen relative-depth slab, fail-closed routing, and provider-specific reconstruction calibration; live-accepted with single, panoramic, and artistic 1920x1080 outputs on the 3080 Ti Laptop |
 | Embody/knowledge MCP integration | Project-scoped context, privacy rules, output audit order, and local MCP configuration implemented and used against an ignored working TOE; Embody remains optional and untracked |
 | Temporary laptop audience sensor | Default-off result-only TD bridge and optional Depth Anything V2 Small webcam worker implemented; mirrored live interaction, RGB-free transport, stale zero-gating, 5 Hz rehearsal, and gentler force tuning live-accepted on the 3080 Ti Laptop; paid-app and physical-sensor acceptance remain future local gates |
 | Installation and VR | Unchanged single display, selectable three-surface panoramic wrap, artistic multi-angle outputs, and parallel-camera stereo development textures; projector warping/blending, headset runtime, pose/input, compositor submission, and physical validation are user-supplied |
@@ -533,6 +537,9 @@ occupancy sample, rather than matching generated and sensor pixels by UV.
 Motion integrates a clamped render delta, so force is frame-rate aware and a
 debugger pause cannot launch the cloud. This is a practical low-resolution
 occupancy/SDF approximation, not body tracking or a full volumetric solver.
+A bounded GPU feedback stage smooths interaction with responsive attack and a
+faster release, stabilizing low-rate depth updates without leaving a long
+motion ghost.
 
 Completion remains deliberately artistic. Thick point size helps cover sparse
 samples. The fog branch uses nearby persistent geometry to identify
@@ -628,6 +635,9 @@ See [touchdesigner/README.md](touchdesigner/README.md) for building the starter
 - A stable StreamDiffusionTD RGB/depth adapter for your later `.tox`.
 - A default-off MoGe-2 bridge that returns synchronized RGB, metric depth,
   mask, confidence, frame state, and camera metadata from an external worker.
+- A separate default-off Depth Anything geometry bridge that returns
+  synchronized generated RGB plus frozen pseudo-metric depth and can be
+  selected without rewiring the point world.
 - GPU depth-to-position, one-cook frame-aware temporal persistence, and bounded
   world-space interaction fields.
 - Thick/disocclusion fog, procedural backfill, and hybrid completion.
@@ -704,14 +714,40 @@ desktop preview, capture, or a downstream mapper. Venue edge blend, warp,
 color matching, and frame synchronization still belong in the projector/LED
 mapping layer.
 
+Selecting a generated-geometry provider on `SHOW_CONTROL` also enables and
+initializes that provider's TouchDesigner result listener. Both generated-
+geometry launchers wait up to 120 seconds for their matching local result port
+(`9221` for MoGe-2, `9261` for Depth Anything) instead of failing immediately
+with Windows `10061` during a cold start. Use `-ListenerWaitSeconds` to override
+that bounded wait; selecting the provider before starting its worker remains
+the required routing step.
+Provider selection also changes the strict frame-state and camera-metadata
+reader used by the temporal world. This makes MoGe-2 and Depth Anything safely
+switchable in one TouchDesigner session without a stopped previous worker
+forcing all point alpha to zero.
+Each provider keeps its own reconstruction calibration: MoGe can retain its
+commissioned installation scale while Depth Anything defaults to its native
+`0.5–4.0 m` pseudo-metric slab.
+
 The current 30-degree panoramic yaw intentionally overlaps a monocular
 image-derived cloud across the side feeds. Increasing it toward 45 degrees is
 appropriate only when the reconstructed world contains enough off-axis
 geometry; otherwise the side cameras correctly see mostly empty background.
+The wrap path now has its own 78-degree starting FOV and panoramic-only
+procedural atmosphere. The atmosphere backfills empty wall pixels with
+seam-continuous fog/noise; it never copies or stretches the generated source
+image. `single` and `artistic_multi_angle` bypass this coverage stage.
+
+For live tuning, open
+`/project1/flexgpu/WORKING_PIPELINE/SHOW_CONTROL`. It provides one public
+surface for geometry provider, display mode, completion/fog, interaction
+strength/smoothing, wrap yaw/FOV/coverage, and the 3080/4090/5090 quality
+profiles. Quality changes preserve the configured 1920x1080 wall outputs and
+do not modify private StreamDiffusionTD internals.
 
 Native output resolution reduces final scaling blur but cannot create point
 detail missing from the source or geometry grid. Increase StreamDiffusion,
-MoGe inference, geometry resolution, and point budget together on a 4090/5090;
+selected geometry inference, geometry resolution, and point budget together on a 4090/5090;
 changing only the projector TOP dimensions merely resamples the existing cloud.
 
 The scaffold is deliberately adapter-based. Connect the exact StreamDiffusionTD
@@ -769,6 +805,57 @@ files. The local `.toe`, report, and captures are ignored and blocked from
 public sync. Passing this validator still does not establish artistic quality,
 calibrated scale, physical sensor behavior, headset comfort, sustained frame
 rate, or venue readiness.
+
+## Move the show to a 5090 workstation
+
+Use two deliberately separate transfer channels:
+
+1. **GitHub** carries the public, reproducible project: builders, runtime
+   modules, launchers, tests, documentation, public presets, and the inspected
+   canonical starter.
+2. **A private local transfer** carries the accepted working `.toe`, private or
+   paid `.tox` components, legally transferable model checkpoints, and any
+   venue calibration. Never place credentials in either transfer.
+
+On the 5090 PC, clone this repository and check out the same published branch.
+Install the validated TouchDesigner baseline `2025.32820`, NVIDIA Studio
+driver, Git, and Python 3.11. Do not copy `.venv`, `.flexgpu`, runtime manifests,
+GPU UUIDs, logs, caches, or the old machine's `config/local-*.json`; regenerate
+them for the new hardware.
+
+After privately copying the accepted working TOE into `projects/`, generate a
+new machine-local 5090 configuration. Choose the provider that should be active
+when the project opens; both remain switchable later from `SHOW_CONTROL`:
+
+```powershell
+cd C:\path\to\flexgpu-touchdesigner
+.\scripts\Initialize-FlexShow.ps1 `
+  -Topology single `
+  -Experience installation `
+  -Completion hybrid `
+  -DisplayProfile venue_1080p `
+  -DisplayMode panoramic_wrap `
+  -GeometryProvider moge2 `
+  -Project .\projects\FlexShow-moge2-embody-local.20.toe `
+  -Output .\config\local-5090.json
+```
+
+Install the workers locally rather than copying their virtual environments:
+
+```powershell
+.\scripts\Initialize-MoGe2.ps1 -Install -DownloadModel
+.\scripts\Initialize-DepthAnything.ps1 -Install -DownloadModel
+.\scripts\Diagnose-FlexShow.ps1 -Config .\config\local-5090.json
+.\scripts\Start-FlexShow.ps1 -Config .\config\local-5090.json
+```
+
+The last command is a launch preview; add `-Start` only after the plan names the
+5090, the intended TOE, and the correct TouchDesigner build. Reaccept MoGe-2
+and Depth Anything independently, then single, panoramic, artistic, stereo
+preview, performance, and thermal behavior. A 5090 provides more quality
+reserve but does not make the 3080's calibration, camera framing, or venue warp
+portable. See [docs/5090_MIGRATION.md](docs/5090_MIGRATION.md) for the complete
+source/destination checklist and private-transfer boundary.
 
 ## Testing and security
 
@@ -941,6 +1028,8 @@ edits in those launched processes before stopping them.
 For the process split and failure behavior, read
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).  For the frame/metadata interface,
 read [docs/WORLDBUS.md](docs/WORLDBUS.md).
+For the selectable relative-depth generated geometry path, read
+[docs/DEPTH_ANYTHING_GEOMETRY.md](docs/DEPTH_ANYTHING_GEOMETRY.md).
 
 ## License
 

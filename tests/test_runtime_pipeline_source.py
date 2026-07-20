@@ -113,6 +113,7 @@ assert normalized({src_path!r}) in {{
             "sensor_to_world",
             "sensor_validity",
             "interaction_field",
+            "interaction_smoothing",
             "interaction_debug",
             "temporal_observation",
             "temporal_state",
@@ -124,6 +125,7 @@ assert normalized({src_path!r}) in {{
             "procedural_color",
             "hybrid_completion",
             "installation_grade",
+            "panoramic_coverage",
             "view_completion",
             "transport_pack_geometry",
             "transport_pack_atlas",
@@ -421,6 +423,23 @@ assert normalized({src_path!r}) in {{
         self.assertIn("REPLACE_WITH_CALIBRATED_SENSOR_POSITION", self.source)
         self.assertIn("SENSOR_POSITION_SOURCE", self.source)
 
+    def test_interaction_smoothing_is_low_latency_and_feedback_bounded(self) -> None:
+        smoothing = self.module.SHADERS["interaction_smoothing"]
+        self.assertIn("FLEXGPU_INTERACTION_SMOOTHING", smoothing)
+        self.assertIn("attackBlend", smoothing)
+        self.assertIn("releaseBlend", smoothing)
+        self.assertIn("current.a >= history.a", smoothing)
+        self.assertIn('"Interactionsmoothing", 0.35', self.source)
+        self.assertIn('"INTERACTION_SMOOTH_HISTORY"', self.source)
+        self.assertIn(
+            '_set(history, ("targettop", "target", "top"), smoothed.path)',
+            self.source,
+        )
+        self.assertIn(
+            '_out_top(comp, "OUT_INTERACTION", interaction, 1, report)',
+            self.source,
+        )
+
     def test_depth_anything_data_constants_are_unpremultiplied(self) -> None:
         shader = self.module.SHADERS["depth_anything_sensor_position"]
         self.assertIn("Constant TOPs premultiply RGB by alpha", shader)
@@ -588,6 +607,32 @@ assert normalized({src_path!r}) in {{
         self.assertNotIn("destroy", installer)
         self.assertIn("installed disabled", installer)
 
+    def test_depth_anything_generated_geometry_is_isolated_and_selectable(self) -> None:
+        for marker in (
+            "DEPTH_ANYTHING_GEOMETRY_BRIDGE",
+            "GENERATED_GEOMETRY_RGB_ROUTE",
+            "GENERATED_GEOMETRY_DEPTH_ROUTE",
+            "GENERATED_GEOMETRY_CONFIDENCE_ROUTE",
+            "GENERATED_GEOMETRY_MASK_ROUTE",
+            "DEPTH_ANYTHING_GEOMETRY_FAIL_CLOSED_ZERO",
+            "Geometrysource",
+            "depth_anything",
+            "9251",
+            "9250",
+            "9261",
+            "9260",
+        ):
+            self.assertIn(marker, self.source)
+        signature = inspect.signature(
+            self.module.install_depth_anything_geometry_bridge)
+        self.assertEqual(list(signature.parameters), ["root"])
+        installer = inspect.getsource(
+            self.module.install_depth_anything_geometry_bridge)
+        self.assertNotIn("build(", installer)
+        self.assertNotIn("destroy", installer)
+        self.assertIn("installed disabled", installer)
+        self.assertIn("_wire_generated_geometry_routes", installer)
+
     def test_feedback_history_has_a_deterministic_seed_input(self) -> None:
         self.assertIn(
             '_connect(position, feedback, 0, 0, report, replace=True)',
@@ -626,6 +671,67 @@ assert normalized({src_path!r}) in {{
         self.assertIn('for mode in ("WRAP", "ARTISTIC")', self.source)
         self.assertIn('for side in ("LEFT", "CENTER", "RIGHT")', self.source)
         self.assertIn('_set(node, "bgcolora", 0.0)', self.source)
+
+    def test_panorama_has_independent_fov_and_procedural_only_coverage(self) -> None:
+        coverage = self.module.SHADERS["panoramic_coverage"]
+        self.assertIn("FLEXGPU_WRAP_COVERAGE", coverage)
+        self.assertIn("FLEXGPU_WRAP_NOISE", coverage)
+        self.assertIn("FLEXGPU_WRAP_PANEL_INDEX", coverage)
+        self.assertIn("panoramaUV", coverage)
+        self.assertIn("proceduralMist", coverage)
+        self.assertIn("continuousFill", coverage)
+        self.assertIn("no generated RGB pixels are copied", coverage)
+        self.assertNotIn("sTD2DInputs[1]", coverage)
+        self.assertNotIn("fog_plate", coverage.lower())
+        self.assertIn('"Wrapfovdegrees", 78.0', self.source)
+        self.assertIn(
+            '_expr(camera, "fov", "parent().par.Wrapfovdegrees.eval()")',
+            self.source,
+        )
+        self.assertIn(
+            '_expr(camera, "fov", "parent().par.Surfacefovdegrees.eval()")',
+            self.source,
+        )
+        self.assertIn('"COVERAGE_" + key, "panoramic_coverage"', self.source)
+        self.assertIn('if mode == "WRAP":', self.source)
+        self.assertIn("[grade_input, fog_plate]", self.source)
+
+    def test_public_show_control_and_bounded_upgrade_are_present(self) -> None:
+        for marker in (
+            "SHOW_CONTROL",
+            "Geometryprovider",
+            "Displaymode",
+            "Completionmode",
+            "Fogdensity",
+            "Interactionstrength",
+            "Interactionsmoothing",
+            "Qualityprofile",
+            "Wrapcoverage",
+        ):
+            self.assertIn(marker, self.source)
+        self.assertIn('"parameterexecuteDAT"', self.source)
+        self.assertIn("SHOW_CONTROL_CALLBACKS", self.source)
+        signature = inspect.signature(self.module.install_show_control_upgrade)
+        self.assertEqual(list(signature.parameters), ["root"])
+        installer = inspect.getsource(self.module.install_show_control_upgrade)
+        self.assertNotIn("destroy", installer)
+        self.assertNotIn("build(", installer)
+        self.assertIn("surface_width", installer)
+        self.assertIn("surface_height", installer)
+        self.assertIn("_activate_geometry_bridge", self.source)
+        self.assertIn("runtime_dat.module.tick(bridge)", self.source)
+        self.assertIn("helpers.module.select_geometry_provider", self.source)
+        self.assertIn("_switch_runtime_geometry_contract(provider)", self.source)
+
+    def test_venue_1080p_upgrade_is_bounded_and_complete(self) -> None:
+        installer = inspect.getsource(self.module.install_venue_1080p_outputs)
+        self.assertIn("1920, 1080", installer)
+        self.assertIn("wall_width * 3", installer)
+        self.assertIn("METRIC_RENDER_CENTER", installer)
+        self.assertIn("METRIC_RENDER_%s_%s", installer)
+        self.assertIn("GRADE_%s_%s", installer)
+        self.assertNotIn("destroy", installer)
+        self.assertNotIn("build(", installer)
 
     def test_actual_point_render_and_visible_outputs_are_built(self) -> None:
         for operator_name in (

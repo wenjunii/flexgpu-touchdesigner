@@ -56,6 +56,7 @@ class RuntimeConfigSectionTests(unittest.TestCase):
                 },
                 "source": {
                     "mode": "streamdiffusion",
+                    "geometry_provider": "depth_anything",
                     "streamdiffusion_tox": "local-components/StreamDiffusionTD.tox",
                     "rgb_operator": "out_rgb",
                     "depth_operator": "out_depth",
@@ -107,10 +108,24 @@ class RuntimeConfigSectionTests(unittest.TestCase):
         )
         config = validate_config(profile)
         self.assertEqual(config.raw["source"]["frame_state_operator"], "frame_state")
+        self.assertEqual(
+            config.raw["source"]["geometry_provider"], "depth_anything"
+        )
         self.assertEqual(config.raw["sensor"]["auto_load_tox"], True)
         self.assertEqual(config.supervisor["heartbeat_timeout_ms"], 2500)
         self.assertEqual(config.supervisor["readiness_timeout_ms"], 10000)
         self.assertIs(config.supervisor["require_ready"], True)
+
+    def test_source_geometry_provider_rejects_unknown_values(self) -> None:
+        profile = base_profile()
+        profile["source"] = {
+            "mode": "streamdiffusion",
+            "geometry_provider": "unknown",
+        }
+        with self.assertRaisesRegex(
+            ConfigError, "source.geometry_provider is unsupported"
+        ):
+            validate_config(profile)
 
     def test_supervisor_defaults_are_backwards_compatible(self) -> None:
         config = validate_config(base_profile())
