@@ -805,8 +805,9 @@ image. `single` and `artistic_multi_angle` bypass this coverage stage.
 For live tuning, open
 `/project1/flexgpu/WORKING_PIPELINE/SHOW_CONTROL`. It provides one public
 surface for geometry provider, display mode, completion/fog, interaction
-strength/smoothing, wrap yaw/FOV/coverage, and the 3080/4090/5090 quality
-profiles. `Wallwidth` and `Wallheight` set every individual installation feed;
+strength/smoothing, panoramic yaw/FOV/coverage/noise, artistic yaw/offset/FOV,
+and the 3080/4090/5090 quality profiles. `Wallwidth` and `Wallheight` set every
+individual installation feed;
 the wrap and artistic mosaics remain exactly three wall widths. Point-cloud
 framing has one creative scale plus separate MoGe-2 and Depth Anything
 provider scales. Quality changes preserve the configured wall outputs and do
@@ -816,8 +817,10 @@ The `Workers` page can open either public worker wrapper in its own visible
 PowerShell console. It selects and initializes the matching provider before
 launch, uses the selected quality profile and physical GPU index, and refuses
 duplicate clicks from the same TouchDesigner session. Stop the visible worker
-with `Ctrl+C` before starting the other provider. The button never embeds model
-weights, credentials, or private component paths.
+with `Ctrl+C` before starting the other provider. The console now exits with
+the foreground worker, so a stopped or failed worker cannot leave an empty
+`-NoExit` shell that blocks the next launch as "already running." The button
+never embeds model weights, credentials, or private component paths.
 
 For the current 3080 installation, generated-image aspect is preserved before
 unprojection instead of forcing every source into a square. The MoGe-2 and
@@ -833,6 +836,15 @@ not require different projector outputs. The single and six wall feeds remain
 The mosaics explicitly use square-pixel resolution aspect and TouchDesigner's
 `Left to Right` Layout TOP mode, so mapper and floating-viewer consumers see a
 true 16:3 left-center-right canvas rather than an inherited 16:9 aspect.
+
+MoGe-2 uses CUDA for model inference but also performs significant CPU work for
+image resizing, tensor-to-array transfer, atlas packing, and transport. On the
+accepted RTX 3080 Ti Laptop profile, keep `Geometry Capture FPS` at `5` unless
+a measured test supports more. A live acceptance sample held 59-60
+TouchDesigner FPS with fresh synchronized MoGe results at this setting; the
+worker still consumed roughly 60% of total 20-thread CPU capacity. This is a
+3080 operating note only and does not change the independent 4090 or 5090
+profiles.
 
 To refresh an older ignored working TOE without rebuilding the rest of the
 network, stop the geometry worker and run these bounded Textport installers:

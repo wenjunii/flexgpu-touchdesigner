@@ -175,6 +175,7 @@ provide:
 - completion mode and fog density;
 - interaction strength and low-latency smoothing;
 - panoramic yaw, independent FOV, coverage, and noise;
+- artistic side yaw, side offset in metres, and independent surface FOV;
 - adjustable width/height for every wall feed, with three-wide mosaics;
 - a creative point-cloud scale plus independent MoGe-2 and Depth Anything
   provider scales;
@@ -193,8 +194,16 @@ reopening an older working TOE.
 Each worker button opens the existing public wrapper in a separate visible
 PowerShell console and selects its provider first. Stop that console with
 `Ctrl+C` before starting the other provider. A duplicate click from the same
-TouchDesigner session is refused. `Workspace Root` must point at this checkout
-if the TOE was moved outside its `projects` folder.
+TouchDesigner session is refused. PowerShell exits when the foreground worker
+stops, preventing a dead worker from leaving an empty `-NoExit` console that
+blocks relaunch. `Workspace Root` must point at this checkout if the TOE was
+moved outside its `projects` folder.
+
+MoGe-2 is not GPU-only: inference runs on CUDA, while resize, tensor-to-array
+transfer, atlas packing, and transport can use substantial CPU. For the RTX
+3080 Ti Laptop profile, start with `Geometry Capture FPS` at `5`; raise it only
+after a measured performance test. This recommendation is profile-local and
+does not lower the 4090 or 5090 presets.
 
 Runtime config controls per-surface resolution. Defaults are deliberately
 conservative: 640x360 on the 3080 Ti Laptop, 960x540 on the 4090, and 1280x720

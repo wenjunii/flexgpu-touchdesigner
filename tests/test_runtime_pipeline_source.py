@@ -711,6 +711,9 @@ assert normalized({src_path!r}) in {{
             "Interactionsmoothing",
             "Qualityprofile",
             "Wrapcoverage",
+            "Surfacefovdegrees",
+            "Artisticyawdegrees",
+            "Artisticoffsetmetres",
         ):
             self.assertIn(marker, self.source)
         self.assertIn('"parameterexecuteDAT"', self.source)
@@ -751,8 +754,15 @@ assert normalized({src_path!r}) in {{
         self.assertIn("width * 3", self.module.SHOW_CONTROL_CALLBACKS)
         self.assertIn("def _apply_point_cloud_scale():", self.source)
         self.assertIn("_scaled_camera_fov_expression", self.source)
+        for marker in (
+            "'surfacefovdegrees'",
+            "'artisticyawdegrees'",
+            "'artisticoffsetmetres'",
+        ):
+            self.assertIn(marker, self.module.SHOW_CONTROL_CALLBACKS)
         self.assertIn("subprocess.Popen(", self.source)
-        self.assertIn("'powershell.exe', '-NoExit'", self.source)
+        self.assertIn("'powershell.exe', '-NoProfile'", self.source)
+        self.assertNotIn("'powershell.exe', '-NoExit'", self.source)
         self.assertIn("'CREATE_NEW_CONSOLE'", self.source)
         self.assertNotIn("shell=True", self.module.SHOW_CONTROL_CALLBACKS)
         installer = inspect.getsource(
