@@ -816,10 +816,12 @@ weights, credentials, or private component paths.
 
 For the current 3080 installation, generated-image aspect is preserved before
 unprojection instead of forcing every source into a square. The MoGe-2 and
-Depth Anything geometry launchers both default to `-TargetPixels 147456` and
-`-MaxEdge 512`: a 512x512 StreamDiffusion frame becomes a 384x384 geometry
-texture, a 1024x567 frame becomes 512x284, and a 1024x576 frame becomes
-512x288. Changing between those source
+Depth Anything geometry launchers both use `-TargetPixels 147456` and
+`-MaxEdge 512` when `-Profile 3080ti_16gb` is selected: a 512x512
+StreamDiffusion frame becomes a 384x384 geometry texture, a 1024x567 frame
+becomes 512x284, and a 1024x576 frame becomes 512x288. The 4090 and 5090
+profiles do not inherit this 3080 pixel cap; unless explicitly overridden,
+they keep their own worker-profile geometry limits. Changing between source
 formats starts a new worker output session and resets temporal history; it does
 not require different projector outputs. The single and six wall feeds remain
 1920x1080, and the two mosaics remain 5760x1080.
@@ -857,7 +859,9 @@ Native output resolution reduces final scaling blur but cannot create point
 detail missing from the source or geometry grid. On the 3080, 1024x567 input
 uses a 512x284 geometry grid and 1024x576 uses 512x288, near the same pixel
 budget as 384x384 square input. Raising only the projector TOP dimensions still
-merely resamples the existing cloud.
+merely resamples the existing cloud. On a 4090 or 5090, increase generated RGB,
+geometry inference, and point budget together only after measuring that
+machine; changing only projector dimensions does not add detail.
 
 The scaffold is deliberately adapter-based. Connect the exact StreamDiffusionTD
 component, camera SDK, and VR component available on the show machine rather

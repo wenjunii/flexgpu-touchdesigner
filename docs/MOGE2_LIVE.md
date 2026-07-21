@@ -224,6 +224,9 @@ source aspect at comparable cost: 512x512 becomes 384x384 geometry,
 the synchronized output
 session so TouchDesigner clears incompatible temporal history. All individual
 installation wall TOPs remain 1920x1080.
+This pixel target is selected only by `-Profile 3080ti_16gb`. The 4090 and
+5090 profiles retain their own worker-profile limits unless `-TargetPixels` or
+`-MaxEdge` is supplied explicitly.
 If MoGe appears smaller than the accepted Depth Anything view, adjust
 `SHOW_CONTROL/Moge2scale`; keep the creative `Pointcloudscale` at `1` while
 matching providers. Camera FOV performs this framing correction, so metric XYZ

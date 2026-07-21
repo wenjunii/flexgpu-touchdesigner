@@ -105,6 +105,9 @@ inferred at 512x288. These stay near the 147,456-sample target and feed the
 same fixed 1920x1080 wall renderers without stretching. A live source-format
 change intentionally starts a new calibration and producer session before
 publishing fresh geometry.
+The automatic target applies only to `-Profile 3080ti_16gb`. The 4090 and 5090
+profiles keep their own worker-profile geometry limits unless an operator
+explicitly supplies `-TargetPixels` or `-MaxEdge`.
 
 Default loopback ports are:
 

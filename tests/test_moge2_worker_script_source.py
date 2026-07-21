@@ -25,8 +25,11 @@ class MoGe2WorkerScriptSourceTests(unittest.TestCase):
             "'--input-tcp-port'",
             "'--output-tcp-port'",
             "'--target-pixels'",
-            "$TargetPixels = 147456",
-            "$MaxEdge = 512",
+            "$effectiveTargetPixels",
+            "$effectiveMaxEdge",
+            "$Profile -eq '3080ti_16gb'",
+            "147456",
+            "'worker profile default'",
             "'1024x567 -> 512x284'",
             "execution = 'foreground; press Ctrl+C to stop'",
             "FlexGPU MoGe-2 Worker",
@@ -35,6 +38,8 @@ class MoGe2WorkerScriptSourceTests(unittest.TestCase):
         self.assertNotIn("Start-Process", source)
         self.assertNotIn("DownloadModel", source.split("if (-not $Start)", 1)[0])
         self.assertNotIn("[string]$Profile = '3080ti_16gb'", source)
+        self.assertNotIn("[int]$TargetPixels = 147456", source)
+        self.assertIn("if ($null -ne $effectiveTargetPixels)", source)
 
     def test_worker_waits_for_touchdesigner_result_listener(self) -> None:
         worker = (ROOT / "tools" / "moge2_worker.py").read_text(

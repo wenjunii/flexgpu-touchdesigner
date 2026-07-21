@@ -344,9 +344,10 @@ default and can be selected again without rewiring. See
 The generated-geometry path is live-accepted on the 3080 Ti Laptop with
 single, panoramic, and artistic outputs at 1920x1080 per surface; reaccept it
 after changing GPU, worker quality, TouchDesigner, or the private source.
-Both generated-geometry launchers use a 147,456-pixel 3080 budget by default:
-512x512 becomes 384x384, 1024x567 becomes 512x284, and 1024x576 becomes
-512x288. Install
+Both generated-geometry launchers use a 147,456-pixel budget when the selected
+profile is `3080ti_16gb`: 512x512 becomes 384x384, 1024x567 becomes 512x284,
+and 1024x576 becomes 512x288. The 4090 and 5090 profiles retain their own
+worker-profile limits unless explicitly overridden. Install
 `runtime_pipeline.install_adaptive_source_resolution(...)` once in an older
 working TOE so reconstruction preserves that aspect instead of stretching the
 geometry texture to a square. The bounded installer does not save the TOE.

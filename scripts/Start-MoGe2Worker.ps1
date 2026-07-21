@@ -31,10 +31,10 @@ param(
     [double]$ListenerWaitSeconds = 120.0,
 
     [ValidateRange(64, 2048)]
-    [int]$MaxEdge = 512,
+    [int]$MaxEdge,
 
     [ValidateRange(4096, 4194304)]
-    [int]$TargetPixels = 147456,
+    [int]$TargetPixels,
 
     [ValidateRange(1, 1000000000)]
     [int]$MaxFrames,
@@ -75,6 +75,40 @@ if ($Backend -eq 'moge2') {
         -AllowProfileMismatch:$AllowProfileMismatch
 }
 
+$profileMaxEdges = @{
+    '3080ti_16gb' = 384
+    '4090' = 512
+    '5090' = 512
+}
+$effectiveMaxEdge = if ($PSBoundParameters.ContainsKey('MaxEdge')) {
+    $MaxEdge
+}
+elseif ($Profile -eq '3080ti_16gb') {
+    512
+}
+else {
+    [int]$profileMaxEdges[$Profile]
+}
+$effectiveTargetPixels = if ($PSBoundParameters.ContainsKey('TargetPixels')) {
+    $TargetPixels
+}
+elseif ($Profile -eq '3080ti_16gb') {
+    147456
+}
+else {
+    $null
+}
+$geometryBudgetSource = if ($PSBoundParameters.ContainsKey('TargetPixels') -or
+        $PSBoundParameters.ContainsKey('MaxEdge')) {
+    'operator override'
+}
+elseif ($Profile -eq '3080ti_16gb') {
+    '3080 adaptive default'
+}
+else {
+    'worker profile default'
+}
+
 $arguments = @(
     $worker,
     'serve',
@@ -89,9 +123,11 @@ $arguments = @(
     '--output-host', $OutputHost,
     '--output-tcp-port', [string]$OutputTcpPort,
     '--output-connect-timeout-s', [string]$ListenerWaitSeconds,
-    '--max-edge', [string]$MaxEdge,
-    '--target-pixels', [string]$TargetPixels
+    '--max-edge', [string]$effectiveMaxEdge
 )
+if ($null -ne $effectiveTargetPixels) {
+    $arguments += @('--target-pixels', [string]$effectiveTargetPixels)
+}
 if ($PSBoundParameters.ContainsKey('MaxFrames')) {
     $arguments += @('--max-frames', [string]$MaxFrames)
 }
@@ -111,13 +147,19 @@ $plan = [ordered]@{
     input_udp = "$InputHost`:$InputUdpPort"
     output_tcp = "$OutputHost`:$OutputTcpPort"
     listener_wait_seconds = $ListenerWaitSeconds
-    geometry_max_edge = $MaxEdge
-    geometry_target_pixels = $TargetPixels
-    adaptive_geometry_examples = @(
-        '512x512 -> 384x384',
-        '1024x567 -> 512x284',
-        '1024x576 -> 512x288'
-    )
+    geometry_max_edge = $effectiveMaxEdge
+    geometry_target_pixels = $effectiveTargetPixels
+    geometry_budget_source = $geometryBudgetSource
+    adaptive_geometry_examples = if ($Profile -eq '3080ti_16gb') {
+        @(
+            '512x512 -> 384x384',
+            '1024x567 -> 512x284',
+            '1024x576 -> 512x288'
+        )
+    }
+    else {
+        @('profile max-edge default; no 3080 target-pixel override')
+    }
     python = $python
     worker = $worker
     model = if ($Backend -eq 'moge2') { $model } else { 'not used by mock backend' }
