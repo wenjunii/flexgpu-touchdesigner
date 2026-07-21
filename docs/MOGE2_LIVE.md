@@ -179,6 +179,10 @@ Override the bounded wait only when needed with
 Live provider changes also move strict `FRAME_STATE` and `CAMERA_METADATA`
 lifecycle readers to the selected bridge and retire the previous session, so
 stale Depth Anything metadata cannot zero-gate a fresh MoGe result.
+As an alternative to the second manual PowerShell command, open the
+`SHOW_CONTROL` Workers page and pulse `Start MoGe-2 Worker`. It launches the
+same public wrapper in a visible console using the selected quality profile and
+GPU index. Stop it with Ctrl+C before launching Depth Anything.
 
 The expected bridge status is `synchronized atlas uploaded and ready`;
 `Resultvalid` turns on only after the Script TOP confirms the exact staged
@@ -213,6 +217,17 @@ Then run the pinned real worker:
   -GpuIndex 0 `
   -Start
 ```
+
+The 3080 launcher defaults to `-TargetPixels 147456 -MaxEdge 512`. It preserves
+source aspect at comparable cost: 512x512 becomes 384x384 geometry,
+1024x567 becomes 512x284, and 1024x576 becomes 512x288. A format change rolls
+the synchronized output
+session so TouchDesigner clears incompatible temporal history. All individual
+installation wall TOPs remain 1920x1080.
+If MoGe appears smaller than the accepted Depth Anything view, adjust
+`SHOW_CONTROL/Moge2scale`; keep the creative `Pointcloudscale` at `1` while
+matching providers. Camera FOV performs this framing correction, so metric XYZ
+and stereo depth are not normalized or uniformly rescaled away.
 
 `GpuIndex` is the physical NVIDIA index exposed to the worker through
 `CUDA_VISIBLE_DEVICES`; the worker itself uses relative device `cuda:0`.

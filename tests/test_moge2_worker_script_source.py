@@ -24,7 +24,12 @@ class MoGe2WorkerScriptSourceTests(unittest.TestCase):
             "'3080ti_16gb', '4090', '5090'",
             "'--input-tcp-port'",
             "'--output-tcp-port'",
+            "'--target-pixels'",
+            "$TargetPixels = 147456",
+            "$MaxEdge = 512",
+            "'1024x567 -> 512x284'",
             "execution = 'foreground; press Ctrl+C to stop'",
+            "FlexGPU MoGe-2 Worker",
         ):
             self.assertIn(marker, source)
         self.assertNotIn("Start-Process", source)

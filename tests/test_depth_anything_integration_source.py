@@ -112,9 +112,14 @@ class DepthAnythingIntegrationSourceTests(unittest.TestCase):
             "$ListenerWaitSeconds = 120.0",
             "'--output-connect-timeout-s'",
             "listener_wait_seconds = $ListenerWaitSeconds",
+            "'--target-pixels'",
+            "$TargetPixels = 147456",
+            "$MaxEdge = 512",
+            "'1024x567 -> 512x284'",
             ".venv\\depth-anything",
             "contains_generated_rgb = $true",
             "opens_webcam = $false",
+            "FlexGPU Depth Anything Geometry Worker",
         ):
             self.assertIn(marker, source)
         self.assertNotIn("camera-index", source)

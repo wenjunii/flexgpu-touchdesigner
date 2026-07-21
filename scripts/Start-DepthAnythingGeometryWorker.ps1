@@ -30,7 +30,10 @@ param(
     [int]$InputSize = 384,
 
     [ValidateRange(64, 2048)]
-    [int]$MaxEdge = 384,
+    [int]$MaxEdge = 512,
+
+    [ValidateRange(4096, 4194304)]
+    [int]$TargetPixels = 147456,
 
     [ValidateRange(1, 120)]
     [int]$CalibrationFrames = 12,
@@ -109,6 +112,7 @@ $arguments = @(
     '--output-connect-timeout-s', [string]$ListenerWaitSeconds,
     '--input-size', [string]$InputSize,
     '--max-edge', [string]$MaxEdge,
+    '--target-pixels', [string]$TargetPixels,
     '--calibration-frames', [string]$CalibrationFrames,
     '--percentile-low', [string]$PercentileLow,
     '--percentile-high', [string]$PercentileHigh,
@@ -141,6 +145,12 @@ $plan = [ordered]@{
     listener_wait_seconds = $ListenerWaitSeconds
     input_size = $InputSize
     geometry_max_edge = $MaxEdge
+    geometry_target_pixels = $TargetPixels
+    adaptive_geometry_examples = @(
+        '512x512 -> 384x384',
+        '1024x567 -> 512x284',
+        '1024x576 -> 512x288'
+    )
     calibration_frames = $CalibrationFrames
     pseudo_metre_slab = @($PseudoNearM, $PseudoFarM)
     python = $python
@@ -182,6 +192,12 @@ $previousPythonUtf8 = [Environment]::GetEnvironmentVariable('PYTHONUTF8', 'Proce
 try {
     $env:CUDA_VISIBLE_DEVICES = [string]$GpuIndex
     $env:PYTHONUTF8 = '1'
+    try {
+        $Host.UI.RawUI.WindowTitle = "FlexGPU Depth Anything Geometry Worker [$Profile, GPU $GpuIndex]"
+    }
+    catch {
+        # Window titles are best-effort for non-console PowerShell hosts.
+    }
     Write-Host "[Depth Anything Geometry] Starting foreground worker on physical GPU $GpuIndex."
     & $python @arguments
     $exitCode = $LASTEXITCODE

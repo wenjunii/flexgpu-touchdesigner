@@ -873,7 +873,11 @@ def onExit():
 
 
 SHOW_CONTROL_CALLBACKS = r'''# Parameter Execute DAT callbacks for public show controls.
+import os
 import re
+import subprocess
+
+_WORKER_PROCESSES = {}
 
 _FLOAT_PATTERN = r'[-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?'
 
@@ -927,6 +931,151 @@ def _patch_float(dat, symbol, marker, value):
         return True
     return False
 
+def _set_resolution(node, width, height):
+    if node is None:
+        return
+    _set(node, 'outputresolution', 'custom')
+    _set(node, 'resmult', False)
+    _set(node, 'resolutionw', int(width))
+    _set(node, 'resolutionh', int(height))
+    _set(node, 'outputaspect', 'resolution')
+
+def _set_horizontal_layout(node):
+    if node is None:
+        return
+    try:
+        if getattr(node.par, 'align', None) is not None:
+            _set(node, 'align', 'horizlr')
+        else:
+            _set(node, 'direction', 'horizontal')
+    except Exception:
+        pass
+
+def _apply_wall_resolution():
+    pipeline = _pipeline()
+    width = max(320, min(3840, int(_value('Wallwidth', 1920))))
+    height = max(180, min(2160, int(_value('Wallheight', 1080))))
+    controls = _controls()
+    _set(controls, 'Wallwidth', width)
+    _set(controls, 'Wallheight', height)
+    for path in (
+        'POINT_RENDER/METRIC_RENDER_CENTER',
+        'POINT_RENDER/METRIC_MONO_FALLBACK',
+        'INSTALLATION_OUTPUT/installation_grade',
+    ):
+        _set_resolution(pipeline.op(path), width, height)
+    for mode in ('WRAP', 'ARTISTIC'):
+        for side in ('LEFT', 'CENTER', 'RIGHT'):
+            _set_resolution(
+                pipeline.op('POINT_RENDER/METRIC_RENDER_%s_%s' %
+                            (mode, side)), width, height)
+            if mode == 'WRAP':
+                _set_resolution(
+                    pipeline.op('TRIPLE_DISPLAY/COVERAGE_WRAP_' + side),
+                    width, height)
+            _set_resolution(
+                pipeline.op('TRIPLE_DISPLAY/GRADE_%s_%s' % (mode, side)),
+                width, height)
+        for suffix in ('', '_FALLBACK'):
+            mosaic = pipeline.op(
+                'TRIPLE_DISPLAY/%s_MOSAIC%s' % (mode, suffix))
+            _set_resolution(mosaic, width * 3, height)
+            _set_horizontal_layout(mosaic)
+    try:
+        pipeline.store(
+            'venue_output_profile',
+            'custom_%dx%d' % (width, height))
+    except Exception:
+        pass
+
+def _apply_point_cloud_scale():
+    pipeline = _pipeline()
+    provider = str(_value('Geometryprovider', 'moge2')).strip().lower()
+    creative = max(
+        0.5, min(2.5, float(_value('Pointcloudscale', 1.0))))
+    provider_name = (
+        'Depthanythingscale' if provider == 'depth_anything'
+        else 'Moge2scale')
+    provider_scale = max(
+        0.5, min(2.5, float(_value(provider_name, 1.0))))
+    effective = max(0.35, min(4.0, creative * provider_scale))
+    _set(pipeline.op('POINT_RENDER'), 'Pointcloudscale', effective)
+    _set(_controls(), 'Effectivepointcloudscale', effective)
+
+def _workspace_root():
+    configured = str(_value('Workspaceroot', '') or '').strip()
+    candidates = []
+    if configured:
+        candidates.append(configured)
+    try:
+        candidates.extend((project.folder, os.path.dirname(project.folder)))
+    except Exception:
+        pass
+    for candidate in candidates:
+        root = os.path.abspath(os.path.expanduser(str(candidate)))
+        if (os.path.isfile(os.path.join(
+                root, 'scripts', 'Start-MoGe2Worker.ps1')) and
+                os.path.isfile(os.path.join(
+                    root, 'scripts',
+                    'Start-DepthAnythingGeometryWorker.ps1'))):
+            return root
+    return ''
+
+def _launch_worker(provider):
+    controls = _controls()
+    selected = str(provider).strip().lower()
+    previous = _WORKER_PROCESSES.get(selected)
+    if previous is not None and previous.poll() is None:
+        _set(controls, 'Workerstatus',
+             '%s worker is already running (PID %s)' %
+             (selected, previous.pid))
+        _set(controls, 'Workerpid', int(previous.pid))
+        return False
+    root = _workspace_root()
+    if not root:
+        _set(controls, 'Workerstatus',
+             'Worker start failed: set Workspace Root to this checkout')
+        return False
+    script_name = (
+        'Start-DepthAnythingGeometryWorker.ps1'
+        if selected == 'depth_anything' else 'Start-MoGe2Worker.ps1')
+    script = os.path.abspath(os.path.join(root, 'scripts', script_name))
+    scripts_root = os.path.abspath(os.path.join(root, 'scripts'))
+    try:
+        if os.path.commonpath((script, scripts_root)) != scripts_root:
+            raise ValueError('worker script escaped the workspace')
+    except Exception as exc:
+        _set(controls, 'Workerstatus', 'Worker start refused: %s' % exc)
+        return False
+    profile = str(_value('Qualityprofile', '3080ti_16gb'))
+    if profile not in ('3080ti_16gb', '4090', '5090'):
+        profile = '3080ti_16gb'
+    gpu_index = max(0, min(31, int(_value('Gpuindex', 0))))
+    _set(controls, 'Geometryprovider', selected)
+    apply_parameter('Geometryprovider')
+    args = [
+        'powershell.exe', '-NoExit', '-NoProfile',
+        '-ExecutionPolicy', 'Bypass', '-File', script,
+        '-Profile', profile, '-Backend', selected,
+        '-GpuIndex', str(gpu_index), '-Start',
+    ]
+    try:
+        process = subprocess.Popen(
+            args, cwd=root,
+            creationflags=getattr(subprocess, 'CREATE_NEW_CONSOLE', 0))
+        _WORKER_PROCESSES[selected] = process
+        _set(controls, 'Workspaceroot', root)
+        _set(controls, 'Workerpid', int(process.pid))
+        _set(controls, 'Workerstatus',
+             '%s worker console opened (PID %s); Ctrl+C stops it' %
+             (selected, process.pid))
+        return True
+    except Exception as exc:
+        _set(controls, 'Workerpid', 0)
+        _set(controls, 'Workerstatus',
+             'Worker start failed: %s' % str(exc)[:240])
+        return False
+
 def _apply_fog():
     pipeline = _pipeline()
     density = max(0.0, min(1.5, float(_value('Fogdensity', 0.35))))
@@ -952,7 +1101,8 @@ def _apply_quality_profile():
     controls = _controls()
     profile = str(_value('Qualityprofile', '3080ti_16gb'))
     presets = {
-        '3080ti_16gb': (384, 120000, 4.2, 5, 'Stream 512 / geometry 384 / 5 Hz'),
+        '3080ti_16gb': (384, 120000, 4.2, 5,
+                        '147k adaptive: 384x384 or 512x288 / 5 Hz'),
         '4090': (512, 250000, 3.4, 10, 'Stream 512+ / geometry 512 / 10 Hz'),
         '5090': (512, 262144, 3.0, 15, 'Stream 512+ / geometry 512 / 15 Hz'),
     }
@@ -1011,6 +1161,7 @@ def apply_parameter(name):
         _set(pipeline.op('SOURCES/STREAMDIFFUSION_ADAPTER'),
              'Geometrysource', provider)
         _switch_runtime_geometry_contract(provider)
+        _apply_point_cloud_scale()
     elif key == 'displaymode':
         _set(pipeline, 'Displaymode', _value('Displaymode', 'single'))
     elif key == 'completionmode':
@@ -1035,6 +1186,10 @@ def apply_parameter(name):
     elif key == 'wrapfovdegrees':
         _set(pipeline.op('POINT_RENDER'), 'Wrapfovdegrees',
              float(_value('Wrapfovdegrees', 78.0)))
+    elif key in ('wallwidth', 'wallheight'):
+        _apply_wall_resolution()
+    elif key in ('pointcloudscale', 'moge2scale', 'depthanythingscale'):
+        _apply_point_cloud_scale()
     elif key in ('wrapcoverage', 'wrapnoise'):
         parameter = 'Wrapcoverage' if key == 'wrapcoverage' else 'Wrapnoise'
         symbol = 'wrapCoverage' if key == 'wrapcoverage' else 'wrapNoise'
@@ -1052,6 +1207,9 @@ def apply_parameter(name):
         geometry = max(64, min(2048, int(_value('Geometryresolution', 384))))
         _set(pipeline.op('RECONSTRUCTION'), 'Geometryresolution', geometry)
         _set(_pipeline().parent().op('AI_PIPELINE'), 'Geometryresolution', geometry)
+    elif key == 'preservegeometryaspect':
+        _set(pipeline.op('RECONSTRUCTION'), 'Preservegeometryaspect',
+             bool(_value('Preservegeometryaspect', True)))
     elif key == 'pointbudget':
         points = max(1000, min(10000000, int(_value('Pointbudget', 120000))))
         _set(pipeline.op('POINT_RENDER'), 'Maxpoints', points)
@@ -1072,7 +1230,10 @@ def apply_all():
         'Geometryprovider', 'Displaymode', 'Completionmode', 'Fogdensity',
         'Interactionstrength', 'Interactionsmoothing', 'Wrapyawdegrees',
         'Wrapfovdegrees', 'Wrapcoverage', 'Wrapnoise',
-        'Geometryresolution', 'Pointbudget', 'Pointsize', 'Geometryfps'):
+        'Wallwidth', 'Wallheight', 'Pointcloudscale',
+        'Moge2scale', 'Depthanythingscale',
+        'Geometryresolution', 'Preservegeometryaspect',
+        'Pointbudget', 'Pointsize', 'Geometryfps'):
         apply_parameter(name)
 
 def onValueChange(par, prev):
@@ -1080,8 +1241,13 @@ def onValueChange(par, prev):
     return
 
 def onPulse(par):
-    if str(par.name).lower() == 'applyall':
+    key = str(par.name).lower()
+    if key == 'applyall':
         apply_all()
+    elif key == 'startmogeworker':
+        _launch_worker('moge2')
+    elif key == 'startdepthanythingworker':
+        _launch_worker('depth_anything')
     return
 '''
 
@@ -1490,6 +1656,62 @@ def _set_resolution(node, width, height):
     _set(node, "resmult", False)
     _set(node, ("resolutionw", "resw"), width)
     _set(node, ("resolutionh", "resh"), height)
+    # A horizontal three-wall mosaic must use its 16:3 pixel resolution as
+    # the display aspect.  Inheriting a 16:9 wall input gives the 5760x1080
+    # texture non-square pixels and makes viewers/mappers treat it as
+    # 5760x3240.  Resolution aspect is also the deterministic choice for the
+    # other explicit geometry and output textures created by this helper.
+    _set(node, "outputaspect", "resolution")
+
+
+def _set_horizontal_layout(node):
+    """Arrange Layout TOP inputs left-to-right with a fallback for old hosts."""
+
+    if node is None:
+        return
+    if getattr(getattr(node, "par", None), "align", None) is not None:
+        # Layout TOP uses the menu name ``horizlr`` (label: Left to Right).
+        # ``horizontal`` is not a valid value and silently leaves Align=None.
+        _set(node, "align", "horizlr")
+    else:
+        _set(node, "direction", "horizontal")
+
+
+def _scaled_camera_fov_expression(base_expression):
+    """Return a perspective-correct view-scale expression for a Camera COMP."""
+
+    return (
+        "2.0 * math.degrees(math.atan("
+        "math.tan(math.radians(%s) * 0.5) / "
+        "max(0.35, min(4.0, parent().par.Pointcloudscale.eval()))))"
+        % base_expression
+    )
+
+
+def _apply_point_cloud_camera_framing(render):
+    """Bind every managed camera to one provider-aware point-cloud scale."""
+
+    if render is None:
+        return
+    render_page = _page(render, "Render")
+    _custom(
+        render, render_page, "Float", "Pointcloudscale", 1.0,
+        label="Effective Point Cloud View Scale")
+    for camera_name in (
+        "CAMERA_CENTER_METRIC", "CAMERA_LEFT_METRIC", "CAMERA_RIGHT_METRIC",
+    ):
+        _expr(
+            render.op(camera_name), "fov",
+            _scaled_camera_fov_expression("60.0"))
+    for side in ("LEFT", "CENTER", "RIGHT"):
+        _expr(
+            render.op("CAMERA_WRAP_" + side), "fov",
+            _scaled_camera_fov_expression(
+                "parent().par.Wrapfovdegrees.eval()"))
+        _expr(
+            render.op("CAMERA_ARTISTIC_" + side), "fov",
+            _scaled_camera_fov_expression(
+                "parent().par.Surfacefovdegrees.eval()"))
 
 
 def _embedded_runtime_source(filename, label, report):
@@ -2306,6 +2528,8 @@ def _build_reconstruction(parent, report):
     page = _page(comp, "Geometry")
     _custom(comp, page, "Int", "Geometryresolution", 384,
             label="Geometry Resolution")
+    _custom(comp, page, "Toggle", "Preservegeometryaspect", True,
+            label="Preserve Source Aspect")
     _custom(comp, page, "Menu", "Depthmode", "normalized",
             ("normalized", "metric", "inverse"), label="Depth Convention")
     _custom(comp, page, "Float", "Depthscale", 1.0, label="Depth Scale")
@@ -2352,14 +2576,27 @@ def _build_reconstruction(parent, report):
     _connect(rgb, color, report=report, replace=True)
     _set(color, "outputresolution", "custom")
     _set(color, "resmult", False)
-    _expr(color, ("resolutionw", "resw"), "parent().par.Geometryresolution")
-    _expr(color, ("resolutionh", "resh"), "parent().par.Geometryresolution")
+    aspect = "(max(1.0, op('RGB_IN').width) / max(1.0, op('RGB_IN').height))"
+    width = (
+        "parent().par.Geometryresolution if not "
+        "parent().par.Preservegeometryaspect.eval() else "
+        "max(64, min(2048, 2 * int(round((parent().par.Geometryresolution * "
+        + aspect + " ** 0.5) / 2.0))))"
+    )
+    height = (
+        "parent().par.Geometryresolution if not "
+        "parent().par.Preservegeometryaspect.eval() else "
+        "max(64, min(2048, 2 * int(round((parent().par.Geometryresolution / "
+        + aspect + " ** 0.5) / 2.0))))"
+    )
+    _expr(color, ("resolutionw", "resw"), width)
+    _expr(color, ("resolutionh", "resh"), height)
     confidence_aligned = _ensure(comp, "resolutionTOP", "CONFIDENCE_ALIGNED_RESIZE", report)
     _connect(confidence, confidence_aligned, report=report, replace=True)
     _set(confidence_aligned, "outputresolution", "custom")
     _set(confidence_aligned, "resmult", False)
-    _expr(confidence_aligned, ("resolutionw", "resw"), "parent().par.Geometryresolution")
-    _expr(confidence_aligned, ("resolutionh", "resh"), "parent().par.Geometryresolution")
+    _expr(confidence_aligned, ("resolutionw", "resw"), width)
+    _expr(confidence_aligned, ("resolutionh", "resh"), height)
     _set(confidence_aligned, "format", "mono16float")
     position = _glsl(comp, "depth_to_position", "depth_to_position",
                      [color, depth, confidence_aligned], report, True)
@@ -2691,6 +2928,8 @@ def _build_point_render(parent, report):
     page = _page(comp, "Render")
     _custom(comp, page, "Int", "Maxpoints", 120000, label="Maximum Points")
     _custom(comp, page, "Float", "Pointsize", 3.0, label="Point Thickness")
+    _custom(comp, page, "Float", "Pointcloudscale", 1.0,
+            label="Effective Point Cloud View Scale")
     _custom(comp, page, "Float", "Pointkeep", 0.68,
             label="Visible Point Fraction")
     _custom(comp, page, "Float", "Pointopacity", 0.92,
@@ -2975,6 +3214,7 @@ def _build_point_render(parent, report):
         ["glyph", "POINT_GLYPH + POINT_SPRITE_MATERIAL", "soft circular alpha; no source-image sprite texture"],
         ["thickness", "POINT_SPRITE_MATERIAL", "Pointsize and Pointopacity controls"],
         ["metric geometry", "POINT_WORLD_GEO/SELECT_POINT_WORLD", "no normalization; XYZ remain metres"],
+        ["view scale", "managed Camera COMP FOV", "perspective-correct provider-aware framing; geometry stays metric"],
         ["center", "METRIC_RENDER_CENTER + CAMERA_CENTER_METRIC", TOP_CONTRACTS["INSTALLATION"]],
         ["panoramic wrap", "METRIC_RENDER_WRAP_* + CAMERA_WRAP_*",
          "shared origin; side yaw follows Wrapyawdegrees"],
@@ -2983,6 +3223,7 @@ def _build_point_render(parent, report):
         ["stereo", "METRIC_RENDER_LEFT/RIGHT + parallel Camera COMPs", "+/- Ipdmetres/2; no toe-in"],
         ["fallback", "*_OR_FALLBACK input 0", "completed color TOP"],
     ], report)
+    _apply_point_cloud_camera_framing(comp)
     return comp
 
 
@@ -3079,7 +3320,7 @@ def _build_triple_display(parent, report):
             _connect(
                 graded[mode + "_" + side], layout, side_index, 0,
                 report, replace=True)
-        _set(layout, ("align", "direction"), "horizontal")
+        _set_horizontal_layout(layout)
         _set_resolution(layout, 2880, 540)
         layouts[mode] = layout
         _out_top(comp, "OUT_" + mode + "_MOSAIC", layout, output_index, report)
@@ -3121,7 +3362,7 @@ def _build_stereo(parent, report):
         layout = _ensure(comp, "compositeTOP", "STEREO_SIDE_BY_SIDE_FALLBACK", report)
     _connect(left_grade, layout, 0, 0, report, replace=True)
     _connect(right_grade, layout, 1, 0, report, replace=True)
-    _set(layout, ("align", "direction"), "horizontal")
+    _set_horizontal_layout(layout)
     _set_resolution(layout, 2560, 720)
     _out_top(comp, "OUT_LEFT_EYE", left_grade, 0, report)
     _out_top(comp, "OUT_RIGHT_EYE", right_grade, 1, report)
@@ -3459,6 +3700,11 @@ def _build_show_control(pipeline, report):
     sensor = pipeline.op("SENSOR_INTERACTION")
     render = pipeline.op("POINT_RENDER")
     triple = pipeline.op("TRIPLE_DISPLAY")
+    reference_wall = pipeline.op("INSTALLATION_OUTPUT/installation_grade")
+    wall_width = int(_value(
+        reference_wall, ("resolutionw", "resw"), 1920))
+    wall_height = int(_value(
+        reference_wall, ("resolutionh", "resh"), 1080))
 
     show_page = _page(control, "Show Controls")
     _custom(
@@ -3470,6 +3716,12 @@ def _build_show_control(pipeline, report):
         _value(pipeline, "Displaymode", "single"),
         ("single", "panoramic_wrap", "artistic_multi_angle"),
         label="Display Mode")
+    _custom(
+        control, show_page, "Int", "Wallwidth", wall_width,
+        label="Wall Width")
+    _custom(
+        control, show_page, "Int", "Wallheight", wall_height,
+        label="Wall Height")
     _custom(
         control, show_page, "Menu", "Completionmode",
         _value(completion, "Mode", "hybrid"),
@@ -3500,6 +3752,36 @@ def _build_show_control(pipeline, report):
         control, show_page, "Float", "Wrapnoise",
         _value(triple, "Wrapnoise", 0.42),
         label="Panoramic Coverage Noise")
+    _custom(
+        control, show_page, "Float", "Pointcloudscale", 1.0,
+        label="Point Cloud Scale")
+    _custom(
+        control, show_page, "Float", "Moge2scale", 1.25,
+        label="MoGe-2 Scale")
+    _custom(
+        control, show_page, "Float", "Depthanythingscale", 1.0,
+        label="Depth Anything Scale")
+    provider = str(_value(adapter, "Geometrysource", "moge2"))
+    provider_scale = 1.0 if provider == "depth_anything" else 1.25
+    effective_scale = _custom(
+        control, show_page, "Float", "Effectivepointcloudscale",
+        provider_scale, label="Effective Point Cloud Scale")
+    try:
+        effective_scale.readOnly = True
+    except Exception:
+        pass
+    creative_scale = max(
+        0.5, min(2.5, float(_value(control, "Pointcloudscale", 1.0))))
+    active_provider_scale = max(
+        0.5, min(2.5, float(_value(
+            control,
+            "Depthanythingscale" if provider == "depth_anything"
+            else "Moge2scale",
+            provider_scale))))
+    active_scale = max(0.35, min(4.0,
+                                 creative_scale * active_provider_scale))
+    _set(render, "Pointcloudscale", active_scale)
+    _set(control, "Effectivepointcloudscale", active_scale)
     _custom(control, show_page, "Pulse", "Applyall", False,
             label="Apply All Show Controls")
 
@@ -3515,6 +3797,10 @@ def _build_show_control(pipeline, report):
         int(_value(reconstruction, "Geometryresolution", 384)),
         label="Geometry Resolution")
     _custom(
+        control, quality_page, "Toggle", "Preservegeometryaspect",
+        bool(_value(reconstruction, "Preservegeometryaspect", True)),
+        label="Preserve Source Aspect")
+    _custom(
         control, quality_page, "Int", "Pointbudget",
         int(_value(render, "Maxpoints", 120000)), label="Point Budget")
     _custom(
@@ -3525,8 +3811,42 @@ def _build_show_control(pipeline, report):
         int(_value(bridge, "Capturefps", 5)), label="Geometry Capture FPS")
     _custom(
         control, quality_page, "Str", "Profilehint",
-        "Stream 512 / geometry 384 / 5 Hz",
+        "147k adaptive: 384x384 or 512x288 / 5 Hz",
         label="Profile Guidance")
+
+    worker_page = _page(control, "Workers")
+    try:
+        workspace_root = os.path.abspath(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), ".."))
+    except Exception:
+        workspace_root = ""
+    if not os.path.isfile(os.path.join(
+            workspace_root, "scripts", "Start-MoGe2Worker.ps1")):
+        workspace_root = ""
+    _custom(
+        control, worker_page, "Str", "Workspaceroot", workspace_root,
+        label="Workspace Root")
+    _custom(
+        control, worker_page, "Int", "Gpuindex", 0,
+        label="Physical GPU Index")
+    _custom(
+        control, worker_page, "Pulse", "Startmogeworker", False,
+        label="Start MoGe-2 Worker")
+    _custom(
+        control, worker_page, "Pulse", "Startdepthanythingworker", False,
+        label="Start Depth Anything Worker")
+    worker_pid = _custom(
+        control, worker_page, "Int", "Workerpid", 0,
+        label="Last Worker Console PID")
+    worker_status = _custom(
+        control, worker_page, "Str", "Workerstatus",
+        "idle; start one generated-geometry worker at a time",
+        label="Worker Status")
+    for parameter in (worker_pid, worker_status):
+        try:
+            parameter.readOnly = True
+        except Exception:
+            pass
 
     callbacks = _ensure(
         control, "parameterexecuteDAT", "show_control_callbacks",
@@ -3551,18 +3871,62 @@ def _build_show_control(pipeline, report):
         ["Completion / Fog", "COMPLETION + view-grade shader constants"],
         ["Interaction", "SENSOR_INTERACTION force + low-latency smoothing"],
         ["Panoramic", "wrap camera yaw/FOV + procedural atmosphere"],
+        ["Wall Resolution", "single + six feeds; mosaics are 3x wall width"],
+        ["Point Cloud Scale", "provider-aware managed camera FOV framing"],
         ["Quality", "geometry grid, point budget/size, bridge capture FPS"],
+        ["Workers", "visible PowerShell consoles via public wrapper scripts"],
     ], report)
     _text(
         control, "README_FIRST",
         "SHOW CONTROL\n\n"
         "These controls update only the public FlexGPU managed network. GPU "
         "profiles never modify private StreamDiffusionTD internals or output "
-        "resolution: all installation walls remain at the configured 1920x1080. "
+        "resolution. Wall Width and Wall Height control every installation "
+        "surface; triple mosaics remain exactly three wall widths. Point "
+        "Cloud Scale is creative framing, while the provider scales preserve "
+        "separate MoGe-2 and Depth Anything tuning. Worker buttons open a "
+        "visible PowerShell console; use Ctrl+C there before starting the "
+        "other provider. "
         "Panoramic Coverage adds procedural atmosphere only in empty wrap views; "
         "it never stretches the source image. Use Apply All after reopening an "
         "older saved TOE if you want every displayed value reapplied.",
         report)
+    return control
+
+
+def install_output_framing_controls(root=None):
+    """Add adjustable wall resolution, provider framing and worker buttons.
+
+    This bounded upgrade touches only managed Camera/Render parameters and the
+    public ``SHOW_CONTROL`` component. It does not rebuild the point world,
+    inspect private adapters, start a worker automatically, or save the TOE.
+    """
+
+    global LAST_REPORT
+    report = BuildReport()
+    LAST_REPORT = report
+    if root is None:
+        root = _op(ROOT_PATH)
+    elif isinstance(root, str):
+        root = _op(root)
+    if root is None:
+        raise RuntimeError("FlexGPU root %s does not exist" % ROOT_PATH)
+    pipeline = root.op(PIPELINE_NAME)
+    if pipeline is None:
+        raise RuntimeError("WORKING_PIPELINE is missing; build it first")
+    render = pipeline.op("POINT_RENDER")
+    if render is None:
+        raise RuntimeError("POINT_RENDER is missing")
+
+    _apply_point_cloud_camera_framing(render)
+    control = _build_show_control(pipeline, report)
+    try:
+        control.store("output_framing_controls_report", report.as_dict())
+    except Exception:
+        pass
+    print("[FlexGPU runtime] adjustable output/framing controls ready: "
+          "wall width/height, provider-aware point-cloud scale and visible "
+          "worker consoles; TOE remains unsaved")
     return control
 
 
@@ -3597,6 +3961,7 @@ def install_show_control_upgrade(root=None):
         camera = render.op("CAMERA_WRAP_" + side)
         if camera is not None:
             _expr(camera, "fov", "parent().par.Wrapfovdegrees.eval()")
+    _apply_point_cloud_camera_framing(render)
 
     sensor = pipeline.op("SENSOR_INTERACTION")
     if sensor is None:
@@ -3651,6 +4016,126 @@ def install_show_control_upgrade(root=None):
     return control
 
 
+def install_adaptive_source_resolution(root=None):
+    """Preserve generated-image aspect within the 3080 geometry pixel budget.
+
+    This bounded upgrade refreshes only ``RECONSTRUCTION`` and the public
+    ``SHOW_CONTROL``. A geometry resolution of 384 remains 147,456 pixels, so
+    square input becomes 384x384 and 16:9 input becomes 512x288. Projector
+    render TOPs, private adapters, model settings, and the current TOE save are
+    untouched.
+    """
+
+    global LAST_REPORT
+    report = BuildReport()
+    LAST_REPORT = report
+    if root is None:
+        root = _op(ROOT_PATH)
+    elif isinstance(root, str):
+        root = _op(root)
+    if root is None:
+        raise RuntimeError("FlexGPU root %s does not exist" % ROOT_PATH)
+    pipeline = root.op(PIPELINE_NAME)
+    if pipeline is None:
+        raise RuntimeError("WORKING_PIPELINE is missing; build it first")
+
+    reconstruction = _build_reconstruction(pipeline, report)
+    control = _build_show_control(pipeline, report)
+    try:
+        reconstruction.store(
+            "adaptive_source_resolution_install_report", report.as_dict())
+        reconstruction.store("geometry_pixel_budget", 384 * 384)
+        reconstruction.store(
+            "adaptive_geometry_examples",
+            {"512x512": "384x384",
+             "1024x567": "512x284",
+             "1024x576": "512x288"})
+    except Exception:
+        pass
+    print("[FlexGPU runtime] adaptive source resolution ready: "
+          "512x512 -> 384x384; 1024x567 -> 512x284; "
+          "1024x576 -> 512x288; "
+          "wall feeds unchanged (%d created, %d reused, %d warnings)" %
+          (len(report.created), len(report.reused), len(report.warnings)))
+    return reconstruction
+
+
+def install_noncommercial_preview_outputs(root=None):
+    """Fit every development preview inside the 1280x1280 NC limit.
+
+    Individual single/triple wall feeds become 1280x720. The two horizontal
+    triple mosaics become 1280x240, preserving their commissioned 16:3 aspect
+    without creating an over-limit 3840-pixel TOP. Stereo preview becomes two
+    640x360 eyes in one 1280x360 TOP. The production 1920x1080 contract can be
+    restored later with ``install_venue_1080p_outputs``.
+    """
+
+    if root is None:
+        root = _op(ROOT_PATH)
+    elif isinstance(root, str):
+        root = _op(root)
+    if root is None:
+        raise RuntimeError("FlexGPU root %s does not exist" % ROOT_PATH)
+    pipeline = root.op(PIPELINE_NAME)
+    if pipeline is None:
+        raise RuntimeError("WORKING_PIPELINE is missing; build it first")
+
+    wall_width, wall_height = 1280, 720
+    for path in (
+        "POINT_RENDER/METRIC_RENDER_CENTER",
+        "POINT_RENDER/METRIC_MONO_FALLBACK",
+        "INSTALLATION_OUTPUT/installation_grade",
+    ):
+        _set_resolution(pipeline.op(path), wall_width, wall_height)
+    for mode in ("WRAP", "ARTISTIC"):
+        for side in ("LEFT", "CENTER", "RIGHT"):
+            _set_resolution(
+                pipeline.op("POINT_RENDER/METRIC_RENDER_%s_%s" % (mode, side)),
+                wall_width, wall_height)
+            if mode == "WRAP":
+                _set_resolution(
+                    pipeline.op("TRIPLE_DISPLAY/COVERAGE_WRAP_" + side),
+                    wall_width, wall_height)
+            _set_resolution(
+                pipeline.op("TRIPLE_DISPLAY/GRADE_%s_%s" % (mode, side)),
+                wall_width, wall_height)
+        _set_resolution(
+            pipeline.op("TRIPLE_DISPLAY/%s_MOSAIC" % mode), 1280, 240)
+        _set_horizontal_layout(
+            pipeline.op("TRIPLE_DISPLAY/%s_MOSAIC" % mode))
+        _set_resolution(
+            pipeline.op("TRIPLE_DISPLAY/%s_MOSAIC_FALLBACK" % mode),
+            1280, 240)
+        _set_horizontal_layout(
+            pipeline.op("TRIPLE_DISPLAY/%s_MOSAIC_FALLBACK" % mode))
+    for eye in ("LEFT", "RIGHT"):
+        _set_resolution(
+            pipeline.op("STEREO_PREVIEW/GRADE_%s_EYE" % eye), 640, 360)
+    _set_resolution(
+        pipeline.op("STEREO_PREVIEW/STEREO_SIDE_BY_SIDE"), 1280, 360)
+    _set_horizontal_layout(
+        pipeline.op("STEREO_PREVIEW/STEREO_SIDE_BY_SIDE"))
+    _set_resolution(
+        pipeline.op("STEREO_PREVIEW/STEREO_SIDE_BY_SIDE_FALLBACK"),
+        1280, 360)
+    _set_horizontal_layout(
+        pipeline.op("STEREO_PREVIEW/STEREO_SIDE_BY_SIDE_FALLBACK"))
+    try:
+        pipeline.store("venue_output_profile", "noncommercial_preview")
+        pipeline.store(
+            "production_output_contract",
+            "single/six walls 1920x1080; mosaics 5760x1080")
+    except Exception:
+        pass
+    control = pipeline.op("SHOW_CONTROL")
+    _set(control, "Wallwidth", wall_width)
+    _set(control, "Wallheight", wall_height)
+    print("[FlexGPU runtime] non-commercial preview ready: "
+          "single/six wall feeds 1280x720; mosaics 1280x240; "
+          "production 1080p contract retained for later restore; TOE unsaved")
+    return pipeline
+
+
 def install_venue_1080p_outputs(root=None):
     """Set the single wall and every triple-wall feed to native 1920x1080.
 
@@ -3691,13 +4176,26 @@ def install_venue_1080p_outputs(root=None):
         _set_resolution(
             pipeline.op("TRIPLE_DISPLAY/%s_MOSAIC" % mode),
             wall_width * 3, wall_height)
+        _set_horizontal_layout(
+            pipeline.op("TRIPLE_DISPLAY/%s_MOSAIC" % mode))
         _set_resolution(
             pipeline.op("TRIPLE_DISPLAY/%s_MOSAIC_FALLBACK" % mode),
             wall_width * 3, wall_height)
+        _set_horizontal_layout(
+            pipeline.op("TRIPLE_DISPLAY/%s_MOSAIC_FALLBACK" % mode))
+    # Keep the desktop stereo preview at its existing development resolution,
+    # but repair older TOEs whose Layout TOP silently retained Align=None.
+    _set_horizontal_layout(
+        pipeline.op("STEREO_PREVIEW/STEREO_SIDE_BY_SIDE"))
+    _set_horizontal_layout(
+        pipeline.op("STEREO_PREVIEW/STEREO_SIDE_BY_SIDE_FALLBACK"))
     try:
         pipeline.store("venue_output_profile", "venue_1080p")
     except Exception:
         pass
+    control = pipeline.op("SHOW_CONTROL")
+    _set(control, "Wallwidth", wall_width)
+    _set(control, "Wallheight", wall_height)
     print("[FlexGPU runtime] venue outputs ready: single and six wall feeds "
           "1920x1080; mosaics 5760x1080; TOE remains unsaved")
     return pipeline
