@@ -164,10 +164,10 @@ For an existing ignored working TOE, run the bounded upgrade from TouchDesigner
 after adding this checkout's `touchdesigner` folder to `sys.path`:
 
 ```python
-import importlib, runtime_pipeline as rp; importlib.reload(rp); rp.install_show_control_upgrade(op('/project1/flexgpu'))
+import importlib, runtime_pipeline as rp; importlib.reload(rp); rp.install_show_control_upgrade(op('/project1/flexgpu')); rp.install_output_framing_controls(op('/project1/flexgpu'))
 ```
 
-Open `/project1/flexgpu/WORKING_PIPELINE/SHOW_CONTROL`. Its two parameter pages
+Open `/project1/flexgpu/WORKING_PIPELINE/SHOW_CONTROL`. Its three parameter pages
 provide:
 
 - MoGe-2 or Depth Anything generated geometry selection;
@@ -175,12 +175,26 @@ provide:
 - completion mode and fog density;
 - interaction strength and low-latency smoothing;
 - panoramic yaw, independent FOV, coverage, and noise;
+- adjustable width/height for every wall feed, with three-wide mosaics;
+- a creative point-cloud scale plus independent MoGe-2 and Depth Anything
+  provider scales;
 - 3080 Ti 16 GB, 4090, and 5090 geometry/point/capture presets.
+- visible PowerShell launch buttons for the two generated-geometry workers,
+  using the selected quality profile and physical GPU index.
 
-The controls update only public managed operators. They do not start workers,
-change private StreamDiffusionTD parameters, or change the commissioned output
-sizes. `Apply All Show Controls` reapplies the displayed values after reopening
-an older working TOE.
+The controls update only public managed operators and never inspect or change
+private StreamDiffusionTD parameters. `Wall Width` and `Wall Height` default to
+the currently installed output profile; use 1920 and 1080 for the commissioned
+walls. `Point Cloud Scale` changes camera framing while preserving metric XYZ;
+the provider scales prevent a MoGe correction from changing the accepted Depth
+Anything view. `Apply All Show Controls` reapplies the displayed values after
+reopening an older working TOE.
+
+Each worker button opens the existing public wrapper in a separate visible
+PowerShell console and selects its provider first. Stop that console with
+`Ctrl+C` before starting the other provider. A duplicate click from the same
+TouchDesigner session is refused. `Workspace Root` must point at this checkout
+if the TOE was moved outside its `projects` folder.
 
 Runtime config controls per-surface resolution. Defaults are deliberately
 conservative: 640x360 on the 3080 Ti Laptop, 960x540 on the 4090, and 1280x720
@@ -330,6 +344,17 @@ default and can be selected again without rewiring. See
 The generated-geometry path is live-accepted on the 3080 Ti Laptop with
 single, panoramic, and artistic outputs at 1920x1080 per surface; reaccept it
 after changing GPU, worker quality, TouchDesigner, or the private source.
+Both generated-geometry launchers use a 147,456-pixel 3080 budget by default:
+512x512 becomes 384x384, 1024x567 becomes 512x284, and 1024x576 becomes
+512x288. Install
+`runtime_pipeline.install_adaptive_source_resolution(...)` once in an older
+working TOE so reconstruction preserves that aspect instead of stretching the
+geometry texture to a square. The bounded installer does not save the TOE.
+With TouchDesigner Non-Commercial, also call
+`runtime_pipeline.install_noncommercial_preview_outputs(...)`: individual wall
+previews become 1280x720 and mosaics 1280x240, all inside the 1280x1280 license
+limit. `install_venue_1080p_outputs(...)` restores the commissioned 1920x1080
+per-wall contract after the appropriate show license is installed.
 
 ## Rehearse audience interaction with the laptop webcam
 
