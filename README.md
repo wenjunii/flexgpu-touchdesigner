@@ -501,9 +501,9 @@ its role gates, and its boundary from full WorldBus v1 are documented in
 The chosen tier changes resolution, update-rate, and point-count budgets. It
 does not change the network structure.
 
-- `3080ti_16gb`: SD-Turbo-oriented 512-square diffusion, 384-square geometry,
-  and lean point budgets; the supplied single-GPU preset starts in
-  installation/fog mode.
+- `3080ti_16gb`: a 147,456-sample aspect-preserving geometry budget
+  (384x384 for 512x512 input; 512x288 for 1024x576 input) and lean point
+  budgets; the supplied single-GPU preset starts in installation/fog mode.
 - `4090`: higher update/geometry budget with room for measured conditioning.
 - `5090`: larger reserve for model experiments; its default 512-square geometry
   limits the reachable stock point budget to 262,144 samples.
@@ -745,10 +745,48 @@ strength/smoothing, wrap yaw/FOV/coverage, and the 3080/4090/5090 quality
 profiles. Quality changes preserve the configured 1920x1080 wall outputs and
 do not modify private StreamDiffusionTD internals.
 
+For the current 3080 installation, generated-image aspect is preserved before
+unprojection instead of forcing every source into a square. The MoGe-2 and
+Depth Anything geometry launchers both default to `-TargetPixels 147456` and
+`-MaxEdge 512`: a 512x512 StreamDiffusion frame becomes a 384x384 geometry
+texture, while a 1024x576 frame becomes 512x288. Changing between those source
+formats starts a new worker output session and resets temporal history; it does
+not require different projector outputs. The single and six wall feeds remain
+1920x1080, and the two mosaics remain 5760x1080.
+The mosaics explicitly use square-pixel resolution aspect and TouchDesigner's
+`Left to Right` Layout TOP mode, so mapper and floating-viewer consumers see a
+true 16:3 left-center-right canvas rather than an inherited 16:9 aspect.
+
+To refresh an older ignored working TOE without rebuilding the rest of the
+network, stop the geometry worker and run this bounded Textport installer:
+
+```python
+from pathlib import Path; import importlib, sys; root = Path(r'C:\path\to\flexgpu-touchdesigner'); sys.path.insert(0, str(root / 'touchdesigner')); import runtime_pipeline as rp; importlib.reload(rp); rp.install_adaptive_source_resolution(op('/project1/flexgpu'))
+```
+
+The installer updates only public `RECONSTRUCTION` and `SHOW_CONTROL`, never
+saves the TOE, and leaves private StreamDiffusionTD internals untouched.
+
+TouchDesigner Non-Commercial limits every image to 1280x1280. For development
+without a Commercial/Educational/Pro key, apply the separate bounded preview
+profile after the adaptive-resolution installer:
+
+```python
+rp.install_noncommercial_preview_outputs(op('/project1/flexgpu'))
+```
+
+This sets the single and six individual wall previews to 1280x720, both
+three-wall mosaics to 1280x240, and the stereo development preview to
+1280x360. It does not redefine the commissioned venue: after installing the
+appropriate show license, restore native projector outputs with
+`rp.install_venue_1080p_outputs(op('/project1/flexgpu'))`, yielding 1920x1080
+per wall and 5760x1080 mosaics.
+
 Native output resolution reduces final scaling blur but cannot create point
-detail missing from the source or geometry grid. Increase StreamDiffusion,
-selected geometry inference, geometry resolution, and point budget together on a 4090/5090;
-changing only the projector TOP dimensions merely resamples the existing cloud.
+detail missing from the source or geometry grid. On the 3080, 1024x576 input
+now uses a 512x288 geometry grid at the same pixel budget as 384x384 square
+input. Raising only the projector TOP dimensions still merely resamples the
+existing cloud.
 
 The scaffold is deliberately adapter-based. Connect the exact StreamDiffusionTD
 component, camera SDK, and VR component available on the show machine rather

@@ -90,10 +90,17 @@ environment and checkpoint:
   -Backend depth_anything `
   -GpuIndex 0 `
   -InputSize 384 `
-  -MaxEdge 384 `
+  -MaxEdge 512 `
+  -TargetPixels 147456 `
   -CalibrationFrames 12 `
   -Start
 ```
+
+The 3080 target is a pixel budget, not a forced square: 512x512 generated RGB
+is inferred at 384x384, while 1024x576 is inferred at 512x288. Both contain
+147,456 samples and feed the same fixed 1920x1080 wall renderers without
+stretching. A live source-format change intentionally starts a new calibration
+and producer session before publishing fresh geometry.
 
 Default loopback ports are:
 

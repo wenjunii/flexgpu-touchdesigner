@@ -474,15 +474,24 @@ class DepthAnythingGeometryBackend:
         )
 
 
-def _resize_rgb(frame: WorldFrame, max_edge: int) -> tuple[Any, bytes]:
+def _resize_rgb(
+    frame: WorldFrame,
+    max_edge: int,
+    target_pixels: Optional[int] = None,
+) -> tuple[Any, bytes]:
     if frame.metadata.pixel_format != "rgba8":
         raise WorkerError("MoGe-2 input frames must use WorldBus pixel_format rgba8")
     np, Image = _import_arrays()
     width, height = frame.metadata.width, frame.metadata.height
     rgba = np.frombuffer(frame.payload, dtype=np.uint8).reshape(height, width, 4)
     rgb = np.ascontiguousarray(rgba[..., :3])
-    if max(width, height) > max_edge:
-        scale = max_edge / max(width, height)
+    scale = min(1.0, max_edge / max(width, height))
+    if target_pixels is not None:
+        # A pixel budget, unlike a fixed long edge, gives square and widescreen
+        # sources comparable GPU cost while preserving their native aspect.
+        # The 3080 live profile uses 147,456 pixels: 384x384 or 512x288.
+        scale = min(scale, math.sqrt(target_pixels / (width * height)))
+    if scale < 1.0:
         resized = (
             max(1, int(round(width * scale))),
             max(1, int(round(height * scale))),
@@ -543,6 +552,7 @@ class MoGe2Worker:
         provider: Optional[str] = None,
         num_tokens: Optional[int] = None,
         max_edge: Optional[int] = None,
+        target_pixels: Optional[int] = None,
         depth_scale: float = 0.001,
         producer_session_id: Optional[str] = None,
     ) -> None:
@@ -562,6 +572,7 @@ class MoGe2Worker:
             raise WorkerError("backend and requested geometry provider disagree")
         self.num_tokens = profile.num_tokens if num_tokens is None else num_tokens
         self.max_edge = profile.max_edge if max_edge is None else max_edge
+        self.target_pixels = target_pixels
         if (
             isinstance(self.num_tokens, bool)
             or not isinstance(self.num_tokens, int)
@@ -574,6 +585,14 @@ class MoGe2Worker:
             or not 64 <= self.max_edge <= 2048
         ):
             raise WorkerError("max_edge must be an integer between 64 and 2048")
+        if self.target_pixels is not None and (
+            isinstance(self.target_pixels, bool)
+            or not isinstance(self.target_pixels, int)
+            or not 4096 <= self.target_pixels <= 4_194_304
+        ):
+            raise WorkerError(
+                "target_pixels must be an integer between 4096 and 4194304"
+            )
         try:
             self.depth_scale = float(depth_scale)
         except (TypeError, ValueError, OverflowError) as exc:
@@ -625,7 +644,9 @@ class MoGe2Worker:
         if not isinstance(source, WorldFrame):
             raise WorkerError("source must be a validated WorldBus frame")
         source = validate_frame(source)
-        rgb, source_rgba = _resize_rgb(source, self.max_edge)
+        rgb, source_rgba = _resize_rgb(
+            source, self.max_edge, self.target_pixels
+        )
         height, width = rgb.shape[:2]
         raw_source_session = source.metadata.extensions.get(PRODUCER_SESSION_FIELD)
         source_session = (
@@ -975,6 +996,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--warmup", type=int, default=1)
     serve.add_argument("--num-tokens", type=int)
     serve.add_argument("--max-edge", type=int)
+    serve.add_argument("--target-pixels", type=int)
     serve.add_argument("--depth-scale", type=float, default=0.001)
     serve.add_argument("--input-size", type=int, default=384)
     serve.add_argument("--calibration-frames", type=int, default=12)
@@ -1031,6 +1053,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             provider=provider,
             num_tokens=args.num_tokens,
             max_edge=args.max_edge,
+            target_pixels=args.target_pixels,
             depth_scale=args.depth_scale,
             producer_session_id=args.producer_session_id,
         )

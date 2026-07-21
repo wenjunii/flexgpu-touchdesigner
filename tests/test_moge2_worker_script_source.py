@@ -19,6 +19,9 @@ class MoGe2WorkerScriptSourceTests(unittest.TestCase):
             "'3080ti_16gb', '4090', '5090'",
             "'--input-tcp-port'",
             "'--output-tcp-port'",
+            "'--target-pixels'",
+            "$TargetPixels = 147456",
+            "$MaxEdge = 512",
             "execution = 'foreground; press Ctrl+C to stop'",
         ):
             self.assertIn(marker, source)

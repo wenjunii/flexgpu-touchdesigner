@@ -230,6 +230,10 @@ assert normalized({src_path!r}) in {{
         self.assertNotIn("float active =", temporal)
         self.assertIn('"resolutionTOP", "COLOR_ALIGNED_RESIZE"', self.source)
         self.assertIn('"Geometryresolution", 384', self.source)
+        self.assertIn('"Preservegeometryaspect", True', self.source)
+        self.assertIn("op('RGB_IN').width", self.source)
+        self.assertIn("op('RGB_IN').height", self.source)
+        self.assertIn("parent().par.Geometryresolution * ", self.source)
 
     def test_held_frame_activity_uses_one_absolute_decay_envelope(self) -> None:
         """The shader contract must survive the 5-10 Hz inter-frame hold."""
@@ -730,8 +734,35 @@ assert normalized({src_path!r}) in {{
         self.assertIn("METRIC_RENDER_CENTER", installer)
         self.assertIn("METRIC_RENDER_%s_%s", installer)
         self.assertIn("GRADE_%s_%s", installer)
+        self.assertIn("_set_horizontal_layout", installer)
         self.assertNotIn("destroy", installer)
         self.assertNotIn("build(", installer)
+
+    def test_adaptive_source_resolution_upgrade_is_bounded(self) -> None:
+        signature = inspect.signature(
+            self.module.install_adaptive_source_resolution)
+        self.assertEqual(list(signature.parameters), ["root"])
+        installer = inspect.getsource(
+            self.module.install_adaptive_source_resolution)
+        self.assertIn("384 * 384", installer)
+        self.assertIn('"512x512": "384x384"', installer)
+        self.assertIn('"1024x576": "512x288"', installer)
+        self.assertIn("_build_reconstruction", installer)
+        self.assertIn("_build_show_control", installer)
+        self.assertNotIn("destroy", installer)
+        self.assertNotIn("build(root", installer)
+
+    def test_noncommercial_preview_is_bounded_and_restorable(self) -> None:
+        installer = inspect.getsource(
+            self.module.install_noncommercial_preview_outputs)
+        self.assertIn("wall_width, wall_height = 1280, 720", installer)
+        self.assertIn('1280, 240', installer)
+        self.assertIn('1280, 360', installer)
+        self.assertIn("_set_horizontal_layout", installer)
+        self.assertIn('"noncommercial_preview"', installer)
+        self.assertIn("install_venue_1080p_outputs", installer)
+        self.assertNotIn("destroy", installer)
+        self.assertNotIn("build(root", installer)
 
     def test_actual_point_render_and_visible_outputs_are_built(self) -> None:
         for operator_name in (
@@ -807,7 +838,17 @@ assert normalized({src_path!r}) in {{
 
     def test_explicit_resolutions_ignore_the_host_global_multiplier(self) -> None:
         self.assertIn('_set(node, "resmult", False)', self.source)
+        self.assertIn('_set(node, "outputaspect", "resolution")', self.source)
         self.assertIn('_set(color, "resmult", False)', self.source)
+
+    def test_layout_tops_use_the_valid_left_to_right_menu_name(self) -> None:
+        helper = inspect.getsource(self.module._set_horizontal_layout)
+        self.assertIn('"horizlr"', helper)
+        self.assertIn('"horizontal"', helper)
+        self.assertNotIn(
+            '_set(layout, ("align", "direction"), "horizontal")',
+            self.source,
+        )
 
     def test_component_connect_order_and_point_render_wiring_are_explicit(self) -> None:
         # TouchDesigner In/Out TOP connectors use Connect Order. If all orders

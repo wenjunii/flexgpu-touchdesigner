@@ -952,7 +952,8 @@ def _apply_quality_profile():
     controls = _controls()
     profile = str(_value('Qualityprofile', '3080ti_16gb'))
     presets = {
-        '3080ti_16gb': (384, 120000, 4.2, 5, 'Stream 512 / geometry 384 / 5 Hz'),
+        '3080ti_16gb': (384, 120000, 4.2, 5,
+                        '147k adaptive: 384x384 or 512x288 / 5 Hz'),
         '4090': (512, 250000, 3.4, 10, 'Stream 512+ / geometry 512 / 10 Hz'),
         '5090': (512, 262144, 3.0, 15, 'Stream 512+ / geometry 512 / 15 Hz'),
     }
@@ -1052,6 +1053,9 @@ def apply_parameter(name):
         geometry = max(64, min(2048, int(_value('Geometryresolution', 384))))
         _set(pipeline.op('RECONSTRUCTION'), 'Geometryresolution', geometry)
         _set(_pipeline().parent().op('AI_PIPELINE'), 'Geometryresolution', geometry)
+    elif key == 'preservegeometryaspect':
+        _set(pipeline.op('RECONSTRUCTION'), 'Preservegeometryaspect',
+             bool(_value('Preservegeometryaspect', True)))
     elif key == 'pointbudget':
         points = max(1000, min(10000000, int(_value('Pointbudget', 120000))))
         _set(pipeline.op('POINT_RENDER'), 'Maxpoints', points)
@@ -1072,7 +1076,8 @@ def apply_all():
         'Geometryprovider', 'Displaymode', 'Completionmode', 'Fogdensity',
         'Interactionstrength', 'Interactionsmoothing', 'Wrapyawdegrees',
         'Wrapfovdegrees', 'Wrapcoverage', 'Wrapnoise',
-        'Geometryresolution', 'Pointbudget', 'Pointsize', 'Geometryfps'):
+        'Geometryresolution', 'Preservegeometryaspect',
+        'Pointbudget', 'Pointsize', 'Geometryfps'):
         apply_parameter(name)
 
 def onValueChange(par, prev):
@@ -1490,6 +1495,25 @@ def _set_resolution(node, width, height):
     _set(node, "resmult", False)
     _set(node, ("resolutionw", "resw"), width)
     _set(node, ("resolutionh", "resh"), height)
+    # A horizontal three-wall mosaic must use its 16:3 pixel resolution as
+    # the display aspect.  Inheriting a 16:9 wall input gives the 5760x1080
+    # texture non-square pixels and makes viewers/mappers treat it as
+    # 5760x3240.  Resolution aspect is also the deterministic choice for the
+    # other explicit geometry and output textures created by this helper.
+    _set(node, "outputaspect", "resolution")
+
+
+def _set_horizontal_layout(node):
+    """Arrange Layout TOP inputs left-to-right with a fallback for old hosts."""
+
+    if node is None:
+        return
+    if getattr(getattr(node, "par", None), "align", None) is not None:
+        # Layout TOP uses the menu name ``horizlr`` (label: Left to Right).
+        # ``horizontal`` is not a valid value and silently leaves Align=None.
+        _set(node, "align", "horizlr")
+    else:
+        _set(node, "direction", "horizontal")
 
 
 def _embedded_runtime_source(filename, label, report):
@@ -2306,6 +2330,8 @@ def _build_reconstruction(parent, report):
     page = _page(comp, "Geometry")
     _custom(comp, page, "Int", "Geometryresolution", 384,
             label="Geometry Resolution")
+    _custom(comp, page, "Toggle", "Preservegeometryaspect", True,
+            label="Preserve Source Aspect")
     _custom(comp, page, "Menu", "Depthmode", "normalized",
             ("normalized", "metric", "inverse"), label="Depth Convention")
     _custom(comp, page, "Float", "Depthscale", 1.0, label="Depth Scale")
@@ -2352,14 +2378,27 @@ def _build_reconstruction(parent, report):
     _connect(rgb, color, report=report, replace=True)
     _set(color, "outputresolution", "custom")
     _set(color, "resmult", False)
-    _expr(color, ("resolutionw", "resw"), "parent().par.Geometryresolution")
-    _expr(color, ("resolutionh", "resh"), "parent().par.Geometryresolution")
+    aspect = "(max(1.0, op('RGB_IN').width) / max(1.0, op('RGB_IN').height))"
+    width = (
+        "parent().par.Geometryresolution if not "
+        "parent().par.Preservegeometryaspect.eval() else "
+        "max(64, min(2048, 2 * int(round((parent().par.Geometryresolution * "
+        + aspect + " ** 0.5) / 2.0))))"
+    )
+    height = (
+        "parent().par.Geometryresolution if not "
+        "parent().par.Preservegeometryaspect.eval() else "
+        "max(64, min(2048, 2 * int(round((parent().par.Geometryresolution / "
+        + aspect + " ** 0.5) / 2.0))))"
+    )
+    _expr(color, ("resolutionw", "resw"), width)
+    _expr(color, ("resolutionh", "resh"), height)
     confidence_aligned = _ensure(comp, "resolutionTOP", "CONFIDENCE_ALIGNED_RESIZE", report)
     _connect(confidence, confidence_aligned, report=report, replace=True)
     _set(confidence_aligned, "outputresolution", "custom")
     _set(confidence_aligned, "resmult", False)
-    _expr(confidence_aligned, ("resolutionw", "resw"), "parent().par.Geometryresolution")
-    _expr(confidence_aligned, ("resolutionh", "resh"), "parent().par.Geometryresolution")
+    _expr(confidence_aligned, ("resolutionw", "resw"), width)
+    _expr(confidence_aligned, ("resolutionh", "resh"), height)
     _set(confidence_aligned, "format", "mono16float")
     position = _glsl(comp, "depth_to_position", "depth_to_position",
                      [color, depth, confidence_aligned], report, True)
@@ -3079,7 +3118,7 @@ def _build_triple_display(parent, report):
             _connect(
                 graded[mode + "_" + side], layout, side_index, 0,
                 report, replace=True)
-        _set(layout, ("align", "direction"), "horizontal")
+        _set_horizontal_layout(layout)
         _set_resolution(layout, 2880, 540)
         layouts[mode] = layout
         _out_top(comp, "OUT_" + mode + "_MOSAIC", layout, output_index, report)
@@ -3121,7 +3160,7 @@ def _build_stereo(parent, report):
         layout = _ensure(comp, "compositeTOP", "STEREO_SIDE_BY_SIDE_FALLBACK", report)
     _connect(left_grade, layout, 0, 0, report, replace=True)
     _connect(right_grade, layout, 1, 0, report, replace=True)
-    _set(layout, ("align", "direction"), "horizontal")
+    _set_horizontal_layout(layout)
     _set_resolution(layout, 2560, 720)
     _out_top(comp, "OUT_LEFT_EYE", left_grade, 0, report)
     _out_top(comp, "OUT_RIGHT_EYE", right_grade, 1, report)
@@ -3515,6 +3554,10 @@ def _build_show_control(pipeline, report):
         int(_value(reconstruction, "Geometryresolution", 384)),
         label="Geometry Resolution")
     _custom(
+        control, quality_page, "Toggle", "Preservegeometryaspect",
+        bool(_value(reconstruction, "Preservegeometryaspect", True)),
+        label="Preserve Source Aspect")
+    _custom(
         control, quality_page, "Int", "Pointbudget",
         int(_value(render, "Maxpoints", 120000)), label="Point Budget")
     _custom(
@@ -3525,7 +3568,7 @@ def _build_show_control(pipeline, report):
         int(_value(bridge, "Capturefps", 5)), label="Geometry Capture FPS")
     _custom(
         control, quality_page, "Str", "Profilehint",
-        "Stream 512 / geometry 384 / 5 Hz",
+        "147k adaptive: 384x384 or 512x288 / 5 Hz",
         label="Profile Guidance")
 
     callbacks = _ensure(
@@ -3651,6 +3694,120 @@ def install_show_control_upgrade(root=None):
     return control
 
 
+def install_adaptive_source_resolution(root=None):
+    """Preserve generated-image aspect within the 3080 geometry pixel budget.
+
+    This bounded upgrade refreshes only ``RECONSTRUCTION`` and the public
+    ``SHOW_CONTROL``. A geometry resolution of 384 remains 147,456 pixels, so
+    square input becomes 384x384 and 16:9 input becomes 512x288. Projector
+    render TOPs, private adapters, model settings, and the current TOE save are
+    untouched.
+    """
+
+    global LAST_REPORT
+    report = BuildReport()
+    LAST_REPORT = report
+    if root is None:
+        root = _op(ROOT_PATH)
+    elif isinstance(root, str):
+        root = _op(root)
+    if root is None:
+        raise RuntimeError("FlexGPU root %s does not exist" % ROOT_PATH)
+    pipeline = root.op(PIPELINE_NAME)
+    if pipeline is None:
+        raise RuntimeError("WORKING_PIPELINE is missing; build it first")
+
+    reconstruction = _build_reconstruction(pipeline, report)
+    control = _build_show_control(pipeline, report)
+    try:
+        reconstruction.store(
+            "adaptive_source_resolution_install_report", report.as_dict())
+        reconstruction.store("geometry_pixel_budget", 384 * 384)
+        reconstruction.store(
+            "adaptive_geometry_examples",
+            {"512x512": "384x384", "1024x576": "512x288"})
+    except Exception:
+        pass
+    print("[FlexGPU runtime] adaptive source resolution ready: "
+          "512x512 -> 384x384; 1024x576 -> 512x288; "
+          "wall feeds unchanged (%d created, %d reused, %d warnings)" %
+          (len(report.created), len(report.reused), len(report.warnings)))
+    return reconstruction
+
+
+def install_noncommercial_preview_outputs(root=None):
+    """Fit every development preview inside the 1280x1280 NC limit.
+
+    Individual single/triple wall feeds become 1280x720. The two horizontal
+    triple mosaics become 1280x240, preserving their commissioned 16:3 aspect
+    without creating an over-limit 3840-pixel TOP. Stereo preview becomes two
+    640x360 eyes in one 1280x360 TOP. The production 1920x1080 contract can be
+    restored later with ``install_venue_1080p_outputs``.
+    """
+
+    if root is None:
+        root = _op(ROOT_PATH)
+    elif isinstance(root, str):
+        root = _op(root)
+    if root is None:
+        raise RuntimeError("FlexGPU root %s does not exist" % ROOT_PATH)
+    pipeline = root.op(PIPELINE_NAME)
+    if pipeline is None:
+        raise RuntimeError("WORKING_PIPELINE is missing; build it first")
+
+    wall_width, wall_height = 1280, 720
+    for path in (
+        "POINT_RENDER/METRIC_RENDER_CENTER",
+        "POINT_RENDER/METRIC_MONO_FALLBACK",
+        "INSTALLATION_OUTPUT/installation_grade",
+    ):
+        _set_resolution(pipeline.op(path), wall_width, wall_height)
+    for mode in ("WRAP", "ARTISTIC"):
+        for side in ("LEFT", "CENTER", "RIGHT"):
+            _set_resolution(
+                pipeline.op("POINT_RENDER/METRIC_RENDER_%s_%s" % (mode, side)),
+                wall_width, wall_height)
+            if mode == "WRAP":
+                _set_resolution(
+                    pipeline.op("TRIPLE_DISPLAY/COVERAGE_WRAP_" + side),
+                    wall_width, wall_height)
+            _set_resolution(
+                pipeline.op("TRIPLE_DISPLAY/GRADE_%s_%s" % (mode, side)),
+                wall_width, wall_height)
+        _set_resolution(
+            pipeline.op("TRIPLE_DISPLAY/%s_MOSAIC" % mode), 1280, 240)
+        _set_horizontal_layout(
+            pipeline.op("TRIPLE_DISPLAY/%s_MOSAIC" % mode))
+        _set_resolution(
+            pipeline.op("TRIPLE_DISPLAY/%s_MOSAIC_FALLBACK" % mode),
+            1280, 240)
+        _set_horizontal_layout(
+            pipeline.op("TRIPLE_DISPLAY/%s_MOSAIC_FALLBACK" % mode))
+    for eye in ("LEFT", "RIGHT"):
+        _set_resolution(
+            pipeline.op("STEREO_PREVIEW/GRADE_%s_EYE" % eye), 640, 360)
+    _set_resolution(
+        pipeline.op("STEREO_PREVIEW/STEREO_SIDE_BY_SIDE"), 1280, 360)
+    _set_horizontal_layout(
+        pipeline.op("STEREO_PREVIEW/STEREO_SIDE_BY_SIDE"))
+    _set_resolution(
+        pipeline.op("STEREO_PREVIEW/STEREO_SIDE_BY_SIDE_FALLBACK"),
+        1280, 360)
+    _set_horizontal_layout(
+        pipeline.op("STEREO_PREVIEW/STEREO_SIDE_BY_SIDE_FALLBACK"))
+    try:
+        pipeline.store("venue_output_profile", "noncommercial_preview")
+        pipeline.store(
+            "production_output_contract",
+            "single/six walls 1920x1080; mosaics 5760x1080")
+    except Exception:
+        pass
+    print("[FlexGPU runtime] non-commercial preview ready: "
+          "single/six wall feeds 1280x720; mosaics 1280x240; "
+          "production 1080p contract retained for later restore; TOE unsaved")
+    return pipeline
+
+
 def install_venue_1080p_outputs(root=None):
     """Set the single wall and every triple-wall feed to native 1920x1080.
 
@@ -3691,9 +3848,19 @@ def install_venue_1080p_outputs(root=None):
         _set_resolution(
             pipeline.op("TRIPLE_DISPLAY/%s_MOSAIC" % mode),
             wall_width * 3, wall_height)
+        _set_horizontal_layout(
+            pipeline.op("TRIPLE_DISPLAY/%s_MOSAIC" % mode))
         _set_resolution(
             pipeline.op("TRIPLE_DISPLAY/%s_MOSAIC_FALLBACK" % mode),
             wall_width * 3, wall_height)
+        _set_horizontal_layout(
+            pipeline.op("TRIPLE_DISPLAY/%s_MOSAIC_FALLBACK" % mode))
+    # Keep the desktop stereo preview at its existing development resolution,
+    # but repair older TOEs whose Layout TOP silently retained Align=None.
+    _set_horizontal_layout(
+        pipeline.op("STEREO_PREVIEW/STEREO_SIDE_BY_SIDE"))
+    _set_horizontal_layout(
+        pipeline.op("STEREO_PREVIEW/STEREO_SIDE_BY_SIDE_FALLBACK"))
     try:
         pipeline.store("venue_output_profile", "venue_1080p")
     except Exception:

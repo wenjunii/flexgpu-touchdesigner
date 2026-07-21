@@ -25,6 +25,12 @@ param(
     [ValidateRange(0.0, 300.0)]
     [double]$ListenerWaitSeconds = 120.0,
 
+    [ValidateRange(64, 2048)]
+    [int]$MaxEdge = 512,
+
+    [ValidateRange(4096, 4194304)]
+    [int]$TargetPixels = 147456,
+
     [ValidateRange(1, 1000000000)]
     [int]$MaxFrames,
 
@@ -67,7 +73,9 @@ $arguments = @(
     '--input-udp-port', [string]$InputUdpPort,
     '--output-host', $OutputHost,
     '--output-tcp-port', [string]$OutputTcpPort,
-    '--output-connect-timeout-s', [string]$ListenerWaitSeconds
+    '--output-connect-timeout-s', [string]$ListenerWaitSeconds,
+    '--max-edge', [string]$MaxEdge,
+    '--target-pixels', [string]$TargetPixels
 )
 if ($PSBoundParameters.ContainsKey('MaxFrames')) {
     $arguments += @('--max-frames', [string]$MaxFrames)
@@ -86,6 +94,9 @@ $plan = [ordered]@{
     input_udp = "$InputHost`:$InputUdpPort"
     output_tcp = "$OutputHost`:$OutputTcpPort"
     listener_wait_seconds = $ListenerWaitSeconds
+    geometry_max_edge = $MaxEdge
+    geometry_target_pixels = $TargetPixels
+    adaptive_geometry_examples = @('512x512 -> 384x384', '1024x576 -> 512x288')
     python = $python
     worker = $worker
     model = if ($Backend -eq 'moge2') { $model } else { 'not used by mock backend' }

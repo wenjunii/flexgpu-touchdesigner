@@ -767,6 +767,8 @@ def _apply_calibrated_contracts(root_comp, state):
 def _temporal_signature(root_comp, state):
     sources = root_comp.op('WORKING_PIPELINE/SOURCES')
     reconstruction = root_comp.op('WORKING_PIPELINE/RECONSTRUCTION')
+    reconstruction_rgb = root_comp.op(
+        'WORKING_PIPELINE/RECONSTRUCTION/RGB_IN')
     source_config = _mapping(state.get('source'))
     sensor_config = _mapping(state.get('sensor'))
     source_calibration = _calibration_identity(state, 'source')
@@ -774,6 +776,11 @@ def _temporal_signature(root_comp, state):
     values = [
         _integer(_value(reconstruction, 'Geometryresolution',
                         state.get('geometry_resolution', 384)), 384),
+        str(_value(reconstruction, 'Preservegeometryaspect', True)),
+        _integer(getattr(reconstruction_rgb, 'width',
+                         state.get('geometry_resolution', 384)), 384),
+        _integer(getattr(reconstruction_rgb, 'height',
+                         state.get('geometry_resolution', 384)), 384),
         str(_value(sources, 'UseStreamDiffusion', False)),
         str(_value(sources, 'UseExternalDepth', False)),
         _integer(_value(sources, 'Sessionepoch', 0), 0),
@@ -2324,7 +2331,6 @@ def _apply_working_pipeline(root_comp, state):
                  'WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER/REPLACE_WITH_DEPTH_ESTIMATE',
                  'WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER/REPLACE_WITH_CONFIDENCE',
                  'WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER/REPLACE_WITH_VALID_MASK',
-                 'WORKING_PIPELINE/RECONSTRUCTION/CONFIDENCE_ALIGNED_RESIZE',
                  'WORKING_PIPELINE/SENSOR_INTERACTION/SIMULATED_SENSOR_CONFIDENCE',
                  'WORKING_PIPELINE/SENSOR_INTERACTION/REPLAY_SENSOR_CONFIDENCE',
                  'WORKING_PIPELINE/TEMPORAL_WORLD/STATE_SEED'):

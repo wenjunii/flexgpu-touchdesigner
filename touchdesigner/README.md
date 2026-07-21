@@ -330,6 +330,16 @@ default and can be selected again without rewiring. See
 The generated-geometry path is live-accepted on the 3080 Ti Laptop with
 single, panoramic, and artistic outputs at 1920x1080 per surface; reaccept it
 after changing GPU, worker quality, TouchDesigner, or the private source.
+Both generated-geometry launchers use a 147,456-pixel 3080 budget by default:
+512x512 becomes 384x384 and 1024x576 becomes 512x288. Install
+`runtime_pipeline.install_adaptive_source_resolution(...)` once in an older
+working TOE so reconstruction preserves that aspect instead of stretching the
+geometry texture to a square. The bounded installer does not save the TOE.
+With TouchDesigner Non-Commercial, also call
+`runtime_pipeline.install_noncommercial_preview_outputs(...)`: individual wall
+previews become 1280x720 and mosaics 1280x240, all inside the 1280x1280 license
+limit. `install_venue_1080p_outputs(...)` restores the commissioned 1920x1080
+per-wall contract after the appropriate show license is installed.
 
 ## Rehearse audience interaction with the laptop webcam
 

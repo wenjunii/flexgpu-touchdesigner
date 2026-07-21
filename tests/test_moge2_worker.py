@@ -138,12 +138,13 @@ class DirtyBackend:
 
 
 class MoGe2WorkerTests(unittest.TestCase):
-    def make_worker(self, backend=None, *, max_edge=None):
+    def make_worker(self, backend=None, *, max_edge=None, target_pixels=None):
         selected = worker_module.MockBackend() if backend is None else backend
         return worker_module.MoGe2Worker(
             selected,
             profile=worker_module.PROFILES["3080ti_16gb"],
             max_edge=max_edge,
+            target_pixels=target_pixels,
             producer_session_id="worker-test-session",
         )
 
@@ -276,6 +277,31 @@ class MoGe2WorkerTests(unittest.TestCase):
         self.assertEqual(
             second.metadata.intrinsics,
             first.metadata.intrinsics,
+        )
+
+    @unittest.skipUnless(HAS_RUNTIME_ARRAYS, "optional NumPy/Pillow runtime is absent")
+    def test_3080_pixel_budget_preserves_square_and_widescreen_aspect(self) -> None:
+        backend = RecordingMockBackend()
+        worker = self.make_worker(
+            backend, max_edge=512, target_pixels=147456
+        )
+        square = worker.process_frame(source_frame(1, width=512, height=512))
+        self.assertEqual(backend.last_rgb_shape, (384, 384, 3))
+        self.assertEqual((square.metadata.width, square.metadata.height), (768, 384))
+
+        widescreen = worker.process_frame(
+            source_frame(2, width=1024, height=576)
+        )
+        self.assertEqual(backend.last_rgb_shape, (288, 512, 3))
+        self.assertEqual(
+            (widescreen.metadata.width, widescreen.metadata.height),
+            (1024, 288),
+        )
+        self.assertEqual(worker.session_rollovers, 1)
+        self.assertEqual(widescreen.metadata.frame_id, 0)
+        self.assertNotEqual(
+            square.metadata.extensions["producer_session_id"],
+            widescreen.metadata.extensions["producer_session_id"],
         )
 
     def test_bridge_ports_and_session_ids_are_bounded(self) -> None:

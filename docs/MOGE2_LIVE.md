@@ -214,6 +214,12 @@ Then run the pinned real worker:
   -Start
 ```
 
+The 3080 launcher defaults to `-TargetPixels 147456 -MaxEdge 512`. It preserves
+source aspect at comparable cost: 512x512 becomes 384x384 geometry and
+1024x576 becomes 512x288. A format change rolls the synchronized output
+session so TouchDesigner clears incompatible temporal history. All individual
+installation wall TOPs remain 1920x1080.
+
 `GpuIndex` is the physical NVIDIA index exposed to the worker through
 `CUDA_VISIBLE_DEVICES`; the worker itself uses relative device `cuda:0`.
 Change `Generationid` only when intentionally starting a new prompt/model

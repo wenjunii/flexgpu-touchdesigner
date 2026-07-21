@@ -25,7 +25,10 @@ param(
     [int]$InputSize = 384,
 
     [ValidateRange(64, 2048)]
-    [int]$MaxEdge = 384,
+    [int]$MaxEdge = 512,
+
+    [ValidateRange(4096, 4194304)]
+    [int]$TargetPixels = 147456,
 
     [ValidateRange(1, 120)]
     [int]$CalibrationFrames = 12,
@@ -94,6 +97,7 @@ $arguments = @(
     '--output-connect-timeout-s', [string]$ListenerWaitSeconds,
     '--input-size', [string]$InputSize,
     '--max-edge', [string]$MaxEdge,
+    '--target-pixels', [string]$TargetPixels,
     '--calibration-frames', [string]$CalibrationFrames,
     '--percentile-low', [string]$PercentileLow,
     '--percentile-high', [string]$PercentileHigh,
@@ -124,6 +128,8 @@ $plan = [ordered]@{
     listener_wait_seconds = $ListenerWaitSeconds
     input_size = $InputSize
     geometry_max_edge = $MaxEdge
+    geometry_target_pixels = $TargetPixels
+    adaptive_geometry_examples = @('512x512 -> 384x384', '1024x576 -> 512x288')
     calibration_frames = $CalibrationFrames
     pseudo_metre_slab = @($PseudoNearM, $PseudoFarM)
     python = $python
