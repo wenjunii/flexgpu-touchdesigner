@@ -1053,8 +1053,12 @@ def _launch_worker(provider):
     gpu_index = max(0, min(31, int(_value('Gpuindex', 0))))
     _set(controls, 'Geometryprovider', selected)
     apply_parameter('Geometryprovider')
+    # Keep the console visible while the foreground worker is alive, but let
+    # PowerShell exit with the worker. ``-NoExit`` leaves an empty wrapper
+    # process behind after Ctrl+C or a worker failure, causing the duplicate
+    # launch guard above to report a worker that no longer exists.
     args = [
-        'powershell.exe', '-NoExit', '-NoProfile',
+        'powershell.exe', '-NoProfile',
         '-ExecutionPolicy', 'Bypass', '-File', script,
         '-Profile', profile, '-Backend', selected,
         '-GpuIndex', str(gpu_index), '-Start',
@@ -1180,12 +1184,21 @@ def apply_parameter(name):
         _patch_float(pipeline.op('SENSOR_INTERACTION/INTERACTION_SMOOTH_PIXEL'),
                      'interactionSmoothing',
                      'FLEXGPU_INTERACTION_SMOOTHING', amount)
-    elif key == 'wrapyawdegrees':
-        _set(pipeline.op('POINT_RENDER'), 'Wrapyawdegrees',
-             float(_value('Wrapyawdegrees', 30.0)))
-    elif key == 'wrapfovdegrees':
-        _set(pipeline.op('POINT_RENDER'), 'Wrapfovdegrees',
-             float(_value('Wrapfovdegrees', 78.0)))
+    elif key in (
+            'wrapyawdegrees', 'wrapfovdegrees',
+            'surfacefovdegrees', 'artisticyawdegrees',
+            'artisticoffsetmetres'):
+        parameter, fallback, lower, upper = {
+            'wrapyawdegrees': ('Wrapyawdegrees', 30.0, -89.0, 89.0),
+            'wrapfovdegrees': ('Wrapfovdegrees', 78.0, 10.0, 170.0),
+            'surfacefovdegrees': ('Surfacefovdegrees', 60.0, 10.0, 170.0),
+            'artisticyawdegrees': ('Artisticyawdegrees', 18.0, -89.0, 89.0),
+            'artisticoffsetmetres': (
+                'Artisticoffsetmetres', 0.45, -5.0, 5.0),
+        }[key]
+        value = max(lower, min(upper, float(_value(parameter, fallback))))
+        _set(pipeline.op('POINT_RENDER'), parameter, value)
+        _set(_controls(), parameter, value)
     elif key in ('wallwidth', 'wallheight'):
         _apply_wall_resolution()
     elif key in ('pointcloudscale', 'moge2scale', 'depthanythingscale'):
@@ -1230,6 +1243,8 @@ def apply_all():
         'Geometryprovider', 'Displaymode', 'Completionmode', 'Fogdensity',
         'Interactionstrength', 'Interactionsmoothing', 'Wrapyawdegrees',
         'Wrapfovdegrees', 'Wrapcoverage', 'Wrapnoise',
+        'Surfacefovdegrees', 'Artisticyawdegrees',
+        'Artisticoffsetmetres',
         'Wallwidth', 'Wallheight', 'Pointcloudscale',
         'Moge2scale', 'Depthanythingscale',
         'Geometryresolution', 'Preservegeometryaspect',
@@ -3753,6 +3768,18 @@ def _build_show_control(pipeline, report):
         _value(triple, "Wrapnoise", 0.42),
         label="Panoramic Coverage Noise")
     _custom(
+        control, show_page, "Float", "Surfacefovdegrees",
+        _value(render, "Surfacefovdegrees", 60.0),
+        label="Artistic Surface FOV")
+    _custom(
+        control, show_page, "Float", "Artisticyawdegrees",
+        _value(render, "Artisticyawdegrees", 18.0),
+        label="Artistic Side Yaw")
+    _custom(
+        control, show_page, "Float", "Artisticoffsetmetres",
+        _value(render, "Artisticoffsetmetres", 0.45),
+        label="Artistic Side Offset (metres)")
+    _custom(
         control, show_page, "Float", "Pointcloudscale", 1.0,
         label="Point Cloud Scale")
     _custom(
@@ -3871,6 +3898,7 @@ def _build_show_control(pipeline, report):
         ["Completion / Fog", "COMPLETION + view-grade shader constants"],
         ["Interaction", "SENSOR_INTERACTION force + low-latency smoothing"],
         ["Panoramic", "wrap camera yaw/FOV + procedural atmosphere"],
+        ["Artistic", "side camera yaw/offset + artistic surface FOV"],
         ["Wall Resolution", "single + six feeds; mosaics are 3x wall width"],
         ["Point Cloud Scale", "provider-aware managed camera FOV framing"],
         ["Quality", "geometry grid, point budget/size, bridge capture FPS"],
@@ -3888,7 +3916,9 @@ def _build_show_control(pipeline, report):
         "visible PowerShell console; use Ctrl+C there before starting the "
         "other provider. "
         "Panoramic Coverage adds procedural atmosphere only in empty wrap views; "
-        "it never stretches the source image. Use Apply All after reopening an "
+        "it never stretches the source image. Artistic Surface FOV, Side Yaw, "
+        "and Side Offset expose the fixed sculptural cameras without adding "
+        "camera animation. Use Apply All after reopening an "
         "older saved TOE if you want every displayed value reapplied.",
         report)
     return control
