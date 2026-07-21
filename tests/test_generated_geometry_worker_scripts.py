@@ -7,7 +7,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 COMMON = ROOT / "scripts" / "_GeneratedGeometry.Common.ps1"
 STOP = ROOT / "scripts" / "Stop-GeneratedGeometryWorker.ps1"
+RETARGET = ROOT / "scripts" / "Set-FlexShowLocalProject.ps1"
 README = ROOT / "README.md"
+TOUCHDESIGNER_README = ROOT / "touchdesigner" / "README.md"
 MIGRATION = ROOT / "docs" / "5090_MIGRATION.md"
 
 
@@ -57,6 +59,7 @@ class GeneratedGeometryWorkerScriptTests(unittest.TestCase):
     def test_docs_define_separate_machine_local_identities(self) -> None:
         source = (
             README.read_text(encoding="utf-8")
+            + TOUCHDESIGNER_README.read_text(encoding="utf-8")
             + MIGRATION.read_text(encoding="utf-8")
         )
         for marker in (
@@ -68,8 +71,28 @@ class GeneratedGeometryWorkerScriptTests(unittest.TestCase):
             "-Profile 3080ti_16gb",
             "-Profile 5090",
             "hardware-neutral",
+            "Set-FlexShowLocalProject.ps1",
+            "-ExpectedTier 3080ti_16gb",
         ):
             self.assertIn(marker, source)
+
+    def test_local_project_retarget_is_atomic_and_publication_safe(self) -> None:
+        source = RETARGET.read_text(encoding="utf-8")
+        for marker in (
+            "SupportsShouldProcess = $true",
+            "processes.world.project",
+            "check-ignore --quiet",
+            "local-*.json",
+            "Assert-ProfileNameCompatibility",
+            "Keep 3080, 4090, and 5090 working files separate",
+            "[System.IO.File]::WriteAllText",
+            "Move-Item -LiteralPath $temporaryPath",
+            "Get-RepositoryRelativePath -Path $projectPath",
+        ):
+            self.assertIn(marker, source)
+        self.assertNotIn("git add", source.casefold())
+        self.assertNotIn("git commit", source.casefold())
+        self.assertNotIn("git push", source.casefold())
 
 
 if __name__ == "__main__":
