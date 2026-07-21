@@ -6,6 +6,10 @@ __pycache__/
 htmlcov/
 .vscode/
 .idea/
+.mcp.json
+.codex/config.toml
+.embody/*
+!.embody/project.json
 .env
 .env.*
 !.env.example
@@ -67,6 +71,9 @@ vendor-private/
 runtime/
 logs/
 calibration/
+captures/
+commissioning/
+recordings/
 models/
 weights/
 checkpoints/
@@ -89,3 +96,10 @@ config/show-config.json
 config/local-*.json
 config/*-local.json
 config/presets/local-*.json
+
+# Embody / Envoy (auto-managed)
+CrashAutoSave*
+externalizations.tsv
+.claude/settings.local.json
+.claude/projects/
+.DS_Store

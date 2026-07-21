@@ -78,10 +78,22 @@ class TransportConfigTests(unittest.TestCase):
 
     def test_dual_local_normalizes_shared_memory_alias_and_segment(self) -> None:
         transport = shared_transport(type="sharedmem", segment_name="  FlexShowWorldBus  ")
-        config = validate_config(configuration("dual_local", transport))
+        profile = configuration("dual_local", transport)
+        profile["source"] = {"frame_state_operator": "PRODUCER_FRAME_STATE"}
+        config = validate_config(profile)
 
         self.assertEqual(config.transport["type"], "shared_memory")
         self.assertEqual(config.transport["segment_name"], "FlexShowWorldBus")
+
+    def test_dual_local_shared_memory_requires_producer_frame_state_sidecar(self) -> None:
+        for source in (None, {}, {"frame_state_operator": "   "}):
+            with self.subTest(source=source), self.assertRaisesRegex(
+                ConfigError, "producer-backed metadata sidecar"
+            ):
+                profile = configuration("dual_local", shared_transport())
+                if source is not None:
+                    profile["source"] = source
+                validate_config(profile)
 
     def test_dual_local_allows_touch_aliases_only_with_loopback_peer(self) -> None:
         cases = (

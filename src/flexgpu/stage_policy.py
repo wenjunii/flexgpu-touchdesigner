@@ -55,10 +55,11 @@ def resolve_stage_policy(
 
     ``render`` is accepted as the configuration-facing alias of the TD
     ``world`` process.  Topology is authoritative for the built-in bridge:
-    ``dual_local`` defaults to global Shared Mem TOPs and can explicitly choose
-    ``touch_tcp`` as a same-machine fallback. ``dual_network`` always uses
-    Touch In/Out TCP TOPs. The transport type is checked when supplied so a
-    typo cannot silently activate the wrong endpoints.
+    ``dual_local`` defaults to loopback Touch TCP. Shared Mem is an explicit
+    advanced choice requiring producer frame-state metadata outside this stage
+    policy. ``dual_network`` always uses Touch In/Out TCP TOPs. The transport
+    type is checked when supplied so a typo cannot silently activate the wrong
+    endpoints.
     """
 
     normalized_role = _normal(role)
@@ -75,14 +76,14 @@ def resolve_stage_policy(
     if normalized_experience not in _EXPERIENCES:
         raise ValueError("experience must be installation, vr, or combined")
 
-    shared_types = {"", "shared_memory", "sharedmem", "local"}
-    touch_types = {"touch_tcp", "touch", "touch_in_out", "tcp"}
+    shared_types = {"shared_memory", "sharedmem"}
+    touch_types = {"", "touch_tcp", "touch", "touch_in_out", "tcp"}
     if normalized_topology == "dual_local" and normalized_transport not in (
         shared_types | touch_types
     ):
         raise ValueError("dual_local bridge requires shared_memory or touch_tcp transport")
     if normalized_topology == "dual_network" and normalized_transport not in (
-        {""} | touch_types
+        touch_types
     ):
         raise ValueError("dual_network built-in bridge requires touch_tcp transport")
 

@@ -53,6 +53,7 @@
     "source": { "$ref": "#/$defs/source" },
     "sensor": { "$ref": "#/$defs/sensor" },
     "render": { "$ref": "#/$defs/render" },
+    "supervisor": { "$ref": "#/$defs/supervisor" },
     "runtime_dir": {
       "type": "string",
       "minLength": 1
@@ -132,6 +133,24 @@
               }
             ]
           }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "topology": { "const": "dual_local" },
+          "transport": {
+            "properties": { "type": { "const": "shared_memory" } },
+            "required": ["type"]
+          }
+        },
+        "required": ["topology", "transport"]
+      },
+      "then": {
+        "required": ["source"],
+        "properties": {
+          "source": { "required": ["frame_state_operator"] }
         }
       }
     },
@@ -302,18 +321,51 @@
         "include_operator_metrics": { "type": "boolean" }
       }
     },
+    "supervisor": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "heartbeat_timeout_ms": {
+          "type": "integer",
+          "minimum": 250,
+          "maximum": 600000
+        },
+        "readiness_timeout_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 600000
+        },
+        "require_ready": { "type": "boolean" }
+      }
+    },
     "source": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "mode": { "enum": ["demo", "streamdiffusion", "worldbus", "replay"] },
+        "geometry_provider": { "enum": ["moge2", "depth_anything"] },
         "streamdiffusion_tox": { "type": "string", "minLength": 1 },
         "replay_path": { "type": "string", "minLength": 1 },
         "rgb_operator": { "type": "string", "minLength": 1 },
         "depth_operator": { "type": "string", "minLength": 1 },
         "mask_operator": { "type": "string", "minLength": 1 },
-        "confidence_operator": { "type": "string", "minLength": 1 }
-      }
+        "confidence_operator": { "type": "string", "minLength": 1 },
+        "frame_state_operator": { "type": "string", "minLength": 1 },
+        "camera_metadata_operator": { "type": "string", "minLength": 1 },
+        "calibration_path": { "type": "string", "minLength": 1 },
+        "auto_load_tox": { "type": "boolean" },
+        "stale_timeout_ms": { "type": "integer", "minimum": 1, "maximum": 600000 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "mode": { "const": "replay" } }, "required": ["mode"] },
+          "then": { "required": ["replay_path"] }
+        },
+        {
+          "if": { "properties": { "auto_load_tox": { "const": true } }, "required": ["auto_load_tox"] },
+          "then": { "required": ["streamdiffusion_tox", "rgb_operator"] }
+        }
+      ]
     },
     "sensor": {
       "type": "object",
@@ -324,11 +376,24 @@
         "replay_path": { "type": "string", "minLength": 1 },
         "mask_operator": { "type": "string", "minLength": 1 },
         "position_operator": { "type": "string", "minLength": 1 },
+        "confidence_operator": { "type": "string", "minLength": 1 },
+        "frame_state_operator": { "type": "string", "minLength": 1 },
         "calibration_path": { "type": "string", "minLength": 1 },
+        "auto_load_tox": { "type": "boolean" },
         "interaction_radius_m": { "type": "number", "exclusiveMinimum": 0, "maximum": 20 },
         "force_gain": { "type": "number", "minimum": 0, "maximum": 100 },
         "stale_timeout_ms": { "type": "integer", "minimum": 1, "maximum": 600000 }
-      }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "mode": { "const": "replay" } }, "required": ["mode"] },
+          "then": { "required": ["replay_path"] }
+        },
+        {
+          "if": { "properties": { "auto_load_tox": { "const": true } }, "required": ["auto_load_tox"] },
+          "then": { "required": ["adapter_tox", "position_operator"] }
+        }
+      ]
     },
     "render": {
       "type": "object",
@@ -336,12 +401,22 @@
       "properties": {
         "point_size_px": { "type": "number", "exclusiveMinimum": 0, "maximum": 128 },
         "point_budget": { "type": "integer", "minimum": 1000, "maximum": 10000000 },
+        "point_keep_fraction": { "type": "number", "minimum": 0, "maximum": 1 },
         "installation_width": { "type": "integer", "minimum": 64, "maximum": 16384 },
         "installation_height": { "type": "integer", "minimum": 64, "maximum": 16384 },
         "installation_fps": { "type": "integer", "minimum": 1, "maximum": 240 },
         "stereo_width": { "type": "integer", "minimum": 64, "maximum": 16384 },
         "stereo_height": { "type": "integer", "minimum": 64, "maximum": 16384 },
         "vr_fps": { "type": "integer", "minimum": 1, "maximum": 240 },
+        "display_mode": {
+          "enum": ["single", "panoramic_wrap", "artistic_multi_angle"]
+        },
+        "triple_surface_width": { "type": "integer", "minimum": 64, "maximum": 8192 },
+        "triple_surface_height": { "type": "integer", "minimum": 64, "maximum": 8192 },
+        "surface_fov_degrees": { "type": "number", "minimum": 10, "maximum": 140 },
+        "triple_wrap_yaw_degrees": { "type": "number", "minimum": 0, "maximum": 120 },
+        "triple_artistic_yaw_degrees": { "type": "number", "minimum": 0, "maximum": 90 },
+        "triple_artistic_offset_metres": { "type": "number", "minimum": 0, "maximum": 10 },
         "fog_density": { "type": "number", "minimum": 0, "maximum": 10 },
         "procedural_mix": { "type": "number", "minimum": 0, "maximum": 1 }
       }

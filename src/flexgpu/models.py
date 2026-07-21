@@ -3,7 +3,112 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
+import re
 from typing import Any, Mapping, Optional, Sequence, Tuple
+
+
+REDACTED = "<redacted>"
+_SENSITIVE_NAME_RE = re.compile(
+    r"(?:^|[_-])(?:access[_-]?(?:key|token)|api[_-]?(?:key|secret)|auth|"
+    r"authorization|bearer[_-]?token|client[_-]?secret|cookie|credential|"
+    r"connection[_-]?string|dsn|encryption[_-]?key|key|license|password|passwd|"
+    r"private[_-]?(?:key|token)|refresh[_-]?token|sas|secret|signature|"
+    r"signing[_-]?key|token|webhook[_-]?secret)(?:$|[_-])",
+    re.IGNORECASE,
+)
+_URI_CREDENTIAL_RE = re.compile(r"(?P<prefix>://[^/:@\s]+:)[^@\s]+@")
+_INLINE_SECRET_RE = re.compile(
+    r"(?P<prefix>(?:^|[?&;,\s])(?:access[_-]?(?:key|token)|"
+    r"api[_-]?(?:key|secret)|auth(?:orization|[_-]?token)?|bearer[_-]?token|"
+    r"client[_-]?secret|cookie|credential|connection[_-]?string|dsn|"
+    r"encryption[_-]?key|key|license(?:[_-]?(?:key|token))?|password|passwd|"
+    r"private[_-]?(?:key|token)|refresh[_-]?token|sas|secret|signature|"
+    r"signing[_-]?key|token|webhook[_-]?secret)=)"
+    r"[^&;,\s]+",
+    re.IGNORECASE,
+)
+_BEARER_RE = re.compile(r"(?P<prefix>\bbearer\s+)[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
+
+
+def sensitive_environment_values(environment: Mapping[str, str]) -> tuple[str, ...]:
+    """Return configured secret values without exposing them in public models."""
+
+    return tuple(
+        str(value)
+        for key, value in environment.items()
+        if _SENSITIVE_NAME_RE.search(str(key).replace(".", "_")) and str(value)
+    )
+
+
+def redact_environment(
+    environment: Mapping[str, str], sensitive_values: Sequence[str] = ()
+) -> dict[str, str]:
+    """Redact secret-like environment variables for plans and diagnostics."""
+
+    known_values = sensitive_environment_values(environment) + tuple(sensitive_values)
+    return {
+        str(key): REDACTED
+        if _SENSITIVE_NAME_RE.search(str(key).replace(".", "_"))
+        else redact_text(value, known_values)
+        for key, value in environment.items()
+    }
+
+
+def redact_command(
+    command: Sequence[str], sensitive_values: Sequence[str] = ()
+) -> list[str]:
+    """Return argv safe for logs, manifests, diagnostics, and CLI output.
+
+    The real argv remains on :class:`ProcessSpec` and is used only for launch
+    and hashing.  Common secret flags, ``name=value`` forms, URI passwords,
+    and values also present in secret environment variables are masked.
+    """
+
+    secrets = tuple(sorted({str(value) for value in sensitive_values if value}, key=len, reverse=True))
+    result: list[str] = []
+    redact_next = False
+    for raw in command:
+        value = str(raw)
+        if redact_next:
+            result.append(REDACTED)
+            redact_next = False
+            continue
+        name, separator, assigned = value.partition("=")
+        normalized_name = name.lstrip("-/").replace(".", "_")
+        if separator and _SENSITIVE_NAME_RE.search(normalized_name):
+            result.append(name + "=" + REDACTED)
+            continue
+        colon_name, colon, _colon_value = value.partition(":")
+        if (
+            colon
+            and colon_name.startswith(("/", "-"))
+            and _SENSITIVE_NAME_RE.search(colon_name.lstrip("-/").replace(".", "_"))
+        ):
+            result.append(colon_name + ":" + REDACTED)
+            continue
+        if value.startswith(("-", "/")) and _SENSITIVE_NAME_RE.search(normalized_name):
+            result.append(value)
+            redact_next = True
+            continue
+        safe = _URI_CREDENTIAL_RE.sub(r"\g<prefix>" + REDACTED + "@", value)
+        safe = _INLINE_SECRET_RE.sub(r"\g<prefix>" + REDACTED, safe)
+        safe = _BEARER_RE.sub(r"\g<prefix>" + REDACTED, safe)
+        for secret in secrets:
+            safe = safe.replace(secret, REDACTED)
+        result.append(safe)
+    return result
+
+
+def redact_text(value: object, sensitive_values: Sequence[str] = ()) -> str:
+    """Scrub known secret values from a user-visible error string."""
+
+    safe = str(value)
+    for secret in sorted({str(item) for item in sensitive_values if item}, key=len, reverse=True):
+        safe = safe.replace(secret, REDACTED)
+    safe = _URI_CREDENTIAL_RE.sub(r"\g<prefix>" + REDACTED + "@", safe)
+    safe = _INLINE_SECRET_RE.sub(r"\g<prefix>" + REDACTED, safe)
+    return _BEARER_RE.sub(r"\g<prefix>" + REDACTED, safe)
 
 
 class FlexGPUError(RuntimeError):
@@ -103,6 +208,7 @@ class FlexConfig:
     processes: Mapping[str, ProcessDefinition]
     transport: Mapping[str, Any]
     runtime_dir: str
+    supervisor: Mapping[str, Any] = field(default_factory=dict)
     source_path: str = ""
     raw: Mapping[str, Any] = field(default_factory=dict)
 
@@ -128,14 +234,20 @@ class ProcessSpec:
     project_path: str = ""
 
     def to_dict(self) -> dict[str, Any]:
+        sensitive_values = (
+            sensitive_environment_values(self.env)
+            + sensitive_environment_values(os.environ)
+        )
         return {
             "role": self.role,
-            "command": list(self.command),
-            "env": dict(self.env),
-            "cwd": self.cwd,
+            "command": redact_command(self.command, sensitive_values),
+            "env": redact_environment(self.env, sensitive_values),
+            "cwd": redact_text(self.cwd, sensitive_values),
             "gpu": self.gpu.to_dict() if self.gpu else None,
             "dependencies": list(self.dependencies),
-            "project_path": self.project_path or None,
+            "project_path": redact_text(self.project_path, sensitive_values)
+            if self.project_path
+            else None,
         }
 
 

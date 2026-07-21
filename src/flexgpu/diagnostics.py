@@ -6,6 +6,12 @@ import os
 import shutil
 from typing import Sequence
 
+from .commissioning import (
+    CalibrationProfile,
+    CommissioningError,
+    load_strict_json,
+    validate_bundle,
+)
 from .models import Diagnostic, FlexConfig, GPUInfo, PlanError, ProcessPlan
 from .planner import build_process_plan
 from .presets import classify_gpu
@@ -18,6 +24,281 @@ def _command_exists(command: str, cwd: str) -> bool:
     if "/" in expanded or "\\" in expanded:
         return os.path.isfile(os.path.join(cwd, expanded))
     return shutil.which(expanded) is not None
+
+
+def _config_path(config: FlexConfig, value: object) -> str:
+    expanded = os.path.expandvars(os.path.expanduser(str(value)))
+    if os.path.isabs(expanded):
+        return os.path.abspath(expanded)
+    return os.path.abspath(os.path.join(config.base_dir, expanded))
+
+
+def _adapter_file_check(
+    checks: list[Diagnostic],
+    config: FlexConfig,
+    section: str,
+    key: str,
+    *,
+    suffix: str | None = None,
+) -> str | None:
+    mapping = config.raw.get(section)
+    if not isinstance(mapping, dict) or not mapping.get(key):
+        return None
+    path = _config_path(config, mapping[key])
+    exists = os.path.isfile(path)
+    valid_suffix = suffix is None or path.lower().endswith(suffix.lower())
+    if exists and valid_suffix:
+        checks.append(
+            Diagnostic(
+                "pass",
+                "%s.%s" % (section, key),
+                "%s.%s local file is available" % (section, key),
+                {"path": path},
+            )
+        )
+    else:
+        reason = "is missing" if not exists else "has the wrong file extension"
+        checks.append(
+            Diagnostic(
+                "fail",
+                "%s.%s" % (section, key),
+                "%s.%s %s" % (section, key, reason),
+                {"path": path},
+            )
+        )
+    return path
+
+
+def _runtime_adapter_diagnostics(
+    config: FlexConfig, checks: list[Diagnostic]
+) -> None:
+    source_calibration_id: str | None = None
+    source_calibration_digest: str | None = None
+    sensor_calibration_id: str | None = None
+    sensor_calibration_digest: str | None = None
+    replay_calibration_id: str | None = None
+    replay_calibration_digest: str | None = None
+    sensor_replay_calibration_id: str | None = None
+    sensor_replay_calibration_digest: str | None = None
+    source = config.raw.get("source")
+    if isinstance(source, dict):
+        mode = str(source.get("mode", "demo"))
+        if mode == "streamdiffusion" and source.get("auto_load_tox"):
+            _adapter_file_check(
+                checks, config, "source", "streamdiffusion_tox", suffix=".tox"
+            )
+        if mode == "replay":
+            replay = _adapter_file_check(checks, config, "source", "replay_path")
+            if replay and os.path.isfile(replay):
+                try:
+                    summary = validate_bundle(replay)
+                except CommissioningError as exc:
+                    checks.append(
+                        Diagnostic(
+                            "fail",
+                            "source.replay.contract",
+                            "Source replay bundle is invalid: %s" % exc,
+                        )
+                    )
+                else:
+                    replay_calibration_id = str(summary["calibration_id"])
+                    replay_calibration_digest = str(summary["calibration_digest"])
+                    checks.append(
+                        Diagnostic(
+                            "pass",
+                            "source.replay.contract",
+                            "Source replay bundle passed synchronized contract validation",
+                            summary,
+                        )
+                    )
+            checks.append(
+                Diagnostic(
+                    "warn",
+                    "source.replay.binding",
+                    "Replay is a validated adapter fixture; the stock TouchDesigner network does not play it automatically",
+                )
+            )
+        elif mode == "worldbus":
+            checks.append(
+                Diagnostic(
+                    "warn",
+                    "source.worldbus.binding",
+                    "WorldBus is a reference contract; the stock TouchDesigner network has no full WorldBus adapter",
+                )
+            )
+        calibration = _adapter_file_check(
+            checks, config, "source", "calibration_path", suffix=".json"
+        )
+        if calibration and os.path.isfile(calibration):
+            try:
+                profile = CalibrationProfile.from_mapping(load_strict_json(calibration))
+            except CommissioningError as exc:
+                checks.append(
+                    Diagnostic(
+                        "fail",
+                        "source.calibration.contract",
+                        "Source calibration is invalid: %s" % exc,
+                    )
+                )
+            else:
+                source_calibration_id = profile.calibration_id
+                source_calibration_digest = profile.calibration_digest
+                checks.append(
+                    Diagnostic(
+                        "pass",
+                        "source.calibration.contract",
+                        "Source calibration is valid",
+                        {
+                            "calibration_id": profile.calibration_id,
+                            "calibration_digest": profile.calibration_digest,
+                            "width": profile.width,
+                            "height": profile.height,
+                            "depth_encoding": profile.depth_encoding,
+                        },
+                    )
+                )
+
+    sensor = config.raw.get("sensor")
+    if isinstance(sensor, dict):
+        mode = str(sensor.get("mode", "simulated"))
+        if mode == "depth_sensor" and sensor.get("auto_load_tox"):
+            _adapter_file_check(checks, config, "sensor", "adapter_tox", suffix=".tox")
+        if mode == "replay":
+            replay = _adapter_file_check(checks, config, "sensor", "replay_path")
+            if replay and os.path.isfile(replay):
+                try:
+                    summary = validate_bundle(replay)
+                except CommissioningError as exc:
+                    checks.append(
+                        Diagnostic(
+                            "fail",
+                            "sensor.replay.contract",
+                            "Sensor replay bundle is invalid: %s" % exc,
+                        )
+                    )
+                else:
+                    sensor_replay_calibration_id = str(summary["calibration_id"])
+                    sensor_replay_calibration_digest = str(
+                        summary["calibration_digest"]
+                    )
+                    checks.append(
+                        Diagnostic(
+                            "pass",
+                            "sensor.replay.contract",
+                            "Sensor replay bundle passed synchronized contract validation",
+                            summary,
+                        )
+                    )
+            checks.append(
+                Diagnostic(
+                    "warn",
+                    "sensor.replay.binding",
+                    "Sensor replay is an adapter boundary; the stock TouchDesigner network keeps a placeholder input",
+                )
+            )
+        calibration = _adapter_file_check(
+            checks, config, "sensor", "calibration_path", suffix=".json"
+        )
+        if calibration and os.path.isfile(calibration):
+            try:
+                profile = CalibrationProfile.from_mapping(load_strict_json(calibration))
+            except CommissioningError as exc:
+                checks.append(
+                    Diagnostic(
+                        "fail",
+                        "sensor.calibration.contract",
+                        "Sensor calibration is invalid: %s" % exc,
+                    )
+                )
+            else:
+                sensor_calibration_id = profile.calibration_id
+                sensor_calibration_digest = profile.calibration_digest
+                checks.append(
+                    Diagnostic(
+                        "pass",
+                        "sensor.calibration.contract",
+                        "Sensor calibration is valid",
+                        {
+                            "calibration_id": profile.calibration_id,
+                            "calibration_digest": profile.calibration_digest,
+                        },
+                    )
+                )
+
+    if (
+        source_calibration_id
+        and replay_calibration_id
+        and (
+            source_calibration_id != replay_calibration_id
+            or source_calibration_digest != replay_calibration_digest
+        )
+    ):
+        checks.append(
+            Diagnostic(
+                "fail",
+                "source.calibration.consistency",
+                "Configured source calibration does not match the replay bundle",
+                {
+                    "source_calibration_id": source_calibration_id,
+                    "source_calibration_digest": source_calibration_digest,
+                    "replay_calibration_id": replay_calibration_id,
+                    "replay_calibration_digest": replay_calibration_digest,
+                },
+            )
+        )
+    if (
+        sensor_calibration_id
+        and sensor_replay_calibration_id
+        and (
+            sensor_calibration_id != sensor_replay_calibration_id
+            or sensor_calibration_digest != sensor_replay_calibration_digest
+        )
+    ):
+        checks.append(
+            Diagnostic(
+                "fail",
+                "sensor.calibration.consistency",
+                "Configured sensor calibration does not match the replay bundle",
+                {
+                    "sensor_calibration_id": sensor_calibration_id,
+                    "sensor_calibration_digest": sensor_calibration_digest,
+                    "replay_calibration_id": sensor_replay_calibration_id,
+                    "replay_calibration_digest": sensor_replay_calibration_digest,
+                },
+            )
+        )
+
+    identities = {
+        name: (calibration_id, digest)
+        for name, calibration_id, digest in (
+            ("source", source_calibration_id, source_calibration_digest),
+            ("source_replay", replay_calibration_id, replay_calibration_digest),
+            ("sensor", sensor_calibration_id, sensor_calibration_digest),
+            (
+                "sensor_replay",
+                sensor_replay_calibration_id,
+                sensor_replay_calibration_digest,
+            ),
+        )
+        if calibration_id and digest
+    }
+    if len(set(identities.values())) > 1:
+        checks.append(
+            Diagnostic(
+                "fail",
+                "calibration.shared_world",
+                "Configured adapters do not share the same calibration ID and content digest",
+                {
+                    "identities": {
+                        name: {
+                            "calibration_id": identity[0],
+                            "calibration_digest": identity[1],
+                        }
+                        for name, identity in identities.items()
+                    }
+                },
+            )
+        )
 
 
 def run_diagnostics(
@@ -123,6 +404,8 @@ def run_diagnostics(
             expected_env = {
                 "CUDA_VISIBLE_DEVICES",
                 "FLEXGPU_CONFIG",
+                "FLEXGPU_ROOT",
+                "FLEXGPU_SRC",
                 "FLEXGPU_ROLE",
                 "FLEXGPU_EXPERIENCE",
                 "FLEXGPU_COMPLETION",
@@ -133,7 +416,7 @@ def run_diagnostics(
                 Diagnostic(
                     "pass" if not missing_env else "fail",
                     "process.%s.environment" % role,
-                    "Role and CUDA environment are complete"
+                    "Role, CUDA, and bridge import environment are complete"
                     if not missing_env
                     else "Missing environment keys: " + ", ".join(missing_env),
                 )
@@ -207,6 +490,7 @@ def run_diagnostics(
             "Geometry completion mode is %s" % config.completion,
         )
     )
+    _runtime_adapter_diagnostics(config, checks)
     return tuple(checks)
 
 

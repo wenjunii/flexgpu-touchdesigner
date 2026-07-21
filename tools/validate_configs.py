@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate FlexShow JSON profiles against the public Draft 2020-12 schema."""
+"""Validate FlexShow JSON profiles with both schema and launcher semantics."""
 
 from __future__ import annotations
 
@@ -17,6 +17,12 @@ DEFAULT_TARGETS = (
     REPOSITORY_ROOT / "config" / "flexshow.json",
     REPOSITORY_ROOT / "config" / "presets",
 )
+SOURCE_ROOT = REPOSITORY_ROOT / "src"
+if os.fspath(SOURCE_ROOT) not in sys.path:
+    sys.path.insert(0, os.fspath(SOURCE_ROOT))
+
+from flexgpu.config import validate_config  # noqa: E402
+from flexgpu.models import ConfigError  # noqa: E402
 
 
 def _reject_constant(value: str) -> None:
@@ -109,12 +115,21 @@ def validate(
             failures.append(
                 "%s: %s: %s" % (path, _json_pointer(error.absolute_path), error.message)
             )
+        if isinstance(instance, dict):
+            try:
+                validate_config(instance, os.fspath(path))
+            except ConfigError as exc:
+                for message in exc.errors:
+                    failures.append("%s: launcher: %s" % (path, message))
     return paths, failures
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Validate FlexShow JSON profiles with JSON Schema Draft 2020-12."
+        description=(
+            "Validate FlexShow JSON profiles with JSON Schema Draft 2020-12 "
+            "and the dependency-free launcher validator."
+        )
     )
     parser.add_argument(
         "paths",
@@ -145,7 +160,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("%d configuration validation error(s)" % len(failures), file=sys.stderr)
         return 1
     print(
-        "validated %d configuration(s) against %s"
+        "validated %d configuration(s) against %s and launcher semantics"
         % (len(paths), Path(args.schema).resolve())
     )
     return 0

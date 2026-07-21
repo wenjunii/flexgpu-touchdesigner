@@ -19,7 +19,7 @@ param(
     [ValidateSet('', 'fog', 'procedural', 'hybrid')]
     [string]$Completion = '',
 
-    [ValidateSet('', 'auto', '3080ti_16gb', '4090', '5090')]
+    [ValidateSet('', 'auto', '3080ti_16gb', '4090', '5090', 'custom')]
     [string]$Tier = '',
 
     [string]$NvidiaSmi = '',

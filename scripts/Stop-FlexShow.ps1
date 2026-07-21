@@ -27,7 +27,7 @@ if (-not $Stop -and -not $Json) {
     Write-Host '[FlexShow] Preview only. Add -Stop to authorize shutdown.'
 }
 elseif ($Stop -and -not $Json) {
-    Write-Warning 'Windows Stop force-terminates identity-verified show processes. Save TouchDesigner edits first.'
+    Write-Warning 'Stop requests a graceful close first, then force-terminates only identity-verified survivors. Save TouchDesigner edits first.'
 }
 
 Invoke-FlexShowCli -Command stop -Config $Config -ActionMode $mode -Json:$Json -ExitWithCode:$ExitWithCode

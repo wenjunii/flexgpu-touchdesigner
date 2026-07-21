@@ -1,0 +1,17 @@
+[mcp_servers.td-knowledge]
+command = '<ABSOLUTE_PATH_TO_TD_AI_ASSISTANT_PYTHON>'
+args = [
+  "-u",
+  '<ABSOLUTE_PATH_TO_TD_KNOWLEDGE_MCP_SERVER>',
+  "--port",
+  "9870",
+  "--envoy-config",
+  '<ABSOLUTE_PATH_TO_FLEXGPU_ENVOY_REGISTRY>',
+  "--faiss-db",
+  '<ABSOLUTE_PATH_TO_TD_AI_ASSISTANT_FAISS_DB>',
+  "--project-context",
+  '<ABSOLUTE_PATH_TO_FLEXGPU_PROJECT_CONTEXT>',
+  "--max-concurrent-queries",
+  "4",
+]
+startup_timeout_sec = 120

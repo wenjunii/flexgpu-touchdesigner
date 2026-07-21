@@ -1,6 +1,9 @@
 # FlexShow configuration
 
-`flexgpu.py` reads one JSON or TOML configuration and turns it into a deterministic GPU/process plan. Config selection precedence is explicit `-Config`, `FLEXSHOW_CONFIG`, `FLEXGPU_CONFIG`, then `config/flexshow.json`.
+`flexgpu.py` reads one JSON configuration—or TOML when the selected runtime
+provides `tomllib` (Python 3.11+)—and turns it into a deterministic GPU/process
+plan. Config selection precedence is explicit `-Config`, `FLEXSHOW_CONFIG`,
+`FLEXGPU_CONFIG`, then `config/flexshow.json`.
 
 The configuration has five independent choices:
 
@@ -20,15 +23,27 @@ The network presets use the RFC 5737 documentation range `192.0.2.0/24` on
 purpose. Replace those non-routable example addresses with static addresses
 from your actual show network before launch.
 
+Keep every computer's local identity separate. Use different ignored names,
+for example `config/local-3080ti.json` and `config/local-5090.json`, and generate
+each file on the computer that will run it. Do not copy one machine's GPU UUID,
+absolute working-TOE path, or runtime identity onto the other machine. The
+tracked presets are reusable starting points; `config/local-*.json` files are
+machine state and must remain untracked.
+
 ## Safe first run
+
+Open PowerShell in the repository root. The commands below use repository-root
+relative paths.
 
 Start and Stop are previews by default. `-Start` authorizes launch and `-Stop`
 authorizes forceful shutdown. Diagnose is always read-only; its legacy
 `-Start`/`-Run` switch is accepted but ignored with a warning:
 
 ```powershell
+.\scripts\Initialize-FlexShow.ps1 -ListTouchDesigner
 .\scripts\Initialize-FlexShow.ps1 -ListOnly
-.\scripts\Initialize-FlexShow.ps1 -Topology auto -Experience installation -Completion hybrid
+.\scripts\Initialize-FlexShow.ps1 -Topology auto -Experience installation -Completion hybrid -TouchDesignerVersion 2025.32820
+.\scripts\Initialize-FlexShow.ps1 -Topology single -Experience installation -Completion hybrid -DisplayProfile venue_1080p -DisplayMode single -GeometryProvider moge2 -TouchDesignerVersion 2025.32820 -Project .\projects\FlexShow-local.toe -Output .\config\local-venue-1080p.json
 .\scripts\Start-FlexShow.ps1
 .\scripts\Diagnose-FlexShow.ps1
 .\scripts\Start-FlexShow.ps1 -Config config\presets\single-4090.json -Experience vr
@@ -38,11 +53,33 @@ authorizes forceful shutdown. Diagnose is always read-only; its legacy
 UUIDs, and the local hardware tier. `auto` writes a single-GPU plan for one
 card or a dual-local plan for two or more. Its default output is the gitignored
 `config/local-flexshow.json`; use `-AIIndex`, `-RenderIndex`, `-Output`, or
-`-TouchDesignerExe` when automatic selection is not the desired show layout.
+an exact TouchDesigner selector when automatic selection is not the desired
+show layout. `-ListTouchDesigner` is a read-only inventory that does not probe
+the GPUs. `-TouchDesignerVersion 2025.32820` selects that exact installed
+product version, while `-TouchDesignerExe` selects one exact executable path;
+the two selectors cannot be combined. With neither selector, the unique
+validated 2025.32820 installation is the deterministic default. The initializer
+fails closed if that baseline is absent or ambiguous; it never promotes a sole
+or numerically newest candidate automatically. `-Project` selects one existing
+`.toe` file, with relative paths resolved from the repository root.
+`-DisplayProfile tier_default` keeps the runtime's conservative surface sizes.
+`-DisplayProfile venue_1080p` writes a 1920x1080 single feed plus six
+1920x1080 wrap/artistic wall feeds; TouchDesigner derives each three-wall
+mosaic as 5760x1080. `-DisplayMode` selects `single`, `panoramic_wrap`, or
+`artistic_multi_angle` without removing the fixed outputs. These display
+settings do not raise diffusion, MoGe inference, geometry, or point budgets.
+`-GeometryProvider moge2` or `depth_anything` writes the matching strict frame
+state and camera-metadata paths for cold start; `SHOW_CONTROL` can still switch
+providers after the project is open.
 It never starts TouchDesigner and does not generate network-node profiles.
 Dual-local output deliberately keeps `tier: auto`: the planner resolves the AI
 and world process tiers independently, so a 5090 AI card cannot give its point
 budget or geometry limits to a weaker 3080 Ti/4090 world card.
+The generated dual-local profile uses `touch_tcp` with `peer_host: 127.0.0.1`.
+This is also the shipped preset default because Touch In exposes an observable
+receive counter for preview pacing.
+The stock 5090 tier uses a 512-square geometry texture and therefore caps its
+default reachable point budget at 262,144 samples.
 
 For CI or another dedicated PowerShell process, `-Json -ExitWithCode` produces
 clean JSON and preserves controller exit `2` (configuration) or `3`
@@ -69,7 +106,19 @@ The templates target the normal TouchDesigner installation at:
 
 `C:\Program Files\Derivative\TouchDesigner\bin\TouchDesigner.exe`
 
-They expect `projects/FlexShow.toe` at the repository root. The planner injects `FLEXGPU_CONFIG`, `FLEXGPU_ROLE`, and GPU identity through environment variables, allowing one project scaffold to serve every role. Change `executable`, `project`, or `cwd` if your installation differs. An execute request intentionally fails before launching anything when a required executable or project is missing.
+On the current show machine that path is the accepted 2025.32820 baseline.
+TouchDesigner 2025.33060 is a side-by-side compatibility candidate at
+`C:\Program Files\Derivative\TouchDesigner.2025.33060\bin\TouchDesigner.exe`;
+it is not the show default. Give a candidate its own ignored local config and
+copied ignored `.toe`, select both with `-TouchDesignerVersion` and `-Project`,
+and retain the untouched 2025.32820 config/project pair for rollback.
+
+The templates expect `projects/FlexShow.toe` at the repository root. The planner
+injects `FLEXGPU_CONFIG`, `FLEXGPU_ROLE`, and GPU identity through environment
+variables, allowing one project scaffold to serve every role. Change
+`executable`, `project`, or `cwd` if your installation differs. An execute
+request intentionally fails before launching anything when a required
+executable or project is missing.
 
 ## Presets
 
@@ -125,24 +174,27 @@ python tools/validate_configs.py
 python tools/validate_configs.py config/local-flexshow.json
 ```
 
-The validator also rejects duplicate object keys, non-standard `NaN`/infinity
-values, and a relative `$schema` declaration that resolves to the wrong file.
-The launcher remains dependency-free; `jsonschema` is needed only for this
-authoring/CI check.
+The tool also applies the launcher's dependency-free semantic validator, so
+sibling relationships that JSON Schema cannot express are checked in the same
+run. It rejects duplicate object keys, non-standard `NaN`/infinity values, and
+a relative `$schema` declaration that resolves to the wrong file. The launcher
+itself remains dependency-free; `jsonschema` is needed only for the schema half
+of this authoring/CI check.
 
 ## Optional runtime contracts
 
-The schema accepts five optional objects for show-specific adapter settings.
+The schema accepts six optional objects for show-specific adapter settings.
 They keep machine-local choices next to the process plan without invalidating
 the supplied minimal presets:
 
-| Object | Intended consumer | Important fields | Stock `.toe` binding |
+| Object | Intended consumer | Important fields | v1.2.1 builder binding |
 | --- | --- | --- | --- |
 | `adaptive` | Live TD frame-time controller and offline policy tools | `enabled`, `levels`, frame/queue budgets, hysteresis windows, thresholds | Live frame-interval governor; offline governor also consumes VRAM and queue age |
 | `telemetry` | Live TD and offline metrics capture | `enabled`, JSONL/summary paths, sampling and flush intervals | Live JSONL/summary capture |
-| `source` | RGB/depth source adapter | `mode`, `.tox`/replay path, RGB/depth/mask/confidence operator paths | `mode` selects demo/adapter; `depth_operator` presence can enable adapter depth; paths are declarative and never auto-import a `.tox` |
-| `sensor` | Audience sensor adapter | `mode`, adapter/replay/calibration paths, operator paths, radius/gain/stale timeout | `mode` selects simulated/replay/disabled or safe fallback; paths and numeric tuning are declarative until a production adapter consumes them |
+| `source` | RGB/depth source adapter | `mode`, `.tox`/replay/calibration paths, RGB/depth/mask/confidence/frame-state/metadata operators, `auto_load_tox`, stale timeout | Manual wiring is the default; explicit auto-load can import one private `.tox` and falls back to demo on a failed contract |
+| `sensor` | Audience sensor adapter | `mode`, adapter/replay/calibration paths, position/mask/confidence/frame-state operators, `auto_load_tox`, radius/gain/stale timeout | Simulated is the safe default; explicit auto-load can import a private sensor `.tox` and falls back to simulated input on failure |
 | `render` | Point/output extension | point size/budget, output dimensions/rates, fog density, procedural mix | Point size/budget, output dimensions, fog, and procedural mix are live; FPS values are target metadata and do not change `project.cookRate` |
+| `supervisor` | Launcher and TouchDesigner application heartbeat | `heartbeat_timeout_ms`, `readiness_timeout_ms`, `require_ready` | Read-only alive/ready/stale status plus optional bounded start/recovery acceptance wait |
 
 For example, add these members to a complete preset:
 
@@ -166,14 +218,27 @@ For example, add these members to a complete preset:
   },
   "source": {
     "mode": "streamdiffusion",
+    "auto_load_tox": true,
     "streamdiffusion_tox": "../local-components/StreamDiffusionTD.tox",
     "rgb_operator": "out_rgb",
-    "depth_operator": "out_depth"
+    "depth_operator": "out_depth",
+    "mask_operator": "out_mask",
+    "confidence_operator": "out_confidence",
+    "frame_state_operator": "frame_state",
+    "camera_metadata_operator": "camera_metadata",
+    "calibration_path": "../calibration/source.json"
   },
   "sensor": {
-    "mode": "simulated",
-    "interaction_radius_m": 0.45,
-    "force_gain": 1.0,
+    "mode": "depth_sensor",
+    "auto_load_tox": true,
+    "adapter_tox": "../local-components/depth-sensor-adapter.tox",
+    "position_operator": "out_position",
+    "mask_operator": "out_mask",
+    "confidence_operator": "out_confidence",
+    "frame_state_operator": "frame_state",
+    "calibration_path": "../calibration/sensor.json",
+    "interaction_radius_m": 0.55,
+    "force_gain": 0.35,
     "stale_timeout_ms": 1000
   },
   "render": {
@@ -183,27 +248,209 @@ For example, add these members to a complete preset:
     "vr_fps": 72,
     "fog_density": 0.35,
     "procedural_mix": 0.7
+  },
+  "supervisor": {
+    "heartbeat_timeout_ms": 5000,
+    "readiness_timeout_ms": 15000,
+    "require_ready": true
   }
 }
 ```
 
-Keep the referenced private `.tox`, SDKs, calibration, credentials, and local
-replay files under the repository's ignored `local-components/`, `private/`, or
-`calibration/` boundaries. They are machine-local inputs and must not be forced
-into the public Git index.
+Keep the referenced private `.tox`, SDKs, real calibration, credentials, and
+local replay/capture files under the repository's ignored `local-components/`,
+`private/`, `calibration/`, `captures/`, `commissioning/`, or `recordings/`
+boundaries. They are machine-local inputs and must not be forced into the public
+Git index.
 
-These settings do not install external dependencies. At startup, the stock
-project binds resolved tier/adaptive values and the live render subset described
-above to source placeholders, reconstruction, point render, and output
-resolution. Its frame-start governor can reduce or restore geometry and point
-workload with hysteresis, and the telemetry callback can append frame/operator
-metrics to JSONL and write a summary on exit. When `source` or `sensor` is
-omitted, saved manual adapter selections are preserved; an explicit unsupported
-adapter mode falls back safely. Machine-local `.tox`, replay, calibration, and
-operator-path fields remain contracts for user-supplied adapters rather than
-automatic loaders. `tools/benchmark_flexshow.py` exercises the same policy
-independently from command-line samples. StreamDiffusionTD, a camera SDK, and a
-headset runtime remain user-supplied.
+These settings do not install external dependencies. In a locally rebuilt v1.2.1
+project, the runtime helper binds resolved tier/adaptive values and the live
+render subset described above to source placeholders, reconstruction, point
+render, and output resolution. Its frame-start governor can reduce or restore
+geometry and point workload with hysteresis, and the telemetry callback can
+append frame/operator metrics to JSONL and write a summary on exit. When
+`source` or `sensor` is omitted, saved manual adapter selections are preserved;
+an explicit unsupported adapter mode falls back safely.
+`tools/benchmark_flexshow.py` exercises the same policy independently from
+command-line samples. StreamDiffusionTD, a camera SDK, model/runtime
+dependencies, and a headset runtime remain user-supplied. The tracked canonical
+`.toe` is the rebuilt public v1.2.1 synthetic starter; use an ignored local copy
+before adding private components or site paths.
+
+### Private `.tox` loading is opt-in
+
+`auto_load_tox` defaults to `false`. With it disabled, the normal manual
+wiring inside the labelled source/sensor adapters is unchanged. With it set to
+`true`, the runtime resolves the `.tox` path relative to the selected config
+(absolute paths and user/environment expansion are also accepted), loads it
+into an `AUTO_LOADED_TOX` holder, and resolves the configured TOP names inside
+that holder. Source auto-load requires `streamdiffusion_tox` and
+`rgb_operator`; sensor auto-load requires `adapter_tox` and
+`position_operator`. Optional depth, mask, and confidence TOPs are wired only
+when configured and valid. In a split topology, the AI process alone loads the
+source component and the world process alone loads the sensor component. The
+world receiver does not import the private source `.tox`; it applies the shared
+source calibration locally to reconstruct received depth.
+
+A missing file, wrong extension, load error, unresolved required output, or bad
+calibration leaves the source on demo or the sensor on simulated input and
+records the reason in runtime state. Changing an already loaded `.tox` path
+requires a process restart. Auto-load does not install Python/CUDA packages,
+download weights, configure prompts/scheduling, license a sensor SDK, or verify
+the behavior or redistribution rights of the private component. A loaded
+component can be embedded if that TouchDesigner session is saved: enable this
+only in an ignored local `.toe`, never in a session that will overwrite
+`projects/FlexShow.toe`.
+
+When `frame_state_operator` is configured, it must publish the complete strict
+`flexgpu-frame-state/v1` mapping. The helper accepts a new session or a strictly
+advancing `(frame_id, timestamp_ns)` pair once, emits a one-cook `new_frame`
+pulse, and rejects malformed, future, retired-session, or regressive state. A
+held pair remains available until `stale_timeout_ms` but is not reabsorbed every
+render cook. Without explicit frame state, the helper uses the source/sensor
+operator's cook token when TouchDesigner exposes one. If no token exists,
+`legacy_each_cook` preserves older adapters by treating each helper tick as new;
+that last fallback cannot prove producer freshness and should not be used for a
+production split transport.
+
+Shared Mem is not a metadata-less turnkey transport. A `dual_local` profile
+with `transport.type: shared_memory` is accepted only when it also configures a
+non-empty `source.frame_state_operator`. That operator must resolve in both
+processes to a producer-backed metadata sidecar which transports the strict
+frame-state mapping across the process boundary. Pointing it at a local
+receiver-cook operator does not prove producer progress and violates the
+contract. Without that sidecar, Shared Mem reception fails closed. Use WorldBus
+or another explicit metadata adapter when exact producer lifecycle is required.
+
+### Calibration and commissioning
+
+`source.calibration_path` and `sensor.calibration_path` accept a strict
+`flexgpu-calibration/v1` JSON profile. It carries image dimensions, intrinsics,
+depth encoding/scale/bias/range, camera-to-world and sensor-to-world transforms,
+an ID, and a canonical `calibration_digest` in a right-handed, Y-up, metre
+coordinate system. The digest is SHA-256 over canonical calibration content
+excluding the digest field itself; a supplied digest must match, and frame/replay
+state must carry the same ID and digest. The
+runtime supports normalized, metres, millimetres, disparity, and inverse-depth
+encodings. Source and sensor profiles used together must describe the same
+calibration ID. Replay modes require `replay_path` in configuration. An invalid
+explicit source calibration on a split world receiver disables its world and
+output stages instead of rendering a knowingly incorrect remote reconstruction.
+
+Depth conversion is explicit: `calibrated = raw * scale + bias`. For
+`normalized`, calibrated `0..1` maps from `near_m` to `far_m`; for `metres` or
+`millimetres`, calibrated is treated as metres (so millimetre input normally
+uses `scale: 0.001`); for `disparity` or `inverse_depth`, metric Z is
+`1 / calibrated`. Intrinsics use pixel coordinates from the declared image.
+Unprojection produces camera-local X right, Y up, and forward along negative Z;
+the row-major `camera_to_world` matrix maps that basis into the shared world.
+The sensor adapter emits sensor-local XYZ metres, and `sensor_to_world` maps it
+into the same world. Both transforms must be rigid: orthonormal unit axes,
+right-handed determinant near one, and homogeneous final row
+`[0, 0, 0, 1]`. Scaling belongs in depth conversion, not these transforms.
+
+Validate the public synthetic example and exercise synchronized replay
+contracts before connecting private capture data:
+
+```powershell
+python tools/commission_flexshow.py calibration config/calibration.example.json
+python tools/commission_flexshow.py demo `
+  --output commissioning/demo `
+  --frames 8 `
+  --width 64 `
+  --height 36
+python tools/commission_flexshow.py inspect commissioning/demo/manifest.json
+```
+
+Demo generation is transactional: a complete private staging directory is
+generated and validated before it atomically replaces an absent or empty
+destination. Inspection validates hashes by default plus safe unique paths,
+exact byte layout, media roles and dimensions/formats, finite scalar sample
+ranges, monotonic frame state, and session/calibration relationships. It decodes
+depth/mask/confidence and recomputes each frame's `valid_fraction` and
+`confidence_mean`. `--skip-hashes` skips file integrity but retains those deep
+content and relationship checks. The demo and
+`config/calibration.example.json` are
+synthetic contract fixtures, not a measured site calibration. They cannot
+validate a physical camera, sensor alignment, audience tracking, projector/LED
+mapping, or visual quality. The generated bundle is not automatically imported
+or played by the stock TouchDesigner network; source/sensor replay remains an
+adapter boundary despite the strict configuration and inspection contracts.
+
+Bundle media formats are role-constrained: RGB accepts `ppm-rgb8` or
+`raw-rgba8`; depth accepts `pgm-u8`, `pgm-u16`, or `raw-r32f-le`; mask and
+confidence accept the same scalar formats. `raw-r32f-le` means one
+little-endian IEEE-754 float per pixel. Paths must be unique, relative POSIX
+paths that remain inside the bundle.
+
+Real calibration, RGB/depth/mask/confidence captures, commissioning bundles,
+and recordings are ignored private data. Collect audience data only under an
+appropriate consent, access, retention, and deletion policy. The public-sync
+guard helps prevent accidental publication but is not a legal/privacy review.
+It recognizes calibration, frame-state/commissioning, hardware, telemetry,
+runtime, validation, support and capture JSON/JSONL by structure even if a file
+is renamed. Only the exact synthetic `config/calibration.example.json` at that
+path is allowed; never force-add a real profile, private `.tox`, credential,
+local `.toe`, or paid/licensed component.
+
+### Machine-local profiling and process supervision
+
+Capture a read-only starting recommendation, then copy stable UUID selections
+into a gitignored local preset after measuring the actual show workload:
+
+```powershell
+python tools/profile_flexshow.py --topology single
+python tools/profile_flexshow.py `
+  --topology dual_local `
+  --output runtime/hardware-profile.json
+```
+
+The snapshot includes present VRAM headroom/load, temperature, clocks, optional
+power values, display ownership, driver, UUID, and PCI identity. It supports
+only `single` and `dual_local`; it is not a benchmark, soak, dynamic scheduler,
+or two-machine planner. The output is runtime/telemetry data and stays local.
+
+```powershell
+.\scripts\Status-FlexShow.ps1 -Config config\presets\local-show.json
+.\scripts\Recover-FlexShow.ps1 -Config config\presets\local-show.json
+.\scripts\Recover-FlexShow.ps1 `
+  -Config config\presets\local-show.json `
+  -Attempts 2 `
+  -Recover
+```
+
+Status is strictly read-only. Recovery is a dry-run without `-Recover`, permits
+one to three bounded attempts, and can recover only a separate AI role after
+its world dependency and preflight pass. It refuses single/unified plans and
+never implicitly restarts world/render. Add `-RestartRunning -Recover` only for
+an intentional replacement of a healthy AI process. Identity-matched processes
+are reported as `alive` before a ready heartbeat, `ready` while the atomic
+application heartbeat is current, or `stale` when it is missing/malformed or
+has stopped advancing. The heartbeat contains session/role/PID identity,
+build/config identity, cook count/timing, source/sensor age, transport state,
+and selected outputs; it is not the WorldBus network heartbeat.
+
+`supervisor.heartbeat_timeout_ms` controls stale classification.
+`supervisor.readiness_timeout_ms` is the default bounded wait for Start and AI
+recovery; `require_ready: true` makes readiness mandatory and uses the heartbeat
+timeout when no nonzero readiness timeout is supplied. Operators can override
+the wait for one PowerShell command with `-WaitReadyMs 15000`, or use the
+equivalent Python CLI option `--wait-ready-ms 15000` on `start`/`recover`. A
+timeout terminates a newly launched child and fails the command. None of this
+creates an automatic watchdog, and world/render is still never restarted
+implicitly.
+
+Required readiness must be used with a v1.2.1 `.toe` selected by the local
+process profile. The tracked synthetic canonical project has the v1.2.1
+heartbeat writer; older or privately modified projects must be rebuilt before
+`require_ready` or a nonzero readiness wait is enabled.
+
+The planner owns every `CUDA_*` and `FLEXGPU_*` variable and rejects attempts
+to override those names in `processes.*.env`. Secret-like environment names,
+credentialed URLs and common secret command flags are redacted from plans,
+diagnostics, runtime manifests and CLI errors. Keep credentials in machine-local
+secret/environment facilities anyway; redaction is not authorization to commit
+them or a substitute for reviewing arbitrary process commands.
 
 The embedded TD governor currently makes decisions from frame interval. It
 rebinds source/depth resolution, reconstruction resolution, and point count;
@@ -213,8 +460,9 @@ Python governor additionally evaluates VRAM and queue-age pressure.
 
 The schema bounds every numeric field. It cannot express all relationships:
 adaptive low thresholds must still be below their matching high thresholds,
-and `initial_level` must be lower than `levels`. The adaptive Python API checks
-those relationships when constructing a governor.
+and `initial_level` must be lower than `levels`. The launcher and
+`tools/validate_configs.py` check those relationships in addition to the
+adaptive Python API.
 
 ## Benchmark and replay commands
 
@@ -242,23 +490,35 @@ hysteresis reproducible outside the live TouchDesigner session.
 The shipped split-role runtime binds `transport` directly to
 `WORKING_PIPELINE/ROLE_BRIDGE`:
 
-- `dual_local` plus `shared_memory` uses one global
-  `<segment_name>_atlas` Shared Mem block;
-- `dual_local` plus `touch_tcp` uses a loopback Touch stream;
+- `dual_local` plus `touch_tcp` is the turnkey path and uses a loopback Touch
+  stream;
+- `dual_local` plus `shared_memory` is an advanced path using one global
+  `<segment_name>_atlas` Shared Mem block plus the required producer frame-state
+  sidecar described above;
 - `dual_network` uses one uncompressed Touch TCP stream to `peer_host` on
   `atlas_port`;
 - `single` bypasses atlas pack/unpack.
 
-The atlas is RGBA16F: generated RGB fills the left half and normalized depth
-fills the right half. A 1024x512 atlas at 10 Hz is roughly 336 Mbit/s before
-transport overhead. Start with the preset's lower cadence, use wired Ethernet,
-and measure the actual link. `atlas_fps` is converted to an integer frame step
-from TouchDesigner's cook rate.
+The atlas is RGBA32F: generated RGB fills the left half; the right half carries
+raw depth in R, confidence in G, and mask in B. Raw depth is not clamped, so
+normalized, metres, millimetres, disparity, and inverse-depth encodings retain
+their declared values. A 1024x512 atlas is 8 MiB per frame: about 40 MiB/s at
+5 Hz or 80 MiB/s (roughly 671 Mbit/s) at 10 Hz before transport overhead. Start
+with the preset's lower cadence, use wired Ethernet, and measure the actual
+link. `atlas_fps` is converted to an integer frame step from TouchDesigner's
+cook rate.
 
-This direct bridge does not use `control_port` or `heartbeat_port` and has no
-WorldBus frame/session IDs, camera metadata, mask/confidence, controls, replay,
-or explicit stale/drop/hold policy. Those ports remain available to a future
-full WorldBus adapter. See
+This direct bridge does not use `control_port` or `heartbeat_port`. Local
+adapters can publish strict frame state, but producer IDs/timestamps,
+calibration/camera matrices, and application/WorldBus heartbeats are not encoded
+into the image atlas. Touch TCP reads Touch In's `num_received_frames` for
+transport-arrival preview freshness and local staleness. The counter proves
+receipt, not which producer generation/session/timestamp created the atlas.
+Shared Mem exposes no equivalent receive counter, so a metadata-less Shared Mem
+receiver fails closed instead of using its local cook frame. There is no
+authenticated control, replay, or producer-exact newest-frame policy; use an
+explicit metadata sidecar or full WorldBus adapter for those semantics. Those
+ports remain available to that adapter. See
 [`docs/DUAL_GPU_RUNTIME.md`](../docs/DUAL_GPU_RUNTIME.md).
 
 The dependency-free WorldBus reference is available independently of
@@ -272,6 +532,6 @@ python tools/worldbus_node.py replay-inspect runtime/worldbus-demo.wbr
 
 Its full-contract image framing uses bounded TCP and its low-volume messages
 are UDP JSON with OSC-like addresses—not binary OSC. It is separate from the
-already installed direct RGBA16F bridge. See
+already installed direct RGBA32F bridge. See
 [`docs/WORLDBUS_REFERENCE.md`](../docs/WORLDBUS_REFERENCE.md) before adapting it
 to Touch In/Out, shared memory, or an OSC bridge.

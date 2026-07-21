@@ -1,0 +1,35 @@
+{
+  "version": "flexgpu-calibration/v1",
+  "calibration_id": "demo-camera-v1",
+  "calibration_digest": "4f5fea41488cdc35d9a73cdee73b9844d29d153a14d3cc1b9a29a85c587a88a7",
+  "image": {
+    "width": 64,
+    "height": 36
+  },
+  "intrinsics": {
+    "fx": 31.176914536,
+    "fy": 31.176914536,
+    "cx": 31.5,
+    "cy": 17.5
+  },
+  "depth": {
+    "encoding": "normalized",
+    "scale": 1.0,
+    "bias": 0.0,
+    "near_m": 0.35,
+    "far_m": 4.5
+  },
+  "camera_to_world": [
+    1.0, 0.0, 0.0, 0.0,
+    0.0, 1.0, 0.0, 0.0,
+    0.0, 0.0, 1.0, 0.0,
+    0.0, 0.0, 0.0, 1.0
+  ],
+  "sensor_to_world": [
+    1.0, 0.0, 0.0, 0.0,
+    0.0, 1.0, 0.0, 0.0,
+    0.0, 0.0, 1.0, 0.0,
+    0.0, 0.0, 0.0, 1.0
+  ],
+  "coordinate_system": "right_handed_y_up_metres"
+}

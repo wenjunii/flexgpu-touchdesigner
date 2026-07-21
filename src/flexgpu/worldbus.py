@@ -932,13 +932,17 @@ def send_tcp_frame(
 
 
 class WorldBusReceiver:
-    """Reference TCP/UDP receiver with a newest-only frame queue."""
+    """Reference receiver with a newest-only frame queue.
+
+    Passing ``udp_port=None`` creates a TCP-only receiver and does not allocate
+    a UDP socket or thread. Existing callers retain the TCP/UDP default.
+    """
 
     def __init__(
         self,
         host: str = "127.0.0.1",
         tcp_port: int = 0,
-        udp_port: int = 0,
+        udp_port: Optional[int] = 0,
         *,
         stale_after_s: float = 1.0,
         limits: WorldBusLimits = DEFAULT_LIMITS,
@@ -979,6 +983,8 @@ class WorldBusReceiver:
     @property
     def udp_address(self) -> tuple[str, int]:
         if self._udp_endpoint is None:
+            if self.requested_udp_port is None:
+                raise WorldBusError("receiver UDP endpoint is not enabled")
             raise WorldBusError("receiver is not started")
         return self._udp_endpoint.address
 
@@ -994,8 +1000,12 @@ class WorldBusReceiver:
             tcp_socket.listen(4)
             poll_timeout = min(0.2, float(self.limits.socket_timeout_s))
             tcp_socket.settimeout(poll_timeout)
-            udp_endpoint = UDPJsonEndpoint(
-                self.host, self.requested_udp_port, limits=self.limits
+            udp_endpoint = (
+                None
+                if self.requested_udp_port is None
+                else UDPJsonEndpoint(
+                    self.host, self.requested_udp_port, limits=self.limits
+                )
             )
         except Exception:
             tcp_socket.close()
@@ -1006,17 +1016,23 @@ class WorldBusReceiver:
         self._tcp_thread = threading.Thread(
             target=self._tcp_loop, name="worldbus-tcp", daemon=True
         )
-        self._udp_thread = threading.Thread(
-            target=self._udp_loop, name="worldbus-udp", daemon=True
+        self._udp_thread = (
+            None
+            if udp_endpoint is None
+            else threading.Thread(
+                target=self._udp_loop, name="worldbus-udp", daemon=True
+            )
         )
         try:
             self._tcp_thread.start()
-            self._udp_thread.start()
+            if self._udp_thread is not None:
+                self._udp_thread.start()
         except Exception:
             self._closed = True
             self._stop.set()
             tcp_socket.close()
-            udp_endpoint.close()
+            if udp_endpoint is not None:
+                udp_endpoint.close()
             for thread in (self._tcp_thread, self._udp_thread):
                 if thread is not None and thread.ident is not None:
                     thread.join(timeout=1.0)

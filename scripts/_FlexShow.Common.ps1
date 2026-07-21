@@ -131,7 +131,7 @@ function Get-FlexShowPython {
 function Invoke-FlexShowCli {
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateSet('discover', 'validate', 'plan', 'diagnose', 'start', 'stop')]
+        [ValidateSet('discover', 'validate', 'plan', 'diagnose', 'start', 'stop', 'status', 'recover')]
         [string]$Command,
 
         [AllowEmptyString()]
@@ -143,11 +143,19 @@ function Invoke-FlexShowCli {
         [ValidateSet('', 'fog', 'procedural', 'hybrid')]
         [string]$Completion = '',
 
-        [ValidateSet('', 'auto', '3080ti_16gb', '4090', '5090')]
+        [ValidateSet('', 'auto', '3080ti_16gb', '4090', '5090', 'custom')]
         [string]$Tier = '',
 
         [AllowEmptyString()]
         [string]$NvidiaSmi = '',
+
+        [ValidateRange(1, 3)]
+        [int]$RecoveryAttempts = 1,
+
+        [ValidateRange(0, 600000)]
+        [Nullable[int]]$WaitReadyMs = $null,
+
+        [switch]$RestartRunning,
 
         [ValidateSet('None', 'DryRun', 'Execute')]
         [string]$ActionMode = 'None',
@@ -190,6 +198,20 @@ function Invoke-FlexShowCli {
     if (-not [string]::IsNullOrWhiteSpace($NvidiaSmi)) {
         $arguments.Add('--nvidia-smi')
         $arguments.Add($NvidiaSmi)
+    }
+    if ($Command -eq 'recover') {
+        $arguments.Add('--attempts')
+        $arguments.Add([string]$RecoveryAttempts)
+        if ($RestartRunning) {
+            $arguments.Add('--restart-running')
+        }
+    }
+    if ($null -ne $WaitReadyMs -and $Command -in @('start', 'recover')) {
+        $arguments.Add('--wait-ready-ms')
+        # PowerShell unwraps Nullable[int] values during parameter binding, so
+        # an explicitly supplied value is normally an Int32 rather than an
+        # object with a .Value property.
+        $arguments.Add([string]([int]$WaitReadyMs))
     }
 
     switch ($ActionMode) {

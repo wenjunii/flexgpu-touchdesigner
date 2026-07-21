@@ -10,26 +10,46 @@ There are three distinct layers:
 1. `WORKING_PIPELINE` uses aligned RGB, depth, position, color, and interaction
    TOP contracts inside TouchDesigner.
 2. `WORKING_PIPELINE/ROLE_BRIDGE` is already implemented for split-role direct
-   preview. It uses one RGBA16F Shared Mem atlas by default in `dual_local`, with
-   loopback Touch TCP as a fallback, or one uncompressed Touch TCP atlas in
-   `dual_network`; it contains RGB and normalized depth only.
+   preview. It uses one RGBA32F loopback Touch TCP atlas by default in
+   `dual_local`, or one uncompressed Touch TCP atlas in `dual_network`; it
+   contains RGB plus raw depth, mask, and confidence. Shared Mem is an advanced
+   dual-local option requiring a separately transported producer frame-state
+   sidecar.
 3. `src/flexgpu/worldbus.py` is an implemented, dependency-free reference using
    bounded length-prefixed TCP for RGBA payloads and UDP JSON for
    metadata/control/heartbeats. Its `.wbr` files replay the same TCP records.
 
-The direct role bridge is not WorldBus v1. It has no frame/session IDs,
-intrinsics/transforms, mask/confidence, heartbeat/control, newest-frame policy,
-or replay framing. The full reference is intentionally not auto-connected to
-the `.toe`; it validates that richer contract and gives production adapters a
-concrete interoperability target. See
+The direct role bridge is not WorldBus v1. Its lifecycle helper can sample
+strict frame state from a local adapter, but producer session/timestamp strings,
+intrinsics/transforms, and heartbeat/control are not serialized into the image
+atlas. Touch TCP exposes `num_received_frames`, which is useful
+transport-arrival preview state but not producer-generation identity. Shared
+Mem has no equivalent counter and fails closed without explicit producer frame
+state. The direct path also has no replay framing.
+The full reference is intentionally not auto-connected to the `.toe`; it
+validates that richer contract and gives production adapters a concrete
+interoperability target. See
 [DUAL_GPU_RUNTIME.md](DUAL_GPU_RUNTIME.md) for the direct bridge.
 
 | Property | Direct `ROLE_BRIDGE` | Full WorldBus v1 reference |
 | --- | --- | --- |
-| Image format | RGBA16F; left RGB, right normalized depth | RGBA8/atlas with packed depth, mask and confidence |
+| Image format | RGBA32F; left RGB, right R=raw depth, G=confidence, B=mask | RGBA8/atlas with packed depth, mask and confidence |
 | Transport | Shared Mem TOP or uncompressed Touch TCP | Length-prefixed TCP frame records plus UDP JSON |
-| Metadata/control | None | IDs/session, timestamps, camera fields, heartbeat and controls |
-| Replay/freshness | None | `.wbr`, validation, newest-only queue and stale heartbeat state |
+| Metadata/control | Local adapter or explicit sidecar state only; none serialized with the atlas | IDs/session, timestamps, camera fields, heartbeat and controls |
+| Replay/freshness | Touch receive-count/stale-timeout preview; Shared Mem requires a producer sidecar; no replay | `.wbr`, validation, newest-only queue and stale heartbeat state |
+
+There is also a third heartbeat scope: the launcher gives each TouchDesigner
+process an atomic machine-local application-heartbeat file for alive/ready/stale
+supervision. It reports cook/source/sensor/transport/output health but neither
+travels in the direct atlas nor replaces WorldBus's peer/network heartbeat.
+
+The v1.2.1 TouchDesigner adapter contract `flexgpu-frame-state/v1` binds an
+accepted frame to a producer session, monotonic frame/timestamp pair,
+dimensions, validity metrics, and both `calibration_id` and canonical
+`calibration_digest`. It drives a one-cook new-frame pulse locally. That mapping
+must be explicitly transported by a production adapter if the receiver needs
+producer-exact lifecycle semantics; the built-in atlas cannot carry its string
+identity fields.
 
 ## Frame payload
 
@@ -48,8 +68,8 @@ concrete interoperability target. See
 | `generation_id` | string DAT | UDP metadata | prompt/seed generation epoch |
 | `producer_session_id` | string DAT | optional UDP/TCP metadata | unique AI-process/session epoch |
 
-This table and packing belong to full WorldBus v1, not the built-in RGBA16F
-direct bridge. For a WorldBus adapter, an initial 512 x 512 RGB/depth source
+This table and its RGBA8 network packing belong to full WorldBus v1, not the
+built-in RGBA32F direct bridge. For a WorldBus adapter, an initial 512 x 512 RGB/depth source
 can be packed as a 1024 x 512 RGBA8 atlas. Keeping color, packed depth, mask, and
 confidence in one payload makes the image update atomic. The Python reference
 accepts an already packed `rgba8_atlas` or a plain `rgba8` payload and requires
@@ -77,8 +97,10 @@ projects can coexist:
 These are naming conventions for a future full-WorldBus shared-memory adapter.
 The Python reference does not create those segments. The built-in direct bridge
 instead uses one `<transport.segment_name>_atlas` block and carries none of the
-metadata names above. A full receiver should double-buffer decoded frames and
-swap only after all required fields validate.
+metadata names above. That direct Shared Mem path is therefore advanced-only
+and needs the separately configured producer-backed frame-state sidecar. A full
+receiver should double-buffer decoded frames and swap only after all required
+fields validate.
 
 ## Address namespace
 

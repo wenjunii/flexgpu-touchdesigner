@@ -13,8 +13,11 @@ contract remains unchanged.
 
 from __future__ import print_function
 
+import os
+import re
 
-BUILD_VERSION = "1.1.0"
+
+BUILD_VERSION = "1.2.1"
 ROOT_PATH = "/project1/flexgpu"
 PIPELINE_NAME = "WORKING_PIPELINE"
 
@@ -24,12 +27,15 @@ PIPELINE_NAME = "WORKING_PIPELINE"
 # point renderer, installation output, and a later headset-specific renderer.
 TOP_CONTRACTS = {
     "RGB": "RGBA color TOP; linear or sRGB, alpha=1",
-    "DEPTH": "R depth TOP normalized 0..1; near is 0, far is 1",
+    "DEPTH": "R raw depth TOP; encoding/scale/bias are defined by calibration",
+    "CONFIDENCE": "R confidence/validity TOP normalized 0..1 and aligned with DEPTH",
     "POSITION": "RGBA32F TOP; RGB=XYZ metres, A=active/valid",
     "COLOR": "RGBA16F or RGBA8 TOP aligned pixel-for-pixel with POSITION",
-    "SENSOR_POSITION": "RGBA32F TOP; RGB=XYZ metres, A=occupancy",
+    "TEMPORAL_STATE": "RGBA16F TOP; R=confidence, G=normalized age, B=current-valid, A=alive",
+    "SENSOR_POSITION": "RGBA32F TOP; RGB=sensor-local XYZ metres, A=occupancy/confidence",
     "INTERACTION": "RGBA16F TOP; RGB=force vector, A=occupancy",
     "INSTALLATION": "RGBA TOP; visually inspectable rendered point world",
+    "TRIPLE_DISPLAY": "three RGBA surface TOPs plus a horizontal calibration mosaic",
     "STEREO": "two eye RGBA TOPs plus a side-by-side preview",
 }
 
@@ -50,25 +56,79 @@ EXPERIMENTAL_ADAPTERS = {
 # strings at module level makes the GPU contracts reviewable without opening a
 # .toe and lets CI guard against accidental interface drift.
 SHADERS = {
-    "depth_to_position": r'''// CONTRACT: RGB + DEPTH -> POSITION (XYZ metres + active alpha)
+    "point_glyph": r'''// CONTRACT: sprite UV -> soft circular white glyph
+out vec4 fragColor;
+
+void main()
+{
+    vec2 pointUV = vUV.st * 2.0 - 1.0;
+    float radius = length(pointUV);
+    float alpha = 1.0 - smoothstep(0.72, 1.0, radius);
+    fragColor = TDOutputSwizzle(vec4(1.0, 1.0, 1.0, alpha));
+}
+''',
+    "validity_combine": r'''// CONTRACT: MASK + CONFIDENCE -> CONFIDENCE
+out vec4 fragColor;
+
+void main()
+{
+    float mask = clamp(texture(sTD2DInputs[0], vUV.st).r, 0.0, 1.0);
+    float confidence = clamp(texture(sTD2DInputs[1], vUV.st).r, 0.0, 1.0);
+    float validity = mask * confidence;
+    fragColor = TDOutputSwizzle(vec4(validity, validity, validity, 1.0));
+}
+''',
+    "depth_to_position": r'''// CONTRACT: RGB + DEPTH + CONFIDENCE -> POSITION (world XYZ metres + active alpha)
 out vec4 fragColor;
 
 void main()
 {
     vec2 uv = vUV.st;
-    float depth01 = clamp(texture(sTD2DInputs[1], uv).r, 0.0, 1.0);
-    float valid = step(0.002, depth01) * (1.0 - step(0.998, depth01));
-    const float nearMetres = 0.35;
-    const float farMetres = 4.50;
-    const float tanHalfFovY = 0.57735026919; // 60 degree vertical FOV
-    float z = mix(nearMetres, farMetres, depth01);
-    vec2 ndc = uv * 2.0 - 1.0;
+    float rawDepth = texture(sTD2DInputs[1], uv).r;
+    float confidence = clamp(texture(sTD2DInputs[2], uv).r, 0.0, 1.0);
+    const int depthMode = 0; // FLEXGPU_DEPTH_MODE: 0 normalized, 1 metric, 2 inverse
+    const float depthScale = 1.0; // FLEXGPU_DEPTH_SCALE
+    const float depthBias = 0.0; // FLEXGPU_DEPTH_BIAS
+    const float nearMetres = 0.35; // FLEXGPU_NEAR_METRES
+    const float farMetres = 4.50; // FLEXGPU_FAR_METRES
+    // Normalized intrinsics are measured in full image widths/heights. Zero
+    // focal values retain the original 60 degree, aspect-aware demo camera.
+    const float fxNormalized = 0.0; // FLEXGPU_INTRINSICS_FX
+    const float fyNormalized = 0.0; // FLEXGPU_INTRINSICS_FY
+    const float cxNormalized = 0.5; // FLEXGPU_INTRINSICS_CX
+    const float cyNormalized = 0.5; // FLEXGPU_INTRINSICS_CY
+    const vec4 cameraToWorld0 = vec4(1.0, 0.0, 0.0, 0.0); // FLEXGPU_CAMERA_TO_WORLD_0
+    const vec4 cameraToWorld1 = vec4(0.0, 1.0, 0.0, 0.0); // FLEXGPU_CAMERA_TO_WORLD_1
+    const vec4 cameraToWorld2 = vec4(0.0, 0.0, 1.0, 0.0); // FLEXGPU_CAMERA_TO_WORLD_2
+    const vec4 cameraToWorld3 = vec4(0.0, 0.0, 0.0, 1.0); // FLEXGPU_CAMERA_TO_WORLD_3
+
+    float calibrated = rawDepth * depthScale + depthBias;
+    float z = mix(nearMetres, farMetres, clamp(calibrated, 0.0, 1.0));
+    if (depthMode == 1) {
+        z = calibrated;
+    } else if (depthMode == 2) {
+        z = 1.0 / max(calibrated, 1e-6);
+    }
     float aspect = float(textureSize(sTD2DInputs[1], 0).x) /
                    max(1.0, float(textureSize(sTD2DInputs[1], 0).y));
-    vec3 position = vec3(ndc.x * aspect * z * tanHalfFovY,
-                         -ndc.y * z * tanHalfFovY,
-                         -z);
-    fragColor = TDOutputSwizzle(vec4(position, valid));
+    float fx = fxNormalized > 1e-6 ? fxNormalized : 0.86602540378 / aspect;
+    float fy = fyNormalized > 1e-6 ? fyNormalized : 0.86602540378;
+    // TouchDesigner TOP UVs increase from image bottom to image top. Preserve
+    // that orientation in camera/world Y so the rendered cloud matches RGB.
+    vec3 cameraPosition = vec3((uv.x - cxNormalized) * z / fx,
+                               (uv.y - cyNormalized) * z / fy,
+                               -z);
+    vec4 homogeneous = vec4(cameraPosition, 1.0);
+    vec3 worldPosition = vec3(dot(cameraToWorld0, homogeneous),
+                              dot(cameraToWorld1, homogeneous),
+                              dot(cameraToWorld2, homogeneous));
+    bool depthValid = depthMode == 0
+        ? (calibrated >= 0.0 && calibrated <= 1.0)
+        : (z >= nearMetres && z <= farMetres);
+    // Depth endpoints are real near/far samples. Invalidity belongs in the
+    // explicit mask/confidence contract, not in arbitrary depth cutoffs.
+    float valid = float(depthValid) * float(confidence > 0.0);
+    fragColor = TDOutputSwizzle(vec4(worldPosition, valid * confidence));
 }
 ''',
     "sensor_position": r'''// CONTRACT: SENSOR MASK -> SENSOR_POSITION
@@ -79,33 +139,179 @@ void main()
     vec2 uv = vUV.st;
     float occupancy = texture(sTD2DInputs[0], uv).r;
     vec3 position = vec3((uv.x - 0.5) * 3.0,
-                         (0.5 - uv.y) * 2.0,
+                         (uv.y - 0.5) * 2.0,
                          -1.15 - 0.20 * occupancy);
     fragColor = TDOutputSwizzle(vec4(position, occupancy));
 }
 ''',
-    "interaction_field": r'''// CONTRACT: POSITION + SENSOR MASK -> INTERACTION force + occupancy
+    "sensor_to_world": r'''// CONTRACT: SENSOR_POSITION camera XYZ -> calibrated world XYZ
 out vec4 fragColor;
 
-float hash21(vec2 p)
+void main()
 {
-    p = fract(p * vec2(123.34, 456.21));
-    p += dot(p, p + 45.32);
-    return fract(p.x * p.y);
+    vec4 sensor = texture(sTD2DInputs[0], vUV.st);
+    const vec4 sensorToWorld0 = vec4(1.0, 0.0, 0.0, 0.0); // FLEXGPU_SENSOR_TO_WORLD_0
+    const vec4 sensorToWorld1 = vec4(0.0, 1.0, 0.0, 0.0); // FLEXGPU_SENSOR_TO_WORLD_1
+    const vec4 sensorToWorld2 = vec4(0.0, 0.0, 1.0, 0.0); // FLEXGPU_SENSOR_TO_WORLD_2
+    const vec4 sensorToWorld3 = vec4(0.0, 0.0, 0.0, 1.0); // FLEXGPU_SENSOR_TO_WORLD_3
+    vec4 homogeneous = vec4(sensor.rgb, 1.0);
+    vec3 worldPosition = vec3(dot(sensorToWorld0, homogeneous),
+                              dot(sensorToWorld1, homogeneous),
+                              dot(sensorToWorld2, homogeneous));
+    // Mask and confidence are applied exactly once by SENSOR_VALIDITY after
+    // the simulated/replay/hardware position routes have converged.
+    fragColor = TDOutputSwizzle(vec4(worldPosition, sensor.a));
 }
+''',
+    "sensor_validity": r'''// CONTRACT: SENSOR_POSITION + MASK + CONFIDENCE -> valid SENSOR_POSITION
+out vec4 fragColor;
+
+void main()
+{
+    vec2 uv = vUV.st;
+    vec4 sensor = texture(sTD2DInputs[0], uv);
+    float mask = clamp(texture(sTD2DInputs[1], uv).r, 0.0, 1.0);
+    float confidence = clamp(texture(sTD2DInputs[2], uv).r, 0.0, 1.0);
+    fragColor = TDOutputSwizzle(vec4(sensor.rgb, sensor.a * mask * confidence));
+}
+''',
+    "interaction_field": r'''// CONTRACT: POSITION + calibrated SENSOR_POSITION -> INTERACTION force + occupancy
+out vec4 fragColor;
 
 void main()
 {
     vec2 uv = vUV.st;
     vec4 point = texture(sTD2DInputs[0], uv);
-    float occupancy = texture(sTD2DInputs[1], uv).r;
-    vec2 radial = uv - vec2(0.5);
-    vec3 force = vec3(radial * (1.8 + hash21(uv) * 0.4), 0.35) * occupancy;
-    force *= point.a;
+    const float interactionRadiusMetres = 0.55; // FLEXGPU_INTERACTION_RADIUS
+    const float forceGain = 1.0; // FLEXGPU_FORCE_GAIN
+    // Bounded 8x8 occupancy primitives are sampled across the full sensor,
+    // not at the generated point's source UV. This is a practical stock-TD
+    // approximation to a low-resolution world-space occupancy/SDF volume.
+    const int occupancyGridSize = 8; // FLEXGPU_OCCUPANCY_GRID_SIZE
+    vec3 accumulatedForce = vec3(0.0);
+    float combinedOccupancy = 0.0;
+    for (int y = 0; y < occupancyGridSize; ++y) {
+        for (int x = 0; x < occupancyGridSize; ++x) {
+            vec2 sensorUV = (vec2(float(x), float(y)) + 0.5) /
+                            float(occupancyGridSize);
+            vec4 sensor = texture(sTD2DInputs[1], sensorUV);
+            vec3 delta = point.rgb - sensor.rgb;
+            float distanceMetres = length(delta);
+            float influence = point.a * sensor.a *
+                (1.0 - smoothstep(0.0, interactionRadiusMetres, distanceMetres));
+            vec3 direction = distanceMetres > 1e-5
+                ? delta / distanceMetres : vec3(0.0, 0.0, 1.0);
+            accumulatedForce += direction * influence;
+            combinedOccupancy = max(combinedOccupancy, influence);
+        }
+    }
+    vec3 force = accumulatedForce * max(0.0, forceGain) /
+                 float(occupancyGridSize);
+    fragColor = TDOutputSwizzle(vec4(force, combinedOccupancy));
+}
+''',
+    "interaction_smoothing": r'''// CONTRACT: INTERACTION + HISTORY -> low-latency smoothed INTERACTION
+out vec4 fragColor;
+
+void main()
+{
+    const float interactionSmoothing = 0.35; // FLEXGPU_INTERACTION_SMOOTHING
+    vec2 uv = vUV.st;
+    vec4 current = texture(sTD2DInputs[0], uv);
+    vec4 history = texture(sTD2DInputs[1], uv);
+    float amount = clamp(interactionSmoothing, 0.0, 0.92);
+    // Keep attack responsive and release slightly faster than attack. This
+    // removes low-rate sensor judder without leaving a delayed interaction
+    // ghost after the audience moves away.
+    float attackBlend = mix(1.0, 0.20, amount);
+    float releaseBlend = mix(1.0, 0.55, amount);
+    float blend = current.a >= history.a ? attackBlend : releaseBlend;
+    vec3 force = mix(history.rgb, current.rgb, blend);
+    float occupancy = mix(history.a, current.a, blend);
     fragColor = TDOutputSwizzle(vec4(force, occupancy));
 }
 ''',
-    "temporal_persistence": r'''// CONTRACT: POSITION + HISTORY + INTERACTION -> PERSISTENT_POSITION
+    "interaction_debug": r'''// CONTRACT: INTERACTION -> display-only signed force/occupancy color
+out vec4 fragColor;
+
+void main()
+{
+    vec4 interaction = texture(sTD2DInputs[0], vUV.st);
+    float occupancy = clamp(interaction.a, 0.0, 1.0);
+    float magnitude = length(interaction.rgb);
+    float forceVisible = smoothstep(0.0001, 0.03, magnitude);
+    float presence = clamp(max(occupancy, magnitude * 12.0), 0.0, 1.0);
+    vec3 occupancyColor = vec3(0.05, 0.80, 1.00);
+    vec3 directionColor = 0.5 + 0.5 *
+        clamp(interaction.rgb * 12.0, vec3(-1.0), vec3(1.0));
+    vec3 color = mix(occupancyColor, directionColor, 0.65 * forceVisible) *
+                 presence;
+    fragColor = TDOutputSwizzle(vec4(clamp(color, 0.0, 1.0), 1.0));
+}
+''',
+    "temporal_observation": r'''// CONTRACT: POSITION + CONFIDENCE + FRAME_CONTROL -> TEMPORAL_OBSERVATION
+out vec4 fragColor;
+
+void main()
+{
+    vec2 uv = vUV.st;
+    vec4 current = texture(sTD2DInputs[0], uv);
+    float inputConfidence = clamp(texture(sTD2DInputs[1], uv).r, 0.0, 1.0);
+    // R=new-frame one-cook pulse, G=bounded dt seconds, B=source valid,
+    // A=maximum carried age seconds.
+    vec4 control = texture(sTD2DInputs[2], vec2(0.5));
+    float hasCurrent = step(0.001, current.a) * step(0.001, inputConfidence) *
+                       step(0.5, control.r) * step(0.5, control.b);
+    fragColor = TDOutputSwizzle(vec4(inputConfidence,
+                                     clamp(control.g, 0.0, 0.25),
+                                     hasCurrent,
+                                     max(0.05, control.a)));
+}
+''',
+    "temporal_state": r'''// CONTRACT: TEMPORAL_OBSERVATION + STATE_HISTORY -> TEMPORAL_STATE
+out vec4 fragColor;
+
+void main()
+{
+    vec2 uv = vUV.st;
+    // Observation pre-resolves POSITION + CONFIDENCE + FRAME_CONTROL so this
+    // and every other stock GLSL TOP remains within TD 2025's three inputs.
+    vec4 observation = texture(sTD2DInputs[0], uv);
+    vec4 history = texture(sTD2DInputs[1], uv);
+    const float confidenceDecay = 0.985; // FLEXGPU_CONFIDENCE_DECAY
+    float inputConfidence = observation.r;
+    float deltaSeconds = observation.g;
+    float hasCurrent = observation.b;
+    float maximumAgeSeconds = observation.a;
+    float ageStep = deltaSeconds / maximumAgeSeconds;
+    float age = mix(min(1.0, history.g + ageStep), 0.0, hasCurrent);
+    float timeBasedRetention = pow(clamp(confidenceDecay, 0.0, 1.0),
+                                   deltaSeconds * 60.0);
+    float carriedConfidence = history.r * timeBasedRetention *
+                              (1.0 - step(1.0, age));
+    float confidence = max(hasCurrent * inputConfidence, carriedConfidence);
+    float alive = step(0.001, confidence);
+    fragColor = TDOutputSwizzle(vec4(confidence, age, hasCurrent, alive));
+}
+''',
+    "temporal_advect": r'''// CONTRACT: HISTORY + INTERACTION + FRAME_CONTROL -> ADVECTED_HISTORY
+out vec4 fragColor;
+
+void main()
+{
+    vec2 uv = vUV.st;
+    vec4 history = texture(sTD2DInputs[0], uv);
+    vec4 interaction = texture(sTD2DInputs[1], uv);
+    vec4 control = texture(sTD2DInputs[2], vec2(0.5));
+    // Force is metres/second. Clamp dt so a debugger pause cannot launch the
+    // world when cooking resumes.
+    float motionDt = min(max(control.g, 0.0), 1.0 / 15.0);
+    float historyAlive = step(0.001, history.a);
+    vec3 carried = history.rgb + interaction.rgb * motionDt * historyAlive;
+    fragColor = TDOutputSwizzle(vec4(carried, history.a));
+}
+''',
+    "temporal_persistence": r'''// CONTRACT: POSITION + ADVECTED_HISTORY + TEMPORAL_STATE -> PERSISTENT_POSITION
 out vec4 fragColor;
 
 void main()
@@ -113,17 +319,41 @@ void main()
     vec2 uv = vUV.st;
     vec4 current = texture(sTD2DInputs[0], uv);
     vec4 history = texture(sTD2DInputs[1], uv);
-    vec4 interaction = texture(sTD2DInputs[2], uv);
-    const float persistenceDecay = 0.985;
+    vec4 state = texture(sTD2DInputs[2], uv);
     const float newFrameBlend = 0.36;
-    float hasCurrent = step(0.5, current.a);
+    float hasCurrent = step(0.001, current.a) * state.b;
     float hasHistory = step(0.001, history.a);
-    vec3 carried = history.rgb + interaction.rgb * 0.006 * history.a;
     // Seed immediately on the first valid frame; low-pass only once history exists.
-    float blend = hasCurrent * mix(1.0, newFrameBlend, hasHistory);
-    vec3 position = mix(carried, current.rgb, blend);
-    float activity = max(current.a, history.a * persistenceDecay);
+    float blend = hasCurrent * mix(1.0, newFrameBlend * state.r, hasHistory);
+    vec3 position = mix(history.rgb, current.rgb, blend);
+    float currentActivity = current.a * state.b;
+    // state.r is the absolute confidence retained since the last accepted
+    // frame. Multiplying it into feedback alpha would reapply all prior decay
+    // on every cook, collapsing held 5-10 Hz frames super-exponentially.
+    // Clamp the carried occupancy to that absolute envelope instead: this
+    // applies decay once while state.a still enforces the configured lifetime.
+    float carriedActivity = min(history.a, state.r);
+    float activity = state.a * max(currentActivity, carriedActivity);
     fragColor = TDOutputSwizzle(vec4(position, activity));
+}
+''',
+    "temporal_color": r'''// CONTRACT: COLOR + COLOR_HISTORY + TEMPORAL_STATE -> PERSISTENT_COLOR
+out vec4 fragColor;
+
+void main()
+{
+    vec2 uv = vUV.st;
+    vec4 currentColor = texture(sTD2DInputs[0], uv);
+    vec4 historyColor = texture(sTD2DInputs[1], uv);
+    vec4 state = texture(sTD2DInputs[2], uv);
+    const float newColorBlend = 0.42;
+    // state.b already contains the position-valid, confidence, source-valid,
+    // and one-cook new-frame decision from TEMPORAL_OBSERVATION.
+    float hasCurrent = state.b;
+    float hasHistory = step(0.001, historyColor.a);
+    float blend = hasCurrent * mix(1.0, newColorBlend * state.r, hasHistory);
+    vec3 color = mix(historyColor.rgb, currentColor.rgb, blend);
+    fragColor = TDOutputSwizzle(vec4(color, state.r));
 }
 ''',
     "fog_completion": r'''// CONTRACT: PERSISTENT_POSITION + COLOR -> FOG_COLOR
@@ -139,18 +369,21 @@ float hash21(vec2 p)
 void main()
 {
     const float fogDensity = 0.35; // FLEXGPU_FOG_DENSITY
+    const float disocclusionRadius = 2.0; // FLEXGPU_DISOCCLUSION_RADIUS
+    const float fogNoiseAmount = 0.50; // FLEXGPU_FOG_NOISE
     vec2 uv = vUV.st;
     vec4 position = texture(sTD2DInputs[0], uv);
     vec4 source = texture(sTD2DInputs[1], uv);
     vec2 texel = 1.0 / vec2(textureSize(sTD2DInputs[0], 0));
-    float nearby = max(max(texture(sTD2DInputs[0], uv + vec2(texel.x, 0.0)).a,
-                           texture(sTD2DInputs[0], uv - vec2(texel.x, 0.0)).a),
-                       max(texture(sTD2DInputs[0], uv + vec2(0.0, texel.y)).a,
-                           texture(sTD2DInputs[0], uv - vec2(0.0, texel.y)).a));
+    vec2 radiusTexel = texel * max(1.0, disocclusionRadius);
+    float nearby = max(max(texture(sTD2DInputs[0], uv + vec2(radiusTexel.x, 0.0)).a,
+                           texture(sTD2DInputs[0], uv - vec2(radiusTexel.x, 0.0)).a),
+                       max(texture(sTD2DInputs[0], uv + vec2(0.0, radiusTexel.y)).a,
+                           texture(sTD2DInputs[0], uv - vec2(0.0, radiusTexel.y)).a));
     float disocclusion = nearby * (1.0 - position.a);
     float noiseFog = smoothstep(0.30, 0.90, hash21(floor(uv * 420.0)));
-    float fogBase = disocclusion * (0.45 + noiseFog * 0.50) +
-                    (1.0 - position.a) * noiseFog * 0.12;
+    float fogBase = disocclusion * (0.45 + noiseFog * fogNoiseAmount) +
+                    (1.0 - position.a) * noiseFog * 0.12 * fogNoiseAmount;
     float fog = clamp(fogBase * max(0.0, fogDensity) / 0.35, 0.0, 1.0);
     vec3 fogColor = mix(vec3(0.025, 0.055, 0.085),
                         vec3(0.20, 0.48, 0.62), noiseFog);
@@ -179,10 +412,20 @@ void main()
     float radius2 = dot(q, q);
     float shell = sqrt(max(0.0, 1.0 - min(radius2, 1.0)));
     float grain = hash21(floor(uv * 512.0));
-    vec3 generated = vec3(q.x * 1.35, -q.y, -1.45 - shell * 0.85);
+    // Vary depth while unprojecting from the same source UV. This keeps the
+    // procedural surface behind the missing pixel instead of sliding it into
+    // a different screen region and opening a second, artificial black hole.
+    float generatedDepth = 1.45 + shell * 0.85;
+    const float generatedFocal = 0.86602540378; // 60-degree vertical FOV
+    vec3 generated = vec3((uv.x - 0.5) * generatedDepth / generatedFocal,
+                          (uv.y - 0.5) * generatedDepth / generatedFocal,
+                          -generatedDepth);
     generated += (grain - 0.5) * vec3(0.035, 0.035, 0.12);
     generated += interaction.rgb * 0.035;
-    float generatedActive = (1.0 - step(1.0, radius2)) * step(0.16, grain);
+    // Invalid depth can occur anywhere in the rectangular source image,
+    // especially in sky and reflective areas. Keep the backfill rectangular;
+    // a circular activation mask creates a visible coloured dome in OUT_COLOR.
+    float generatedActive = 1.0;
     float useMeasured = step(0.5, measured.a);
     vec3 position = mix(generated, measured.rgb, useMeasured);
     float activity = max(measured.a, generatedActive * (1.0 - measured.a));
@@ -200,10 +443,10 @@ void main()
     vec4 source = texture(sTD2DInputs[2], uv);
     float generated = (1.0 - originalPosition.a) * position.a;
     float bands = 0.5 + 0.5 * sin(position.z * 7.0 + position.x * 3.0);
-    vec3 palette = mix(vec3(0.055, 0.12, 0.20), vec3(0.78, 0.30, 0.16), bands);
-    // Interaction is already folded into PROCEDURAL_POSITION upstream.
-    palette += min(length(position.rgb - originalPosition.rgb), 1.0) *
-               vec3(0.12, 0.22, 0.32);
+    // Preserve the generated image colour in invalid-depth regions. A subtle
+    // luminance modulation still identifies procedural geometry without
+    // painting a blue/pink overlay over the source image.
+    vec3 palette = source.rgb * mix(0.88, 1.0, bands);
     vec3 color = mix(source.rgb, palette, generated);
     fragColor = TDOutputSwizzle(vec4(color, position.a));
 }
@@ -225,23 +468,164 @@ void main()
     fragColor = TDOutputSwizzle(vec4(color, alpha));
 }
 ''',
-    "installation_grade": r'''// CONTRACT: POINT_RENDER + FOG_PLATE -> INSTALLATION
+    "installation_grade": r'''// CONTRACT: POINT_RENDER + FOG_PLATE -> view-aware INSTALLATION
+out vec4 fragColor;
+
+float hash21(vec2 p)
+{
+    p = fract(p * vec2(173.31, 419.17));
+    p += dot(p, p + 31.73);
+    return fract(p.x * p.y);
+}
+
+void main()
+{
+    const float viewFogDensity = 0.35; // FLEXGPU_VIEW_FOG_DENSITY
+    const float viewFogRadius = 2.0; // FLEXGPU_VIEW_FOG_RADIUS
+    vec2 uv = vUV.st;
+    vec4 points = texture(sTD2DInputs[0], uv);
+    vec4 fog = texture(sTD2DInputs[1], uv);
+    vec2 texel = 1.0 / vec2(textureSize(sTD2DInputs[0], 0));
+    vec2 d = texel * max(1.0, viewFogRadius);
+    float neighbours = max(max(texture(sTD2DInputs[0], uv + vec2(d.x, 0.0)).a,
+                               texture(sTD2DInputs[0], uv - vec2(d.x, 0.0)).a),
+                           max(texture(sTD2DInputs[0], uv + vec2(0.0, d.y)).a,
+                               texture(sTD2DInputs[0], uv - vec2(0.0, d.y)).a));
+    float edgeHole = neighbours * (1.0 - points.a);
+    float grain = 0.35 + 0.65 * hash21(floor(uv * vec2(textureSize(sTD2DInputs[0], 0)) / 3.0));
+    float viewFog = clamp(edgeHole * grain * viewFogDensity / 0.35, 0.0, 1.0);
+    vec2 p = uv * 2.0 - 1.0;
+    float vignette = smoothstep(1.35, 0.24, dot(p, p));
+    vec3 edgeColor = mix(vec3(0.018, 0.045, 0.07), fog.rgb, 0.65);
+    // Never add the whole completion colour plate behind a camera render.
+    // That produced a stretched, dark duplicate of the source in every
+    // installation and triple-surface view. Use it only as the colour of
+    // local disocclusion fog around actual point silhouettes.
+    vec3 color = points.rgb + edgeColor * viewFog;
+    float ambientFog = (1.0 - points.a) * grain *
+                       clamp(viewFogDensity / 0.35, 0.0, 2.0) * 0.018;
+    color += vec3(0.025, 0.045, 0.070) * ambientFog;
+    color = color / (1.0 + color); // inexpensive tone map
+    color *= mix(0.84, 1.0, vignette);
+    fragColor = TDOutputSwizzle(vec4(color, 1.0));
+}
+''',
+    "panoramic_coverage": r'''// CONTRACT: WRAP POINT_RENDER -> procedural atmospheric coverage
+out vec4 fragColor;
+
+float hash21(vec2 p)
+{
+    p = fract(p * vec2(197.17, 431.39));
+    p += dot(p, p + 37.23);
+    return fract(p.x * p.y);
+}
+
+void main()
+{
+    const float wrapCoverage = 0.55; // FLEXGPU_WRAP_COVERAGE
+    const float wrapNoise = 0.42; // FLEXGPU_WRAP_NOISE
+    const float wrapPanelIndex = 1.0; // FLEXGPU_WRAP_PANEL_INDEX
+    vec2 uv = vUV.st;
+    vec4 points = texture(sTD2DInputs[0], uv);
+    vec2 texel = 1.0 / vec2(textureSize(sTD2DInputs[0], 0));
+
+    // A wider neighbourhood extends only the atmosphere surrounding real
+    // points. It never reprojects or stretches the generated RGB image.
+    float nearby = 0.0;
+    for (int ring = 1; ring <= 4; ++ring) {
+        vec2 d = texel * float(ring * 3);
+        nearby = max(nearby, texture(sTD2DInputs[0], uv + vec2(d.x, 0.0)).a);
+        nearby = max(nearby, texture(sTD2DInputs[0], uv - vec2(d.x, 0.0)).a);
+        nearby = max(nearby, texture(sTD2DInputs[0], uv + vec2(0.0, d.y)).a);
+        nearby = max(nearby, texture(sTD2DInputs[0], uv - vec2(0.0, d.y)).a);
+    }
+
+    // The panel index turns three local UV domains into one 3:1 panorama, so
+    // low-frequency noise does not restart at every projector seam.
+    vec2 panoramaUV = vec2((uv.x + wrapPanelIndex) / 3.0, uv.y);
+    float coarse = hash21(floor(panoramaUV * vec2(180.0, 108.0)));
+    float fine = hash21(floor(panoramaUV * vec2(720.0, 405.0)));
+    float grain = mix(0.72, mix(coarse, fine, 0.35),
+                      clamp(wrapNoise, 0.0, 1.0));
+    float horizon = exp(-pow((uv.y - 0.46) * 2.7, 2.0));
+    float upperMist = smoothstep(0.94, 0.45, uv.y);
+    float empty = 1.0 - step(0.002, points.a);
+    float localHaze = empty * nearby * (0.18 + 0.36 * grain);
+    float proceduralMist = empty *
+        (0.18 + 0.28 * horizon + 0.10 * upperMist) *
+        (0.72 + 0.28 * grain);
+    float coverage = clamp(max(localHaze, proceduralMist) *
+                           max(0.0, wrapCoverage), 0.0, 0.55);
+
+    // A low, continuous atmospheric floor keeps an empty side wall from
+    // reading as a failed black projector. It is generated in panorama space
+    // and remains intentionally abstract: no generated RGB pixels are copied,
+    // mirrored, or stretched into the disoccluded region.
+    float panoramaWave = 0.5 + 0.5 *
+        sin((panoramaUV.x * 2.0 + panoramaUV.y * 0.35) * 6.2831853);
+    float continuousFill = empty * clamp(wrapCoverage, 0.0, 1.0) *
+        (0.30 + 0.42 * horizon + 0.12 * upperMist) *
+        (0.76 + 0.24 * panoramaWave);
+    float dust = empty * smoothstep(0.82, 0.98, fine) *
+        (0.05 + 0.12 * horizon) * clamp(wrapNoise, 0.0, 1.0);
+    vec3 coolMist = vec3(0.055, 0.065, 0.075);
+    vec3 warmMist = vec3(0.180, 0.135, 0.095);
+    vec3 mistColor = mix(coolMist, warmMist,
+                         horizon * (0.38 + 0.32 * panoramaWave));
+    vec3 color = points.rgb + mistColor *
+        (coverage * 0.95 + continuousFill * 0.82 + dust);
+    float alpha = max(points.a, max(coverage * 0.55,
+                                   continuousFill * 0.45));
+    fragColor = TDOutputSwizzle(vec4(color, alpha));
+}
+''',
+    "view_completion": r'''// CONTRACT: POINT_RENDER -> view-aware fog/thickness-completed VIEW
+out vec4 fragColor;
+
+float hash21(vec2 p)
+{
+    p = fract(p * vec2(217.13, 391.71));
+    p += dot(p, p + 27.19);
+    return fract(p.x * p.y);
+}
+
+void main()
+{
+    const float viewFogDensity = 0.35; // FLEXGPU_VIEW_FOG_DENSITY
+    const float viewFogRadius = 2.0; // FLEXGPU_VIEW_FOG_RADIUS
+    vec2 uv = vUV.st;
+    vec4 points = texture(sTD2DInputs[0], uv);
+    vec2 texel = 1.0 / vec2(textureSize(sTD2DInputs[0], 0));
+    vec2 d = texel * max(1.0, viewFogRadius);
+    float neighbours = max(max(texture(sTD2DInputs[0], uv + vec2(d.x, 0.0)).a,
+                               texture(sTD2DInputs[0], uv - vec2(d.x, 0.0)).a),
+                           max(texture(sTD2DInputs[0], uv + vec2(0.0, d.y)).a,
+                               texture(sTD2DInputs[0], uv - vec2(0.0, d.y)).a));
+    float edgeHole = neighbours * (1.0 - points.a);
+    float grain = 0.35 + 0.65 * hash21(floor(uv * vec2(textureSize(sTD2DInputs[0], 0)) / 3.0));
+    float fog = clamp(edgeHole * grain * viewFogDensity / 0.35, 0.0, 1.0);
+    vec3 fogColor = mix(vec3(0.012, 0.035, 0.060),
+                        vec3(0.10, 0.32, 0.42), grain);
+    vec3 color = points.rgb + fogColor * fog;
+    color = color / (1.0 + color);
+    fragColor = TDOutputSwizzle(vec4(color, 1.0));
+}
+''',
+    "transport_pack_geometry": r'''// CONTRACT: raw DEPTH + CONFIDENCE + MASK -> PACKED_GEOMETRY
 out vec4 fragColor;
 
 void main()
 {
     vec2 uv = vUV.st;
-    vec4 points = texture(sTD2DInputs[0], uv);
-    vec4 fog = texture(sTD2DInputs[1], uv);
-    vec2 p = uv * 2.0 - 1.0;
-    float vignette = smoothstep(1.35, 0.24, dot(p, p));
-    vec3 color = points.rgb + fog.rgb * fog.a * 0.32;
-    color = color / (1.0 + color); // inexpensive tone map
-    color *= mix(0.54, 1.0, vignette);
-    fragColor = TDOutputSwizzle(vec4(color, 1.0));
+    // Do not clamp/normalize raw depth: metres, millimetres, disparity and
+    // inverse depth remain in the calibration-declared encoding.
+    float rawDepth = texture(sTD2DInputs[0], uv).r;
+    float confidence = clamp(texture(sTD2DInputs[1], uv).r, 0.0, 1.0);
+    float mask = clamp(texture(sTD2DInputs[2], uv).r, 0.0, 1.0);
+    fragColor = TDOutputSwizzle(vec4(rawDepth, confidence, mask, 1.0));
 }
 ''',
-    "transport_pack_atlas": r'''// CONTRACT: RGB + DEPTH -> atomic RGBA16F ATLAS (left RGB, right depth)
+    "transport_pack_atlas": r'''// CONTRACT: RGB + PACKED_GEOMETRY -> atomic RGBA32F ATLAS
 out vec4 fragColor;
 
 void main()
@@ -253,8 +637,10 @@ void main()
         fragColor = TDOutputSwizzle(vec4(color.rgb, 1.0));
     } else {
         vec2 sourceUV = vec2((uv.x - 0.5) * 2.0, uv.y);
-        float depth = clamp(texture(sTD2DInputs[1], sourceUV).r, 0.0, 1.0);
-        fragColor = TDOutputSwizzle(vec4(depth, depth, depth, 1.0));
+        // PACKED_GEOMETRY keeps rawDepth, confidence, mask in RGB so all four
+        // image planes still cross the transport boundary in one atlas cook.
+        vec4 geometry = texture(sTD2DInputs[1], sourceUV);
+        fragColor = TDOutputSwizzle(vec4(geometry.rgb, 1.0));
     }
 }
 ''',
@@ -268,17 +654,436 @@ void main()
     fragColor = TDOutputSwizzle(vec4(color.rgb, 1.0));
 }
 ''',
-    "transport_unpack_depth": r'''// CONTRACT: atomic ATLAS -> normalized DEPTH (right half)
+    "transport_unpack_depth": r'''// CONTRACT: atomic ATLAS -> raw calibration-encoded DEPTH (right half R)
 out vec4 fragColor;
 
 void main()
 {
     vec2 sourceUV = vec2(0.5 + vUV.st.x * 0.5, vUV.st.y);
-    float depth = clamp(texture(sTD2DInputs[0], sourceUV).r, 0.0, 1.0);
+    float depth = texture(sTD2DInputs[0], sourceUV).r;
     fragColor = TDOutputSwizzle(vec4(depth, depth, depth, 1.0));
 }
 ''',
+    "transport_unpack_confidence": r'''// CONTRACT: atomic ATLAS -> CONFIDENCE (right half G)
+out vec4 fragColor;
+
+void main()
+{
+    vec2 sourceUV = vec2(0.5 + vUV.st.x * 0.5, vUV.st.y);
+    float confidence = clamp(texture(sTD2DInputs[0], sourceUV).g, 0.0, 1.0);
+    fragColor = TDOutputSwizzle(vec4(confidence, confidence, confidence, 1.0));
 }
+''',
+    "transport_unpack_mask": r'''// CONTRACT: atomic ATLAS -> validity MASK (right half B)
+out vec4 fragColor;
+
+void main()
+{
+    vec2 sourceUV = vec2(0.5 + vUV.st.x * 0.5, vUV.st.y);
+    float mask = clamp(texture(sTD2DInputs[0], sourceUV).b, 0.0, 1.0);
+    fragColor = TDOutputSwizzle(vec4(mask, mask, mask, 1.0));
+}
+''',
+    "moge2_unpack_rgb": r'''// CONTRACT: flexgpu-moge2-atlas/v1 -> exact inference RGB (left half)
+out vec4 fragColor;
+
+void main()
+{
+    vec2 sourceUV = vec2(vUV.st.x * 0.5, vUV.st.y);
+    vec4 color = texture(sTD2DInputs[0], sourceUV);
+    fragColor = TDOutputSwizzle(vec4(color.rgb, color.a));
+}
+''',
+    "moge2_unpack_depth": r'''// CONTRACT: flexgpu-moge2-atlas/v1 -> metric optical-Z DEPTH
+out vec4 fragColor;
+
+void main()
+{
+    vec2 sourceUV = vec2(0.5 + vUV.st.x * 0.5, vUV.st.y);
+    vec4 packed = texture(sTD2DInputs[0], sourceUV);
+    vec2 scaleBias = texelFetch(sTD2DInputs[1], ivec2(0, 0), 0).rg;
+    float highByte = floor(clamp(packed.r, 0.0, 1.0) * 255.0 + 0.5);
+    float lowByte = floor(clamp(packed.g, 0.0, 1.0) * 255.0 + 0.5);
+    float uint16Depth = highByte * 256.0 + lowByte;
+    float valid = float(uint16Depth > 0.0 && packed.b >= 0.5 && packed.a >= 0.5);
+    float metres = (uint16Depth * scaleBias.r + scaleBias.g) * valid;
+    fragColor = TDOutputSwizzle(vec4(metres, metres, metres, 1.0));
+}
+''',
+    "moge2_unpack_mask": r'''// CONTRACT: flexgpu-moge2-atlas/v1 -> binary validity MASK (right B)
+out vec4 fragColor;
+
+void main()
+{
+    vec2 sourceUV = vec2(0.5 + vUV.st.x * 0.5, vUV.st.y);
+    float mask = texture(sTD2DInputs[0], sourceUV).b >= 0.5 ? 1.0 : 0.0;
+    fragColor = TDOutputSwizzle(vec4(mask, mask, mask, 1.0));
+}
+''',
+    "moge2_unpack_confidence": r'''// CONTRACT: flexgpu-moge2-atlas/v1 -> binary confidence proxy (right A)
+out vec4 fragColor;
+
+void main()
+{
+    vec2 sourceUV = vec2(0.5 + vUV.st.x * 0.5, vUV.st.y);
+    float confidence = texture(sTD2DInputs[0], sourceUV).a >= 0.5 ? 1.0 : 0.0;
+    fragColor = TDOutputSwizzle(vec4(confidence, confidence, confidence, 1.0));
+}
+''',
+    "depth_anything_sensor_position": r'''// CONTRACT: packed sensor depth -> sensor-local XYZ metres
+out vec4 fragColor;
+
+void main()
+{
+    vec2 uv = vUV.st;
+    vec4 packed = texture(sTD2DInputs[0], uv);
+    // Constant TOPs premultiply RGB by alpha. These 1x1 TOPs carry data,
+    // so recover their authored RGB values before interpreting the channels.
+    vec4 depthCalibrationPacked = texelFetch(sTD2DInputs[1], ivec2(0, 0), 0);
+    vec4 intrinsicsPacked = texelFetch(sTD2DInputs[2], ivec2(0, 0), 0);
+    vec4 depthCalibration = vec4(
+        depthCalibrationPacked.rgb / max(abs(depthCalibrationPacked.a), 1e-6),
+        depthCalibrationPacked.a);
+    vec4 normalizedIntrinsics = vec4(
+        intrinsicsPacked.rgb / max(abs(intrinsicsPacked.a), 1e-6),
+        intrinsicsPacked.a);
+    float highByte = floor(clamp(packed.r, 0.0, 1.0) * 255.0 + 0.5);
+    float lowByte = floor(clamp(packed.g, 0.0, 1.0) * 255.0 + 0.5);
+    float uint16Depth = highByte * 256.0 + lowByte;
+    float metres = uint16Depth * depthCalibration.r + depthCalibration.g;
+    float valid = float(uint16Depth > 0.0 && packed.b >= 0.5 && packed.a > 0.0 &&
+                        metres >= depthCalibration.b && metres <= depthCalibration.a);
+    vec2 imageSize = vec2(textureSize(sTD2DInputs[0], 0));
+    float fx = max(1e-6, normalizedIntrinsics.r * imageSize.x);
+    float fy = max(1e-6, normalizedIntrinsics.g * imageSize.y);
+    float cx = normalizedIntrinsics.b * imageSize.x;
+    float cy = normalizedIntrinsics.a * imageSize.y;
+    // The Script TOP flips top-left worker bytes for TD. Convert vUV back to
+    // top-left image pixels for pinhole unprojection, then publish the stable
+    // FlexGPU camera convention: X right, Y up, Z backward.
+    vec2 pixel = vec2(uv.x * imageSize.x, (1.0 - uv.y) * imageSize.y);
+    vec3 sensorLocal = vec3((pixel.x - cx) * metres / fx,
+                            (cy - pixel.y) * metres / fy,
+                            -metres);
+    // A is binary occupancy here. OUT_MASK and OUT_CONFIDENCE are multiplied
+    // exactly once by the existing SENSOR_VALIDITY stage downstream.
+    fragColor = TDOutputSwizzle(vec4(sensorLocal * valid, valid));
+}
+''',
+    "depth_anything_sensor_mask": r'''// CONTRACT: packed sensor B -> binary mask
+out vec4 fragColor;
+
+void main()
+{
+    vec4 packed = texture(sTD2DInputs[0], vUV.st);
+    float highByte = floor(clamp(packed.r, 0.0, 1.0) * 255.0 + 0.5);
+    float lowByte = floor(clamp(packed.g, 0.0, 1.0) * 255.0 + 0.5);
+    float depth = highByte * 256.0 + lowByte;
+    float mask = (depth > 0.0 && packed.b >= 0.5 && packed.a > 0.0) ? 1.0 : 0.0;
+    fragColor = TDOutputSwizzle(vec4(mask, mask, mask, 1.0));
+}
+''',
+    "depth_anything_sensor_confidence": r'''// CONTRACT: packed sensor A -> confidence
+out vec4 fragColor;
+
+void main()
+{
+    vec4 packed = texture(sTD2DInputs[0], vUV.st);
+    float highByte = floor(clamp(packed.r, 0.0, 1.0) * 255.0 + 0.5);
+    float lowByte = floor(clamp(packed.g, 0.0, 1.0) * 255.0 + 0.5);
+    float depth = highByte * 256.0 + lowByte;
+    float valid = (depth > 0.0 && packed.b >= 0.5) ? 1.0 : 0.0;
+    float confidence = clamp(packed.a, 0.0, 1.0) * valid;
+    fragColor = TDOutputSwizzle(vec4(confidence, confidence, confidence, 1.0));
+}
+''',
+}
+
+
+MOGE2_SCRIPT_TOP_CALLBACKS = r'''# Script TOP callbacks; OP access stays on TouchDesigner's main thread.
+def onSetupParameters(scriptOp):
+    return
+
+def onPulse(par):
+    return
+
+def onCook(scriptOp):
+    module_dat = parent().op('bridge_runtime')
+    if module_dat is not None:
+        module_dat.module.on_script_top_cook(scriptOp)
+    return
+'''
+
+
+MOGE2_EXECUTE_CALLBACKS = r'''# Execute DAT callbacks; the runtime owns only this bridge.
+def onStart():
+    return
+
+def onCreate():
+    return
+
+def onFrameStart(frame):
+    module_dat = me.parent().op('bridge_runtime')
+    if module_dat is not None:
+        module_dat.module.tick(me.parent())
+    return
+
+def onExit():
+    module_dat = me.parent().op('bridge_runtime')
+    if module_dat is not None:
+        module_dat.module.stop(me.parent())
+    return
+'''
+
+
+DEPTH_ANYTHING_SCRIPT_TOP_CALLBACKS = r'''# Script TOP callback; OP access is main-thread only.
+def onSetupParameters(scriptOp):
+    return
+
+def onPulse(par):
+    return
+
+def onCook(scriptOp):
+    module_dat = parent().op('sensor_runtime')
+    if module_dat is not None:
+        module_dat.module.on_script_top_cook(scriptOp)
+    return
+'''
+
+
+DEPTH_ANYTHING_EXECUTE_CALLBACKS = r'''# Execute DAT callbacks for the replaceable sensor bridge.
+def onStart():
+    return
+
+def onCreate():
+    return
+
+def onFrameStart(frame):
+    module_dat = me.parent().op('sensor_runtime')
+    if module_dat is not None:
+        module_dat.module.tick(me.parent())
+    return
+
+def onExit():
+    module_dat = me.parent().op('sensor_runtime')
+    if module_dat is not None:
+        module_dat.module.stop(me.parent())
+    return
+'''
+
+
+SHOW_CONTROL_CALLBACKS = r'''# Parameter Execute DAT callbacks for public show controls.
+import re
+
+_FLOAT_PATTERN = r'[-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?'
+
+def _controls():
+    return parent()
+
+def _pipeline():
+    return parent().parent()
+
+def _set(node, name, value):
+    if node is None:
+        return False
+    try:
+        getattr(node.par, name).val = value
+        return True
+    except Exception:
+        try:
+            wanted = str(name).lower()
+            for parameter in node.pars():
+                if str(parameter.name).lower() == wanted:
+                    parameter.val = value
+                    return True
+        except Exception:
+            pass
+    return False
+
+def _value(name, fallback=None):
+    controls = _controls()
+    try:
+        return getattr(controls.par, name).eval()
+    except Exception:
+        try:
+            wanted = str(name).lower()
+            for parameter in controls.pars():
+                if str(parameter.name).lower() == wanted:
+                    return parameter.eval()
+        except Exception:
+            pass
+    return fallback
+
+def _patch_float(dat, symbol, marker, value):
+    if dat is None:
+        return False
+    pattern = (
+        r'(const\s+float\s+' + re.escape(symbol) + r'\s*=\s*)' +
+        _FLOAT_PATTERN + r'(\s*;\s*//\s*' + re.escape(marker) + r')')
+    replacement = r'\g<1>' + ('%.6g' % float(value)) + r'\g<2>'
+    updated, count = re.subn(pattern, replacement, str(dat.text), count=1)
+    if count == 1:
+        dat.text = updated
+        return True
+    return False
+
+def _apply_fog():
+    pipeline = _pipeline()
+    density = max(0.0, min(1.5, float(_value('Fogdensity', 0.35))))
+    _set(pipeline.op('COMPLETION'), 'Fogdensity', density)
+    _set(pipeline.op('INSTALLATION_OUTPUT'), 'Fogdensity', density)
+    _set(pipeline.op('TRIPLE_DISPLAY'), 'Fogdensity', density)
+    _set(pipeline.op('STEREO_PREVIEW'), 'Fogdensity', density)
+    _patch_float(pipeline.op('COMPLETION/fog_completion_PIXEL'),
+                 'fogDensity', 'FLEXGPU_FOG_DENSITY', density)
+    _patch_float(pipeline.op('INSTALLATION_OUTPUT/installation_grade_PIXEL'),
+                 'viewFogDensity', 'FLEXGPU_VIEW_FOG_DENSITY', density)
+    for mode in ('WRAP', 'ARTISTIC'):
+        for side in ('LEFT', 'CENTER', 'RIGHT'):
+            _patch_float(
+                pipeline.op('TRIPLE_DISPLAY/GRADE_%s_%s_PIXEL' % (mode, side)),
+                'viewFogDensity', 'FLEXGPU_VIEW_FOG_DENSITY', density)
+    for eye in ('LEFT', 'RIGHT'):
+        _patch_float(
+            pipeline.op('STEREO_PREVIEW/GRADE_%s_EYE_PIXEL' % eye),
+            'viewFogDensity', 'FLEXGPU_VIEW_FOG_DENSITY', density)
+
+def _apply_quality_profile():
+    controls = _controls()
+    profile = str(_value('Qualityprofile', '3080ti_16gb'))
+    presets = {
+        '3080ti_16gb': (384, 120000, 4.2, 5, 'Stream 512 / geometry 384 / 5 Hz'),
+        '4090': (512, 250000, 3.4, 10, 'Stream 512+ / geometry 512 / 10 Hz'),
+        '5090': (512, 262144, 3.0, 15, 'Stream 512+ / geometry 512 / 15 Hz'),
+    }
+    geometry, points, point_size, geometry_fps, hint = presets.get(
+        profile, presets['3080ti_16gb'])
+    _set(controls, 'Geometryresolution', geometry)
+    _set(controls, 'Pointbudget', points)
+    _set(controls, 'Pointsize', point_size)
+    _set(controls, 'Geometryfps', geometry_fps)
+    _set(controls, 'Profilehint', hint)
+    for name in ('Geometryresolution', 'Pointbudget', 'Pointsize', 'Geometryfps'):
+        apply_parameter(name)
+
+def _activate_geometry_bridge(provider):
+    pipeline = _pipeline()
+    adapter = pipeline.op('SOURCES/STREAMDIFFUSION_ADAPTER')
+    selected = str(provider).strip().lower()
+    bridge_name = (
+        'DEPTH_ANYTHING_GEOMETRY_BRIDGE'
+        if selected == 'depth_anything' else 'MOGE2_BRIDGE')
+    bridge = adapter.op(bridge_name) if adapter is not None else None
+    if bridge is None:
+        return False
+    _set(bridge, 'Enabled', True)
+    runtime_dat = bridge.op('bridge_runtime')
+    if runtime_dat is not None:
+        try:
+            runtime_dat.module.tick(bridge)
+        except Exception:
+            # A saved TOE can still be compiling its embedded module. The
+            # bridge's frame callback retries after compilation completes, and
+            # the external worker now waits for the listener instead of
+            # failing immediately.
+            pass
+    return True
+
+def _switch_runtime_geometry_contract(provider):
+    root = _pipeline().parent()
+    helpers = root.op('STARTUP/runtime_helpers') if root is not None else None
+    if helpers is None:
+        return False
+    try:
+        return bool(helpers.module.select_geometry_provider(root, provider))
+    except Exception:
+        # During a cold compile, startup/frame callbacks will finish loading
+        # runtime_helpers. Visual routing remains fail-closed until its strict
+        # metadata contract can be selected.
+        return False
+
+def apply_parameter(name):
+    pipeline = _pipeline()
+    key = str(name).lower()
+    if key == 'geometryprovider':
+        provider = _value('Geometryprovider', 'moge2')
+        _activate_geometry_bridge(provider)
+        _set(pipeline.op('SOURCES/STREAMDIFFUSION_ADAPTER'),
+             'Geometrysource', provider)
+        _switch_runtime_geometry_contract(provider)
+    elif key == 'displaymode':
+        _set(pipeline, 'Displaymode', _value('Displaymode', 'single'))
+    elif key == 'completionmode':
+        _set(pipeline.op('COMPLETION'), 'Mode',
+             _value('Completionmode', 'hybrid'))
+    elif key == 'fogdensity':
+        _apply_fog()
+    elif key == 'interactionstrength':
+        strength = max(0.0, min(2.0, float(_value('Interactionstrength', 0.35))))
+        _set(pipeline.op('SENSOR_INTERACTION'), 'Forcegain', strength)
+        _patch_float(pipeline.op('SENSOR_INTERACTION/interaction_field_PIXEL'),
+                     'forceGain', 'FLEXGPU_FORCE_GAIN', strength)
+    elif key == 'interactionsmoothing':
+        amount = max(0.0, min(0.92, float(_value('Interactionsmoothing', 0.35))))
+        _set(pipeline.op('SENSOR_INTERACTION'), 'Interactionsmoothing', amount)
+        _patch_float(pipeline.op('SENSOR_INTERACTION/INTERACTION_SMOOTH_PIXEL'),
+                     'interactionSmoothing',
+                     'FLEXGPU_INTERACTION_SMOOTHING', amount)
+    elif key == 'wrapyawdegrees':
+        _set(pipeline.op('POINT_RENDER'), 'Wrapyawdegrees',
+             float(_value('Wrapyawdegrees', 30.0)))
+    elif key == 'wrapfovdegrees':
+        _set(pipeline.op('POINT_RENDER'), 'Wrapfovdegrees',
+             float(_value('Wrapfovdegrees', 78.0)))
+    elif key in ('wrapcoverage', 'wrapnoise'):
+        parameter = 'Wrapcoverage' if key == 'wrapcoverage' else 'Wrapnoise'
+        symbol = 'wrapCoverage' if key == 'wrapcoverage' else 'wrapNoise'
+        marker = 'FLEXGPU_WRAP_COVERAGE' if key == 'wrapcoverage' else \
+                 'FLEXGPU_WRAP_NOISE'
+        value = max(0.0, min(1.0, float(_value(parameter, 0.4))))
+        _set(pipeline.op('TRIPLE_DISPLAY'), parameter, value)
+        for side in ('LEFT', 'CENTER', 'RIGHT'):
+            _patch_float(
+                pipeline.op('TRIPLE_DISPLAY/COVERAGE_WRAP_%s_PIXEL' % side),
+                symbol, marker, value)
+    elif key == 'qualityprofile':
+        _apply_quality_profile()
+    elif key == 'geometryresolution':
+        geometry = max(64, min(2048, int(_value('Geometryresolution', 384))))
+        _set(pipeline.op('RECONSTRUCTION'), 'Geometryresolution', geometry)
+        _set(_pipeline().parent().op('AI_PIPELINE'), 'Geometryresolution', geometry)
+    elif key == 'pointbudget':
+        points = max(1000, min(10000000, int(_value('Pointbudget', 120000))))
+        _set(pipeline.op('POINT_RENDER'), 'Maxpoints', points)
+        _set(_pipeline().parent().op('WORLD_CORE'), 'Pointbudget', points)
+    elif key == 'pointsize':
+        _set(pipeline.op('POINT_RENDER'), 'Pointsize',
+             max(0.25, min(128.0, float(_value('Pointsize', 4.2)))))
+    elif key == 'geometryfps':
+        fps = max(1, min(60, int(_value('Geometryfps', 5))))
+        for bridge_name in ('MOGE2_BRIDGE', 'DEPTH_ANYTHING_GEOMETRY_BRIDGE'):
+            bridge = pipeline.op(
+                'SOURCES/STREAMDIFFUSION_ADAPTER/' + bridge_name)
+            _set(bridge, 'Capturefps', fps)
+            _set(bridge, 'Profile', _value('Qualityprofile', '3080ti_16gb'))
+
+def apply_all():
+    for name in (
+        'Geometryprovider', 'Displaymode', 'Completionmode', 'Fogdensity',
+        'Interactionstrength', 'Interactionsmoothing', 'Wrapyawdegrees',
+        'Wrapfovdegrees', 'Wrapcoverage', 'Wrapnoise',
+        'Geometryresolution', 'Pointbudget', 'Pointsize', 'Geometryfps'):
+        apply_parameter(name)
+
+def onValueChange(par, prev):
+    apply_parameter(par.name)
+    return
+
+def onPulse(par):
+    if str(par.name).lower() == 'applyall':
+        apply_all()
+    return
+'''
 
 
 class BuildReport(object):
@@ -338,9 +1143,56 @@ def _child(parent, name):
         return None
 
 
+def _operator_type_name(node):
+    """Return TouchDesigner's canonical Python operator type when available."""
+
+    # OP.opType is the documented canonical name accepted by COMP.create(),
+    # for example ``oscinCHOP`` or ``baseCOMP``. Keep OPType as a compatibility
+    # alias for lightweight test/proxy objects used around TouchDesigner.
+    for attribute in ("opType", "OPType"):
+        try:
+            value = getattr(node, attribute)
+        except Exception:
+            continue
+        if value:
+            return str(value)
+    try:
+        value = node.__class__.__name__
+    except Exception:
+        value = ""
+    if any(str(value).lower().endswith(suffix) for suffix in
+           ("comp", "top", "chop", "sop", "dat", "mat", "pop")):
+        return str(value)
+    try:
+        operator_type = str(node.type)
+        family = str(node.family)
+    except Exception:
+        return ""
+    return operator_type + family
+
+
+def _operator_type_token(value):
+    return "".join(character for character in str(value).lower()
+                   if character.isalnum())
+
+
+def _operator_type_matches(node, expected):
+    actual = _operator_type_name(node)
+    return bool(actual and
+                _operator_type_token(actual) == _operator_type_token(expected))
+
+
 def _ensure(parent, type_name, name, report, optional=False):
     found = _child(parent, name)
     if found is not None:
+        if not _operator_type_matches(found, type_name):
+            actual = _operator_type_name(found) or "unverifiable operator type"
+            message = "%s already exists as %s; expected %s" % (
+                found.path, actual, type_name)
+            if optional:
+                report.warn(message)
+                return None
+            raise RuntimeError(message)
         report.reused.append(found.path)
         return found
     errors = []
@@ -399,6 +1251,42 @@ def _set(node, names, value):
         return False
 
 
+def _value(node, names, fallback=None):
+    if isinstance(names, str):
+        names = (names,)
+    parameter = _par(node, *names)
+    if parameter is None:
+        return fallback
+    try:
+        return parameter.eval()
+    except Exception:
+        try:
+            return parameter.val
+        except Exception:
+            return fallback
+
+
+def _patch_shader_float(dat, symbol, marker, value):
+    """Patch one marked GLSL float constant without changing other source."""
+
+    if dat is None:
+        return False
+    number = r"[-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?"
+    pattern = (
+        r"(const\s+float\s+" + re.escape(str(symbol)) + r"\s*=\s*)" +
+        number + r"(\s*;\s*//\s*" + re.escape(str(marker)) + r")")
+    try:
+        updated, count = re.subn(
+            pattern, r"\g<1>" + ("%.6g" % float(value)) + r"\g<2>",
+            str(dat.text), count=1)
+        if count == 1:
+            dat.text = updated
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _expr(node, names, expression):
     if isinstance(names, str):
         names = (names,)
@@ -408,6 +1296,20 @@ def _expr(node, names, expression):
     try:
         parameter.expr = expression
         return True
+    except Exception:
+        return False
+
+
+def _set_sequence_blocks(node, name, minimum):
+    """Ensure a built-in sequential parameter has at least ``minimum`` blocks."""
+
+    if node is None:
+        return False
+    try:
+        sequence = getattr(node.seq, name)
+        if sequence.numBlocks < minimum:
+            sequence.numBlocks = minimum
+        return sequence.numBlocks >= minimum
     except Exception:
         return False
 
@@ -447,6 +1349,25 @@ def _connect(src, dst, dst_index=0, src_index=0, report=None, replace=False):
         return False
 
 
+def _disconnect_input(dst, dst_index, report=None):
+    """Clear one managed input while tolerating TouchDesigner API variants."""
+    if dst is None:
+        return False
+    try:
+        dst.setInput(dst_index, None)
+        return True
+    except Exception:
+        pass
+    try:
+        dst.inputConnectors[dst_index].disconnect()
+        return True
+    except Exception as exc:
+        if report is not None:
+            report.warn("Could not clear %s input %s: %s" %
+                        (dst.path, dst_index, exc))
+        return False
+
+
 def _text(parent, name, body, report):
     dat = _ensure(parent, "textDAT", name, report)
     try:
@@ -483,6 +1404,13 @@ def _page(comp, name):
 def _custom(comp, page, kind, name, default, menu=None, label=None):
     existing = _par(comp, name)
     if existing is not None:
+        if menu and kind == "Menu":
+            try:
+                existing.menuNames = list(menu)
+                existing.menuLabels = [
+                    str(value).replace("_", " ").title() for value in menu]
+            except Exception:
+                pass
         return existing
     if page is None:
         return None
@@ -518,11 +1446,18 @@ def _in_top(parent, name, index, report):
 def _out_top(parent, name, source, index, report):
     node = _ensure(parent, "outTOP", name, report)
     _set(node, ("connectorder", "outputindex", "index"), index)
-    _connect(source, node, report=report)
+    # Out TOPs are part of the managed component contract.  Replacing their
+    # source is required when an older project is rebuilt after a stage rename.
+    _connect(source, node, report=report, replace=True)
     return node
 
 
 def _glsl(parent, name, shader_name, inputs, report, float_output=False):
+    # A GLSL TOP in the supported TouchDesigner 2025 build exposes three
+    # wired inputs. Keep this guard beside node creation so a future shader
+    # cannot silently build an operator that compiles only as a GLSL Multi TOP.
+    if len(inputs) > 3:
+        raise ValueError("GLSL TOP %s exceeds the three-input limit" % name)
     source = _text(parent, "%s_PIXEL" % name, SHADERS[shader_name], report)
     node = _ensure(parent, "glslTOP", name, report)
     _set(node, ("pixeldat", "pixelshader"), source.path)
@@ -531,8 +1466,20 @@ def _glsl(parent, name, shader_name, inputs, report, float_output=False):
         _set(node, "format", "rgba32float")
     else:
         _set(node, "format", "rgba16float")
+    # This managed shader owns its complete input map. Replacing declared
+    # inputs and clearing surplus connectors is required for idempotent
+    # upgrades from earlier builds whose shaders used four or five inputs.
     for index, input_node in enumerate(inputs):
-        _connect(input_node, node, index, 0, report)
+        _connect(input_node, node, index, 0, report, replace=True)
+    try:
+        connector_count = len(node.inputConnectors)
+    except Exception:
+        try:
+            connector_count = len(node.inputs)
+        except Exception:
+            connector_count = len(inputs)
+    for index in range(len(inputs), connector_count):
+        _disconnect_input(node, index, report)
     return node
 
 
@@ -545,6 +1492,469 @@ def _set_resolution(node, width, height):
     _set(node, ("resolutionh", "resh"), height)
 
 
+def _embedded_runtime_source(filename, label, report):
+    """Load a runtime and bind this checkout's public ``src`` as a cold hint."""
+
+    touchdesigner_dir = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(touchdesigner_dir, filename)
+    try:
+        size = os.path.getsize(path)
+        if size < 1 or size > 512 * 1024:
+            raise ValueError("%s runtime source is outside the size limit" % label)
+        with open(path, "r", encoding="utf-8") as stream:
+            source = stream.read()
+        marker = '_EMBEDDED_FLEXGPU_SRC = ""'
+        if source.count(marker) != 1:
+            raise ValueError("%s runtime source hint marker is invalid" % label)
+        src_hint = os.path.abspath(os.path.join(touchdesigner_dir, "..", "src"))
+        if not os.path.isfile(os.path.join(src_hint, "flexgpu", "worldbus.py")):
+            raise ValueError("%s runtime source tree is incomplete" % label)
+        return source.replace(
+            marker,
+            "_EMBEDDED_FLEXGPU_SRC = %r" % src_hint,
+            1,
+        )
+    except Exception as exc:
+        report.warn("%s runtime could not be embedded: %s" % (label, exc))
+        return ("def tick(bridge_comp=None):\n    return None\n\n"
+                "def stop(bridge_comp=None):\n    return None\n\n"
+                "def on_script_top_cook(script_op):\n    return None\n")
+
+
+def _moge2_runtime_source(report):
+    """Load the import-safe bridge module that will be embedded in a Text DAT."""
+
+    return _embedded_runtime_source(
+        "moge2_bridge_runtime.py",
+        "MoGe-2 bridge",
+        report,
+    )
+
+
+def _build_moge2_bridge(
+        adapter, input_rgb, report, name="MOGE2_BRIDGE", provider="moge2",
+        input_tcp=9211, input_udp=9210, result_tcp=9221, result_udp=9220):
+    """Build a default-off generated-image geometry bridge.
+
+    The MoGe and Depth Anything providers intentionally share the same
+    synchronized atlas decoder but use distinct provider identities and ports.
+    No model runtime is imported into TouchDesigner.
+    """
+
+    is_depth_anything = provider == "depth_anything"
+    title = "Depth Anything Geometry" if is_depth_anything else "MoGe-2"
+    comp = _ensure(adapter, "baseCOMP", name, report)
+    _style(
+        comp, -350 if is_depth_anything else 360,
+        -50 if is_depth_anything else 180,
+        (0.20, 0.48, 0.42) if is_depth_anything else (0.20, 0.39, 0.56),
+        "Opt-in %s worker: newest RGB -> synchronized RGB/pseudo-metric depth"
+        % title,
+        330, 135)
+    page = _page(comp, title + " Bridge")
+    _custom(comp, page, "Toggle", "Enabled", False)
+    provider_par = _custom(
+        comp, page, "Str", "Provider", provider, label="Geometry Provider")
+    _set(comp, provider_par.name if provider_par is not None else "Provider", provider)
+    _custom(comp, page, "Menu", "Profile", "3080ti_16gb",
+            ("3080ti_16gb", "4090", "5090"))
+    _custom(comp, page, "Str", "Workerhost", "127.0.0.1",
+            label="Worker Host")
+    _custom(comp, page, "Int", "Workerinputtcp", input_tcp,
+            label="Worker Input TCP")
+    _custom(comp, page, "Int", "Workerinputudp", input_udp,
+            label="Worker Input UDP")
+    _custom(comp, page, "Str", "Resultbindhost", "127.0.0.1",
+            label="Result Bind Host")
+    _custom(comp, page, "Int", "Resulttcp", result_tcp,
+            label="Result TCP")
+    _custom(comp, page, "Int", "Resultudp", result_udp,
+            label="Result UDP")
+    _set(comp, "Workerinputtcp", input_tcp)
+    _set(comp, "Workerinputudp", input_udp)
+    _set(comp, "Resulttcp", result_tcp)
+    _set(comp, "Resultudp", result_udp)
+    _custom(comp, page, "Int", "Capturefps", 5,
+            label="Geometry Capture FPS")
+    _custom(comp, page, "Toggle", "Flipvertical", True,
+            label="TD / Image Vertical Flip")
+    _custom(comp, page, "Toggle", "Resultvalid", False,
+            label="Synchronized Result Valid")
+    _custom(comp, page, "Str", "Generationid", "streamdiffusion",
+            label="Prompt Generation ID")
+    _custom(comp, page, "Int", "Sourceframeid", 0,
+            label="Source Frame ID")
+
+    rgb_in = _in_top(comp, "IN_RGB", 0, report)
+    _connect(input_rgb, comp, 0, 0, report, replace=False)
+
+    runtime_dat = _text(comp, "bridge_runtime", _moge2_runtime_source(report), report)
+    script_callbacks = _text(
+        comp, "script_top_callbacks", MOGE2_SCRIPT_TOP_CALLBACKS, report)
+    atlas = _ensure(comp, "scriptTOP", "RESULT_ATLAS", report)
+    _set(atlas, ("callbacks", "callbacksdat"), script_callbacks.path)
+    # Script TOPs in TouchDesigner 2025.32820 do not expose ``alwayscook``.
+    # The Execute DAT stages each immutable result and calls cook(force=True);
+    # its callback must confirm the exact uploaded key before routes go valid.
+    _set_resolution(atlas, 2, 1)
+    _set(atlas, "format", "rgba8fixed")
+
+    execute = _ensure(comp, "executeDAT", "bridge_callbacks", report,
+                      optional=True)
+    if execute is not None:
+        try:
+            execute.text = MOGE2_EXECUTE_CALLBACKS
+        except Exception:
+            pass
+        _set(execute, ("start", "onstart"), True)
+        _set(execute, ("create", "oncreate"), True)
+        _set(execute, ("framestart", "onframestart"), True)
+        _set(execute, ("exit", "onexit"), True)
+        _set(execute, "active", True)
+    else:
+        _text(comp, "bridge_callbacks_SOURCE", MOGE2_EXECUTE_CALLBACKS, report)
+
+    scale_bias = _ensure(comp, "constantTOP", "DEPTH_SCALE_BIAS", report)
+    _set_resolution(scale_bias, 1, 1)
+    _set(scale_bias, "format", "rgba32float")
+    _set(scale_bias, ("colorr", "color1r"), 0.001)
+    _set(scale_bias, ("colorg", "color1g"), 0.0)
+    _set(scale_bias, ("colorb", "color1b"), 0.0)
+    _set(scale_bias, ("colora", "color1a", "alpha"), 1.0)
+
+    rgb = _glsl(comp, "UNPACK_RGB", "moge2_unpack_rgb", [atlas], report)
+    depth = _glsl(comp, "UNPACK_DEPTH_METRES", "moge2_unpack_depth",
+                  [atlas, scale_bias], report, True)
+    mask = _glsl(comp, "UNPACK_MASK", "moge2_unpack_mask", [atlas], report)
+    confidence = _glsl(comp, "UNPACK_CONFIDENCE",
+                       "moge2_unpack_confidence", [atlas], report)
+    for node in (rgb, depth, mask, confidence):
+        _set(node, "outputresolution", "custom")
+        _set(node, "resmult", False)
+        _expr(node, ("resolutionw", "resw"),
+              "max(1, int(op('RESULT_ATLAS').width) // 2)")
+        _expr(node, ("resolutionh", "resh"),
+              "max(1, int(op('RESULT_ATLAS').height))")
+    _set(rgb, "format", "rgba16float")
+    _set(depth, "format", "mono32float")
+    _set(mask, "format", "mono8fixed")
+    _set(confidence, "format", "mono8fixed")
+
+    _out_top(comp, "OUT_RGB", rgb, 0, report)
+    _out_top(comp, "OUT_DEPTH", depth, 1, report)
+    _out_top(comp, "OUT_CONFIDENCE", confidence, 2, report)
+    _out_top(comp, "OUT_MASK", mask, 3, report)
+    _text(comp, "FRAME_STATE", "{}\n", report)
+    _text(comp, "CAMERA_METADATA", "{}\n", report)
+    _table(comp, "STATUS", [["metric", "value"],
+                             ["state", "disabled"],
+                             ["detail", "enable only after the worker is listening"]],
+           report)
+    _text(comp, "README_FIRST",
+          ("%s LIVE GEOMETRY BRIDGE (DEFAULT OFF)\n\n" % title.upper()) +
+          "IN_RGB must be the exact StreamDiffusionTD image. The external worker "
+          "owns the model and returns a WorldBus rgba8_atlas. This COMP publishes "
+          "the returned RGB with its depth/mask/confidence so frames cannot "
+          "cross. The MoGe provider's returned RGB with its metric depth remains "
+          "synchronized. Frames cannot "
+          "cross. TD operator access remains on the main thread; socket threads move "
+          "bounded immutable bytes only. FRAME_STATE and CAMERA_METADATA describe "
+          "the same confirmed atlas upload. Resultvalid stays false until a forced "
+          "Script TOP cook copies the exact staged key. Do not put secrets or prompt "
+          "text in metadata.",
+          report)
+    try:
+        comp.store("generated_geometry_bridge_runtime_dat", runtime_dat.path)
+    except Exception:
+        pass
+    # The bounded installer creates operators through regular TD Python, which
+    # does not auto-place them. Keep the generated bridge readable without
+    # moving any private or user-authored operator.
+    _style(rgb_in, -500, 250, (0.20, 0.48, 0.42), "Generated RGB input")
+    _style(atlas, -275, 250, (0.20, 0.48, 0.42), "Synchronized atlas")
+    _style(scale_bias, -275, 50, (0.20, 0.48, 0.42), "Depth scale / bias")
+    for index, node in enumerate((rgb, depth, confidence, mask)):
+        y = 350 - index * 200
+        _style(node, 0, y, (0.20, 0.48, 0.42), node.name)
+        output = comp.op(("OUT_RGB", "OUT_DEPTH", "OUT_CONFIDENCE", "OUT_MASK")[index])
+        _style(output, 250, y, (0.20, 0.48, 0.42), output.name)
+        shader_source = comp.op((
+            "UNPACK_RGB_PIXEL", "UNPACK_DEPTH_METRES_PIXEL",
+            "UNPACK_CONFIDENCE_PIXEL", "UNPACK_MASK_PIXEL")[index])
+        _style(shader_source, 0, y + 110, (0.16, 0.32, 0.28), "Managed shader")
+    for index, node in enumerate((
+            runtime_dat, execute, script_callbacks,
+            comp.op("FRAME_STATE"), comp.op("CAMERA_METADATA"),
+            comp.op("STATUS"), comp.op("README_FIRST"))):
+        if node is not None:
+            _style(node, -500 if index < 3 else 500,
+                   50 - (index if index < 3 else index - 3) * 150,
+                   (0.16, 0.32, 0.28), node.name)
+    return comp
+
+
+def _wire_moge2_routes(adapter, moge2, fallbacks, report):
+    """Route a complete synchronized result only after the bridge marks it valid."""
+
+    if len(fallbacks) != 4 or any(node is None for node in fallbacks):
+        raise RuntimeError("MoGe-2 route requires existing RGB/depth/confidence/mask fallbacks")
+    route_specs = (
+        ("MOGE2_RGB_ROUTE", fallbacks[0], 0),
+        ("MOGE2_DEPTH_ROUTE", fallbacks[1], 1),
+        ("MOGE2_CONFIDENCE_ROUTE", fallbacks[2], 2),
+        ("MOGE2_MASK_ROUTE", fallbacks[3], 3),
+    )
+    routes = []
+    for name, fallback, output_index in route_specs:
+        route = _ensure(adapter, "switchTOP", name, report)
+        _connect(fallback, route, 0, 0, report, replace=True)
+        _connect(moge2, route, 1, output_index, report, replace=True)
+        _expr(route, "index",
+              "1 if (op('MOGE2_BRIDGE').par.Enabled and "
+              "op('MOGE2_BRIDGE').par.Resultvalid) else 0")
+        routes.append(route)
+    for index, (name, route) in enumerate(zip(
+        ("OUT_RGB", "OUT_DEPTH", "OUT_CONFIDENCE", "OUT_MASK"), routes)):
+        _out_top(adapter, name, route, index, report)
+    return tuple(routes)
+
+
+def _build_depth_anything_geometry_bridge(adapter, input_rgb, report):
+    """Build the isolated generated-image Depth Anything geometry provider."""
+
+    return _build_moge2_bridge(
+        adapter, input_rgb, report,
+        name="DEPTH_ANYTHING_GEOMETRY_BRIDGE",
+        provider="depth_anything",
+        input_tcp=9251,
+        input_udp=9250,
+        result_tcp=9261,
+        result_udp=9260,
+    )
+
+
+def _wire_generated_geometry_routes(adapter, depth_anything, moge2_routes, report):
+    """Select MoGe or Depth Anything as one atomic geometry source.
+
+    MoGe keeps its established fallback behavior. Selecting Depth Anything
+    fails closed to zero until that provider confirms a fresh atlas, preventing
+    accidental mixing with a stale MoGe or placeholder frame.
+    """
+
+    if len(moge2_routes) != 4 or any(node is None for node in moge2_routes):
+        raise RuntimeError("generated geometry selection requires four MoGe routes")
+    zero = _ensure(
+        adapter, "constantTOP", "DEPTH_ANYTHING_GEOMETRY_FAIL_CLOSED_ZERO", report)
+    _style(zero, 325, -500, (0.20, 0.48, 0.42),
+           "Selected Depth Anything invalid -> zero")
+    _set_resolution(zero, 384, 384)
+    _set(zero, "format", "rgba32float")
+    for names in (("colorr", "color1r"), ("colorg", "color1g"),
+                  ("colorb", "color1b"), ("colora", "color1a", "alpha")):
+        _set(zero, names, 0.0)
+    route_specs = (
+        ("GENERATED_GEOMETRY_RGB_ROUTE", moge2_routes[0], 0),
+        ("GENERATED_GEOMETRY_DEPTH_ROUTE", moge2_routes[1], 1),
+        ("GENERATED_GEOMETRY_CONFIDENCE_ROUTE", moge2_routes[2], 2),
+        ("GENERATED_GEOMETRY_MASK_ROUTE", moge2_routes[3], 3),
+    )
+    routes = []
+    selector = (
+        "parent().par.Geometrysource.eval() == 'depth_anything'")
+    valid = (
+        "op('DEPTH_ANYTHING_GEOMETRY_BRIDGE').par.Enabled and "
+        "op('DEPTH_ANYTHING_GEOMETRY_BRIDGE').par.Resultvalid")
+    for name, moge2_route, output_index in route_specs:
+        route = _ensure(adapter, "switchTOP", name, report)
+        _connect(moge2_route, route, 0, 0, report, replace=True)
+        _connect(depth_anything, route, 1, output_index, report, replace=True)
+        _connect(zero, route, 2, 0, report, replace=True)
+        _expr(route, "index",
+              "((1 if (%s) else 2) if (%s) else 0)" % (valid, selector))
+        _style(route, 325, (575, 275, -25, -350)[output_index],
+               (0.20, 0.48, 0.42), name)
+        routes.append(route)
+    for index, (name, route) in enumerate(zip(
+        ("OUT_RGB", "OUT_DEPTH", "OUT_CONFIDENCE", "OUT_MASK"), routes)):
+        _out_top(adapter, name, route, index, report)
+    return tuple(routes)
+
+
+def _depth_anything_runtime_source(report):
+    """Load the import-safe sensor receiver for embedding in a Text DAT."""
+
+    return _embedded_runtime_source(
+        "depth_anything_sensor_runtime.py",
+        "Depth Anything sensor",
+        report,
+    )
+
+
+def _build_depth_anything_sensor_bridge(adapter, report):
+    """Build a backend-replaceable, result-only audience sensor receiver."""
+
+    comp = _ensure(adapter, "baseCOMP", "DEPTH_ANYTHING_BRIDGE", report)
+    _style(comp, 390, 120, (0.20, 0.48, 0.42),
+           "Replaceable no-RGB sensor bridge: packed depth/mask/confidence",
+           320, 140)
+    page = _page(comp, "Depth Anything Sensor")
+    _custom(comp, page, "Toggle", "Enabled", False,
+            label="Follow Adapter Enabled")
+    # DEPTH_SENSOR_ADAPTER.Enabled is the existing stable control surface used
+    # by runtime_helpers. The nested bridge remains default-off and follows it.
+    _expr(comp, "Enabled", "parent().par.Enabled")
+    _custom(comp, page, "Str", "Resultbindhost", "127.0.0.1",
+            label="Result Bind Host")
+    _custom(comp, page, "Int", "Resulttcp", 9241, label="Result TCP")
+    _custom(comp, page, "Int", "Resultudp", 9240,
+            label="Reserved UDP (unused)")
+    _custom(comp, page, "Toggle", "Allowtrustednetwork", False,
+            label="Allow Trusted Network Bind")
+    _custom(comp, page, "Float", "Stalems", 800.0,
+            label="Capture Freshness (ms)")
+    _custom(comp, page, "Toggle", "Flipvertical", True,
+            label="Worker / TD Vertical Flip")
+    _custom(comp, page, "Toggle", "Mirrorhorizontal", True,
+            label="Mirror Horizontal (Webcam)")
+    _custom(comp, page, "Toggle", "Resultvalid", False,
+            label="Fresh Correlated Result")
+
+    runtime_dat = _text(
+        comp, "sensor_runtime", _depth_anything_runtime_source(report), report)
+    script_callbacks = _text(
+        comp, "script_top_callbacks", DEPTH_ANYTHING_SCRIPT_TOP_CALLBACKS, report)
+    packed = _ensure(comp, "scriptTOP", "RESULT_PACKED", report)
+    _set(packed, ("callbacks", "callbacksdat"), script_callbacks.path)
+    # TD 2025 Script TOP has no alwayscook. Execute DAT stages immutable bytes,
+    # force-cooks this TOP, and requires the callback to confirm the exact key.
+    _set_resolution(packed, 256, 144)
+    _set(packed, "format", "rgba8fixed")
+
+    execute = _ensure(comp, "executeDAT", "sensor_callbacks", report,
+                      optional=True)
+    if execute is not None:
+        try:
+            execute.text = DEPTH_ANYTHING_EXECUTE_CALLBACKS
+        except Exception:
+            pass
+        _set(execute, ("start", "onstart"), True)
+        _set(execute, ("create", "oncreate"), True)
+        _set(execute, ("framestart", "onframestart"), True)
+        _set(execute, ("exit", "onexit"), True)
+        _set(execute, "active", True)
+    else:
+        _text(comp, "sensor_callbacks_SOURCE",
+              DEPTH_ANYTHING_EXECUTE_CALLBACKS, report)
+
+    depth_calibration = _ensure(comp, "constantTOP", "DEPTH_CALIBRATION", report)
+    _set_resolution(depth_calibration, 1, 1)
+    _set(depth_calibration, "format", "rgba32float")
+    for names, value in (
+        (("colorr", "color1r"), 0.001),
+        (("colorg", "color1g"), 0.0),
+        (("colorb", "color1b"), 0.5),
+        (("colora", "color1a", "alpha"), 4.0),
+    ):
+        _set(depth_calibration, names, value)
+    intrinsics = _ensure(comp, "constantTOP", "INTRINSICS_NORMALIZED", report)
+    _set_resolution(intrinsics, 1, 1)
+    _set(intrinsics, "format", "rgba32float")
+    for names, value in (
+        (("colorr", "color1r"), 0.8660254),
+        (("colorg", "color1g"), 1.5396007),
+        (("colorb", "color1b"), 0.5),
+        (("colora", "color1a", "alpha"), 0.5),
+    ):
+        _set(intrinsics, names, value)
+
+    position = _glsl(
+        comp, "UNPACK_SENSOR_POSITION", "depth_anything_sensor_position",
+        [packed, depth_calibration, intrinsics], report, True)
+    mask = _glsl(comp, "UNPACK_SENSOR_MASK", "depth_anything_sensor_mask",
+                 [packed], report)
+    confidence = _glsl(
+        comp, "UNPACK_SENSOR_CONFIDENCE", "depth_anything_sensor_confidence",
+        [packed], report)
+    for node in (position, mask, confidence):
+        _set(node, "outputresolution", "custom")
+        _set(node, "resmult", False)
+        _expr(node, ("resolutionw", "resw"),
+              "max(1, int(op('RESULT_PACKED').width))")
+        _expr(node, ("resolutionh", "resh"),
+              "max(1, int(op('RESULT_PACKED').height))")
+    _set(position, "format", "rgba32float")
+    _set(mask, "format", "mono8fixed")
+    _set(confidence, "format", "mono8fixed")
+
+    _out_top(comp, "OUT_POSITION", position, 0, report)
+    _out_top(comp, "OUT_MASK", mask, 1, report)
+    _out_top(comp, "OUT_CONFIDENCE", confidence, 2, report)
+    _text(comp, "FRAME_STATE", "{}\n", report)
+    _table(comp, "STATUS", [
+        ["metric", "value"],
+        ["state", "disabled"],
+        ["detail", "enable adapter, then start an external sensor producer"],
+    ], report)
+    _text(comp, "README_FIRST",
+          "REPLACEABLE AUDIENCE SENSOR BRIDGE (DEFAULT OFF)\n\n"
+          "The temporary worker receives the laptop webcam locally and sends "
+          "only uint16 pseudo-metre depth, mask, confidence, and bounded "
+          "metadata. No RGB enters this COMP. A paid Depth Anything app or a "
+          "future hardware depth sensor may replace that worker by mapping "
+          "Spout, NDI, TOP, or API output to the same OUT_POSITION, OUT_MASK, "
+          "OUT_CONFIDENCE, and FRAME_STATE contracts. Sensor data is mirrored "
+          "horizontally by default for intuitive laptop rehearsal; "
+          "turn Mirror Horizontal off for an unmirrored calibrated show sensor. "
+          "The packed depth, mask, confidence, principal point, and temporal "
+          "session identity change together so the sensor contracts stay aligned. "
+          "OUT_POSITION is strictly "
+          "sensor-local XYZ; the parent CALIBRATE_SENSOR_POSITION applies the "
+          "independent sensor_to_world transform. Socket threads retain bytes "
+          "only. Stale, malformed, disconnected, or calibration-changing input "
+          "sets Resultvalid false; enabled routes then publish zero occupancy. "
+          "TCP binds to loopback unless Allow Trusted Network Bind is explicitly "
+          "enabled; reserved UDP 9240 is metadata only and is not opened.",
+          report)
+    try:
+        comp.store("depth_anything_sensor_runtime_dat", runtime_dat.path)
+    except Exception:
+        pass
+    return comp
+
+
+def _wire_depth_anything_sensor_routes(adapter, bridge, fallbacks, report):
+    """Preserve disabled fallbacks but fail closed while the bridge is enabled."""
+
+    if len(fallbacks) != 3 or any(node is None for node in fallbacks):
+        raise RuntimeError("Depth Anything routes require three adapter fallbacks")
+    zero = _ensure(adapter, "constantTOP", "DEPTH_ANYTHING_FAIL_CLOSED_ZERO", report)
+    _set_resolution(zero, 256, 144)
+    _set(zero, "format", "rgba32float")
+    for names in (("colorr", "color1r"), ("colorg", "color1g"),
+                  ("colorb", "color1b"), ("colora", "color1a", "alpha")):
+        _set(zero, names, 0.0)
+    route_specs = (
+        ("DEPTH_ANYTHING_POSITION_ROUTE", fallbacks[0], 0),
+        ("DEPTH_ANYTHING_MASK_ROUTE", fallbacks[1], 1),
+        ("DEPTH_ANYTHING_CONFIDENCE_ROUTE", fallbacks[2], 2),
+    )
+    routes = []
+    for name, fallback, output_index in route_specs:
+        route = _ensure(adapter, "switchTOP", name, report)
+        _connect(fallback, route, 0, 0, report, replace=True)
+        _connect(zero, route, 1, 0, report, replace=True)
+        _connect(bridge, route, 2, output_index, report, replace=True)
+        _expr(route, "index",
+              "2 if (op('DEPTH_ANYTHING_BRIDGE').par.Enabled and "
+              "op('DEPTH_ANYTHING_BRIDGE').par.Resultvalid) else "
+              "(1 if op('DEPTH_ANYTHING_BRIDGE').par.Enabled else 0)")
+        routes.append(route)
+    for index, (name, route) in enumerate(zip(
+        ("OUT_POSITION", "OUT_MASK", "OUT_CONFIDENCE"), routes)):
+        _out_top(adapter, name, route, index, report)
+    return tuple(routes)
+
+
 def _build_sources(parent, report):
     comp = _ensure(parent, "baseCOMP", "SOURCES", report)
     _style(comp, -1320, 300, (0.42, 0.22, 0.54),
@@ -555,6 +1965,17 @@ def _build_sources(parent, report):
                          label="Use StreamDiffusion Adapter")
     use_depth = _custom(comp, page, "Toggle", "UseExternalDepth", False,
                         label="Use Adapter Depth")
+    _custom(comp, page, "Int", "Frameid", -1, label="Source Frame ID")
+    _custom(comp, page, "Int", "Sessionepoch", 0,
+            label="Source Session / Generation Epoch")
+    _custom(comp, page, "Float", "Sourceagems", -1.0,
+            label="Source Age (ms; -1 unknown)")
+    _custom(comp, page, "Toggle", "Newframe", True,
+            label="Accepted New Frame (one cook pulse)")
+    _custom(comp, page, "Toggle", "Sourcevalid", True,
+            label="Source Frame Valid / Fresh")
+    _custom(comp, page, "Float", "Frametimestampseconds", -1.0,
+            label="Source Timestamp (seconds; -1 unknown)")
 
     demo_rgb = _ensure(comp, "noiseTOP", "DEMO_RGB_GENERATOR", report)
     _set_resolution(demo_rgb, 512, 512)
@@ -574,6 +1995,8 @@ def _build_sources(parent, report):
            "REPLACE THESE TWO TOPs WITH StreamDiffusionTD.tox OUTPUTS", 300, 130)
     adapter_page = _page(adapter, "Adapter")
     _custom(adapter, adapter_page, "Toggle", "Enabled", False)
+    _custom(adapter, adapter_page, "Menu", "Geometrysource", "moge2",
+            ("moge2", "depth_anything"), label="Generated Geometry Source")
     _custom(adapter, adapter_page, "Str", "RGBContract", TOP_CONTRACTS["RGB"])
     _custom(adapter, adapter_page, "Str", "DepthContract", TOP_CONTRACTS["DEPTH"])
     tox_rgb = _ensure(adapter, "constantTOP", "REPLACE_WITH_STREAMDIFFUSION_RGB", report)
@@ -586,43 +2009,90 @@ def _build_sources(parent, report):
     _set(tox_depth, ("colorr", "color1r"), 0.45)
     _set(tox_depth, ("colorg", "color1g"), 0.45)
     _set(tox_depth, ("colorb", "color1b"), 0.45)
-    _out_top(adapter, "OUT_RGB", tox_rgb, 0, report)
-    _out_top(adapter, "OUT_DEPTH", tox_depth, 1, report)
+    tox_confidence = _ensure(adapter, "constantTOP", "REPLACE_WITH_CONFIDENCE", report)
+    _set_resolution(tox_confidence, 384, 384)
+    _set(tox_confidence, ("colorr", "color1r"), 1.0)
+    _set(tox_confidence, ("colorg", "color1g"), 1.0)
+    _set(tox_confidence, ("colorb", "color1b"), 1.0)
+    tox_mask = _ensure(adapter, "constantTOP", "REPLACE_WITH_VALID_MASK", report)
+    _set_resolution(tox_mask, 384, 384)
+    _set(tox_mask, ("colorr", "color1r"), 1.0)
+    _set(tox_mask, ("colorg", "color1g"), 1.0)
+    _set(tox_mask, ("colorb", "color1b"), 1.0)
+    moge2 = _build_moge2_bridge(adapter, tox_rgb, report)
+    moge2_routes = _wire_moge2_routes(
+        adapter, moge2, (tox_rgb, tox_depth, tox_confidence, tox_mask), report)
+    depth_anything_geometry = _build_depth_anything_geometry_bridge(
+        adapter, tox_rgb, report)
+    _wire_generated_geometry_routes(
+        adapter, depth_anything_geometry, moge2_routes, report)
     _table(adapter, "ADAPTER_CONTRACT", [
         ["output", "required contract", "replace node"],
-        ["OUT_RGB", TOP_CONTRACTS["RGB"], "REPLACE_WITH_STREAMDIFFUSION_RGB"],
-        ["OUT_DEPTH", TOP_CONTRACTS["DEPTH"], "REPLACE_WITH_DEPTH_ESTIMATE"],
+        ["OUT_RGB", TOP_CONTRACTS["RGB"], "GENERATED_GEOMETRY_RGB_ROUTE"],
+        ["OUT_DEPTH", TOP_CONTRACTS["DEPTH"], "GENERATED_GEOMETRY_DEPTH_ROUTE"],
+        ["OUT_CONFIDENCE", TOP_CONTRACTS["CONFIDENCE"],
+         "GENERATED_GEOMETRY_CONFIDENCE_ROUTE"],
+        ["OUT_MASK", "R valid mask normalized 0..1",
+         "GENERATED_GEOMETRY_MASK_ROUTE"],
     ], report)
     _text(adapter, "README_FIRST", "STREAMDIFFUSIONTD ADAPTER BOUNDARY\n\n"
           "Demo mode works without this branch. Later place StreamDiffusionTD.tox here, "
-          "wire its image to OUT_RGB, and wire its depth estimate to OUT_DEPTH. "
-          "If the TOX emits only RGB, keep DEMO_DEPTH or replace OUT_DEPTH with any depth model. "
+          "wire its image to OUT_RGB, depth estimate to OUT_DEPTH, and optional "
+          "validity/confidence to OUT_CONFIDENCE. Increment Session Epoch when a "
+          "model, prompt generation, calibration, or producer session changes. "
+          "If the TOX emits only RGB, choose MoGe-2 or Depth Anything on "
+          "Geometry Source; each bridge returns synchronized generated RGB and depth. "
           "Do not modify downstream POSITION/COLOR contracts.", report)
 
     rgb_switch = _ensure(comp, "switchTOP", "RGB_SOURCE", report)
     depth_switch = _ensure(comp, "switchTOP", "DEPTH_SOURCE", report)
-    _connect(demo_rgb, rgb_switch, 0, 0, report)
-    _connect(adapter, rgb_switch, 1, 0, report)
-    _connect(demo_depth, depth_switch, 0, 0, report)
-    _connect(adapter, depth_switch, 1, 1, report)
+    demo_confidence = _ensure(comp, "constantTOP", "DEMO_CONFIDENCE", report)
+    _set_resolution(demo_confidence, 384, 384)
+    _set(demo_confidence, ("colorr", "color1r"), 1.0)
+    _set(demo_confidence, ("colorg", "color1g"), 1.0)
+    _set(demo_confidence, ("colorb", "color1b"), 1.0)
+    demo_mask = _ensure(comp, "constantTOP", "DEMO_VALID_MASK", report)
+    _set_resolution(demo_mask, 384, 384)
+    _set(demo_mask, ("colorr", "color1r"), 1.0)
+    _set(demo_mask, ("colorg", "color1g"), 1.0)
+    _set(demo_mask, ("colorb", "color1b"), 1.0)
+    confidence_switch = _ensure(comp, "switchTOP", "CONFIDENCE_SOURCE", report)
+    mask_switch = _ensure(comp, "switchTOP", "VALID_MASK_SOURCE", report)
+    _connect(demo_rgb, rgb_switch, 0, 0, report, replace=True)
+    _connect(adapter, rgb_switch, 1, 0, report, replace=True)
+    _connect(demo_depth, depth_switch, 0, 0, report, replace=True)
+    _connect(adapter, depth_switch, 1, 1, report, replace=True)
+    _connect(demo_confidence, confidence_switch, 0, 0, report, replace=True)
+    _connect(adapter, confidence_switch, 1, 2, report, replace=True)
+    _connect(demo_mask, mask_switch, 0, 0, report, replace=True)
+    _connect(adapter, mask_switch, 1, 3, report, replace=True)
     stream_name = use_stream.name if use_stream is not None else "Usestreamdiffusion"
     depth_name = use_depth.name if use_depth is not None else "Useexternaldepth"
     _expr(rgb_switch, "index", "1 if parent().par.%s else 0" % stream_name)
     _expr(depth_switch, "index", "1 if parent().par.%s else 0" % depth_name)
+    _expr(confidence_switch, "index", "1 if parent().par.%s else 0" % depth_name)
+    _expr(mask_switch, "index", "1 if parent().par.%s else 0" % depth_name)
+    validity = _glsl(comp, "COMBINE_VALIDITY", "validity_combine",
+                     [mask_switch, confidence_switch], report, False)
     _out_top(comp, "OUT_RGB", rgb_switch, 0, report)
     _out_top(comp, "OUT_DEPTH", depth_switch, 1, report)
+    # Keep raw confidence and mask independently transportable. The bridge
+    # combines them after either the local or remote route is selected.
+    _out_top(comp, "OUT_CONFIDENCE", confidence_switch, 2, report)
+    _out_top(comp, "OUT_MASK", mask_switch, 3, report)
+    _out_top(comp, "OUT_VALIDITY", validity, 4, report)
     _table(comp, "SOURCE_STATUS", [
         ["mode", "RGB", "depth"],
         ["default", "DEMO_RGB_GENERATOR", "DEMO_DEPTH_GENERATOR"],
-        ["future", "STREAMDIFFUSION_ADAPTER/OUT_RGB", "STREAMDIFFUSION_ADAPTER/OUT_DEPTH"],
+        ["future", "STREAMDIFFUSION_ADAPTER/OUT_RGB", "STREAMDIFFUSION_ADAPTER/OUT_DEPTH + OUT_CONFIDENCE"],
     ], report)
     return comp
 
 
 def _build_role_bridge(parent, report):
-    """Build an atomic RGB/depth preview bridge for split process roles.
+    """Build an atomic RGB/depth/validity bridge for split process roles.
 
-    The sender packs RGB and normalized depth into one RGBA16F TOP before it
+    The sender packs RGB and raw depth/confidence/mask into one RGBA32F TOP before it
     crosses process/machine boundaries, so a receiver cannot combine textures
     from different generation frames. ``local`` bypasses pack/unpack entirely.
     This is a direct image bridge, not the richer WorldBus v1 metadata/control
@@ -630,7 +2100,7 @@ def _build_role_bridge(parent, report):
     """
     comp = _ensure(parent, "baseCOMP", "ROLE_BRIDGE", report)
     _style(comp, -1160, 80, (0.18, 0.38, 0.58),
-           "Atomic RGB/depth atlas: local, shared memory, or Touch TCP preview",
+           "Atomic RGB/raw-depth/confidence/mask atlas plus frame-state boundary",
            285, 125)
     page = _page(comp, "Role Bridge")
     _custom(comp, page, "Menu", "Mode", "local",
@@ -648,6 +2118,18 @@ def _build_role_bridge(parent, report):
     _custom(comp, page, "Int", "Atlasport", 12000, label="Atlas Port")
     _custom(comp, page, "Int", "Sendfps", 5, label="Transport FPS")
     _custom(comp, page, "Int", "Sendstep", 12, label="Touch Send Step")
+    _custom(comp, page, "Str", "Framesessionid", "legacy-local",
+            label="Accepted Frame Session ID")
+    _custom(comp, page, "Int", "Frameid", -1,
+            label="Accepted Frame ID")
+    _custom(comp, page, "Str", "Frametimestampns", "-1",
+            label="Accepted Frame Timestamp (ns)")
+    _custom(comp, page, "Str", "Calibrationid", "",
+            label="Calibration ID")
+    _custom(comp, page, "Str", "Calibrationdigest", "",
+            label="Calibration Content SHA-256")
+    _custom(comp, page, "Toggle", "Framevalid", True,
+            label="Accepted Frame Fresh / Valid")
 
     def required(node, names, value, expression=False):
         """Set a documented endpoint parameter or surface API drift loudly."""
@@ -663,16 +2145,21 @@ def _build_role_bridge(parent, report):
 
     local_rgb = _in_top(comp, "LOCAL_RGB", 0, report)
     local_depth = _in_top(comp, "LOCAL_DEPTH", 1, report)
+    local_confidence = _in_top(comp, "LOCAL_CONFIDENCE", 2, report)
+    local_mask = _in_top(comp, "LOCAL_MASK", 3, report)
 
+    packed_geometry = _glsl(
+        comp, "PACK_DEPTH_PLANES", "transport_pack_geometry",
+        [local_depth, local_confidence, local_mask], report, True)
     atlas_pack = _glsl(comp, "PACK_ATOMIC_ATLAS", "transport_pack_atlas",
-                       [local_rgb, local_depth], report)
+                       [local_rgb, packed_geometry], report, True)
     _set(atlas_pack, "outputresolution", "custom")
     _set(atlas_pack, "resmult", False)
     _expr(atlas_pack, ("resolutionw", "resw"),
           "max(2, int(parent().par.Atlaswidth.eval()))")
     _expr(atlas_pack, ("resolutionh", "resh"),
           "max(1, int(parent().par.Atlasheight.eval()))")
-    _set(atlas_pack, "format", "rgba16float")
+    _set(atlas_pack, "format", "rgba32float")
 
     shared_rx = _ensure(comp, "sharedmeminTOP", "RX_SHARED_ATLAS", report,
                         optional=True)
@@ -682,7 +2169,7 @@ def _build_role_bridge(parent, report):
         required(node, ("name", "memname"),
                  "str(parent().par.Segmentname.eval()) + '_atlas'", True)
         required(node, "memtype", "global")
-        required(node, "format", "rgba16float")
+        required(node, "format", "rgba32float")
     # At 5-10 Hz, Immediate is a deliberate reliability tradeoff: each forced
     # callback cook completes one write while Active is pulsed, with no hidden
     # second cook required to finish a deferred download.
@@ -702,14 +2189,14 @@ def _build_role_bridge(parent, report):
     required(tcp_rx, "maxtarget", 0.04)
     required(tcp_rx, "maxqueue", 0.12)
     required(tcp_rx, "port", "int(parent().par.Atlasport.eval())", True)
-    required(tcp_rx, "format", "rgba16float")
+    required(tcp_rx, "format", "rgba32float")
     required(tcp_tx, "active", "1 if parent().par.Senderactive.eval() else 0", True)
     # Touch Out calls this parameter fps, but it is frames-per-send step.
     required(tcp_tx, "fps", "max(1, int(parent().par.Sendstep.eval()))", True)
     required(tcp_tx, "videocodec", "uncompressed")
     required(tcp_tx, "alwayscook", True)
     required(tcp_tx, "port", "int(parent().par.Atlasport.eval())", True)
-    required(tcp_tx, "format", "rgba16float")
+    required(tcp_tx, "format", "rgba32float")
     _connect(atlas_pack, tcp_tx, report=report, replace=True)
 
     info = _ensure(comp, "infoCHOP", "RX_TCP_ATLAS_INFO", report, optional=True)
@@ -726,7 +2213,12 @@ def _build_role_bridge(parent, report):
                        [atlas_route], report)
     unpack_depth = _glsl(comp, "UNPACK_ATLAS_DEPTH", "transport_unpack_depth",
                          [atlas_route], report)
-    for node in (unpack_rgb, unpack_depth):
+    unpack_confidence = _glsl(
+        comp, "UNPACK_ATLAS_CONFIDENCE", "transport_unpack_confidence",
+        [atlas_route], report)
+    unpack_mask = _glsl(comp, "UNPACK_ATLAS_MASK", "transport_unpack_mask",
+                        [atlas_route], report)
+    for node in (unpack_rgb, unpack_depth, unpack_confidence, unpack_mask):
         _set(node, "outputresolution", "custom")
         _set(node, "resmult", False)
         _expr(node, ("resolutionw", "resw"),
@@ -734,38 +2226,69 @@ def _build_role_bridge(parent, report):
         _expr(node, ("resolutionh", "resh"),
               "max(1, int(parent().par.Atlasheight.eval()))")
     _set(unpack_rgb, "format", "rgba16float")
-    _set(unpack_depth, "format", "mono16float")
+    _set(unpack_depth, "format", "mono32float")
+    _set(unpack_confidence, "format", "mono16float")
+    _set(unpack_mask, "format", "mono16float")
 
     rgb_route = _ensure(comp, "switchTOP", "RGB_ROUTE", report)
     depth_route = _ensure(comp, "switchTOP", "DEPTH_ROUTE", report)
+    confidence_route = _ensure(comp, "switchTOP", "CONFIDENCE_ROUTE", report)
+    mask_route = _ensure(comp, "switchTOP", "MASK_ROUTE", report)
     _connect(local_rgb, rgb_route, 0, 0, report, replace=True)
     _connect(unpack_rgb, rgb_route, 1, 0, report, replace=True)
     _connect(local_depth, depth_route, 0, 0, report, replace=True)
     _connect(unpack_depth, depth_route, 1, 0, report, replace=True)
+    _connect(local_confidence, confidence_route, 0, 0, report, replace=True)
+    _connect(unpack_confidence, confidence_route, 1, 0, report, replace=True)
+    _connect(local_mask, mask_route, 0, 0, report, replace=True)
+    _connect(unpack_mask, mask_route, 1, 0, report, replace=True)
     _set(rgb_route, "index", 0)
     _set(depth_route, "index", 0)
+    _set(confidence_route, "index", 0)
+    _set(mask_route, "index", 0)
+    validity = _glsl(comp, "COMBINE_ROUTED_VALIDITY", "validity_combine",
+                     [mask_route, confidence_route], report, False)
     _out_top(comp, "OUT_RGB", rgb_route, 0, report)
     _out_top(comp, "OUT_DEPTH", depth_route, 1, report)
+    _out_top(comp, "OUT_CONFIDENCE", validity, 2, report)
+    _out_top(comp, "OUT_MASK", mask_route, 3, report)
 
     _table(comp, "TRANSPORT_CONTRACT", [
         ["mode", "frame", "endpoint", "contract"],
-        ["local", "no copy", "same process", "raw RGB + depth"],
-        ["shared_memory", "atomic", "Segmentname_atlas", "RGBA16F: left RGB, right depth"],
-        ["touch_tcp", "atomic", "Atlasport", "uncompressed RGBA16F atlas"],
+        ["local", "no copy", "same process", "RGB + raw depth + confidence + mask"],
+        ["shared_memory", "atomic", "Segmentname_atlas", "RGBA32F: left RGB; right R=raw depth G=confidence B=mask"],
+        ["touch_tcp", "atomic", "Atlasport", "uncompressed RGBA32F atlas; no depth clamp"],
         ["cadence", "Sendfps target", "Sendstep frame modulus", "project.cookRate derived"],
-        ["scope", "preview bridge", "no metadata/control", "not WorldBus v1"],
+        ["metadata", "FRAME_STATE_CONTRACT", "frame/session/timestamp + calibration id/digest", "adapter/WorldBus boundary"],
+        ["scope", "direct image bridge", "Touch TCP num_received_frames is transport-arrival preview only", "explicit sidecar; WorldBus required for producer metadata"],
+    ], report)
+    _table(comp, "FRAME_STATE_CONTRACT", [
+        ["field", "type", "rule"],
+        ["version", "string", "flexgpu-frame-state/v1"],
+        ["session_id", "identifier", "new session retires previous high-water mark"],
+        ["frame_id", "integer", "strictly increasing within session"],
+        ["timestamp_ns", "integer", "strictly increasing; freshness clock"],
+        ["calibration_id", "identifier", "must match loaded calibration"],
+        ["calibration_digest", "lowercase sha256", "must match canonical calibration content"],
+        ["fallback", "transport arrival preview", "TCP counter is not producer-generation identity; metadata-less Shared Mem fails closed"],
     ], report)
     _text(comp, "README_FIRST", "ROLE-AWARE ATOMIC PREVIEW BRIDGE\n\n"
-          "Single topology routes RGB/depth locally without a copy. dual_local "
-          "uses one global Shared Mem RGBA16F atlas. dual_network uses one "
-          "uncompressed Touch Out/In atlas on Atlasport. Its left half is RGB "
-          "and right half is normalized depth, making both textures atomic. "
+          "Single topology routes RGB/depth locally without a copy. The turnkey "
+          "dual_local path uses loopback Touch TCP; its advanced Shared Mem mode "
+          "uses one global RGBA32F atlas plus explicit frame-state metadata. "
+          "dual_network uses one uncompressed Touch Out/In atlas on Atlasport. "
+          "The atlas left half is RGB "
+          "and right-half R/G/B carry raw calibrated depth, confidence, and mask, "
+          "making all image planes atomic without clamping metric/disparity values. "
           "Touch Out's fps parameter is a frame-step value derived from "
           "project.cookRate and Sendfps. The frame-start callback force-cooks "
           "Shared Mem Out at the same step even when world stages are disabled. "
-          "This direct preview bridge intentionally omits WorldBus v1 metadata, "
-          "camera transforms, heartbeats and controls; use a production WorldBus "
-          "adapter when those contracts are required.", report)
+          "FRAME_STATE_CONTRACT defines frame/session/timestamp and canonical "
+          "calibration identity. Local adapters are sampled directly. Touch TCP's "
+          "num_received_frames is a transport-arrival preview counter, not "
+          "producer-generation identity. Metadata-less Shared Mem fails closed; "
+          "an explicit frame-state sidecar or WorldBus is required for exact "
+          "producer lifecycle, camera matrices, heartbeats, and controls.", report)
     try:
         comp.store("managed_transport_bridge", True)
     except Exception:
@@ -779,32 +2302,102 @@ def _build_reconstruction(parent, report):
            "Depth unprojection: RGB/depth -> metric position texture", 235, 110)
     rgb = _in_top(comp, "RGB_IN", 0, report)
     depth = _in_top(comp, "DEPTH_IN", 1, report)
+    confidence = _in_top(comp, "CONFIDENCE_IN", 2, report)
     page = _page(comp, "Geometry")
     _custom(comp, page, "Int", "Geometryresolution", 384,
             label="Geometry Resolution")
+    _custom(comp, page, "Menu", "Depthmode", "normalized",
+            ("normalized", "metric", "inverse"), label="Depth Convention")
+    _custom(comp, page, "Float", "Depthscale", 1.0, label="Depth Scale")
+    _custom(comp, page, "Float", "Depthbias", 0.0, label="Depth Bias")
+    _custom(comp, page, "Float", "Nearmetres", 0.35, label="Near (metres)")
+    _custom(comp, page, "Float", "Farmetres", 4.50, label="Far (metres)")
+    _custom(comp, page, "Toggle", "Installationdepthoverride", False,
+            label="Installation Depth Override")
+    _custom(comp, page, "Float", "Installationdepthscale", 1.0,
+            label="Installation Depth Scale")
+    _custom(comp, page, "Float", "Installationdepthbias", 0.0,
+            label="Installation Depth Bias")
+    _custom(comp, page, "Float", "Installationnear", 0.35,
+            label="Installation Near (metres)")
+    _custom(comp, page, "Float", "Installationfar", 4.50,
+            label="Installation Far (metres)")
+    _custom(comp, page, "Toggle", "Depthanythingdepthoverride", True,
+            label="Depth Anything Depth Override")
+    _custom(comp, page, "Float", "Depthanythingdepthscale", 1.0,
+            label="Depth Anything Depth Scale")
+    _custom(comp, page, "Float", "Depthanythingdepthbias", 0.0,
+            label="Depth Anything Depth Bias")
+    _custom(comp, page, "Float", "Depthanythingnear", 0.5,
+            label="Depth Anything Near (metres)")
+    _custom(comp, page, "Float", "Depthanythingfar", 4.0,
+            label="Depth Anything Far (metres)")
+    _custom(comp, page, "Float", "Fxnormalized", 0.0,
+            label="fx / image width (0 = 60 degree default)")
+    _custom(comp, page, "Float", "Fynormalized", 0.0,
+            label="fy / image height (0 = 60 degree default)")
+    _custom(comp, page, "Float", "Cxnormalized", 0.5, label="cx / image width")
+    _custom(comp, page, "Float", "Cynormalized", 0.5, label="cy / image height")
+    _custom(comp, page, "Str", "Cameratoworld0", "1 0 0 0", label="Camera to World row 0")
+    _custom(comp, page, "Str", "Cameratoworld1", "0 1 0 0", label="Camera to World row 1")
+    _custom(comp, page, "Str", "Cameratoworld2", "0 0 1 0", label="Camera to World row 2")
+    _custom(comp, page, "Str", "Cameratoworld3", "0 0 0 1", label="Camera to World row 3")
+    _custom(comp, page, "Int", "Calibrationepoch", 0,
+            label="Calibration Epoch")
     # Version 1.0.0 created COLOR_ALIGNED as a Null TOP. _ensure() deliberately
     # preserves existing/unknown nodes, so reusing that name cannot migrate its
     # operator type and Common-page resolution values remain ineffective. Keep
     # the legacy node untouched and use an unambiguous managed Resolution TOP.
     color = _ensure(comp, "resolutionTOP", "COLOR_ALIGNED_RESIZE", report)
-    _connect(rgb, color, report=report)
+    _connect(rgb, color, report=report, replace=True)
     _set(color, "outputresolution", "custom")
     _set(color, "resmult", False)
     _expr(color, ("resolutionw", "resw"), "parent().par.Geometryresolution")
     _expr(color, ("resolutionh", "resh"), "parent().par.Geometryresolution")
+    confidence_aligned = _ensure(comp, "resolutionTOP", "CONFIDENCE_ALIGNED_RESIZE", report)
+    _connect(confidence, confidence_aligned, report=report, replace=True)
+    _set(confidence_aligned, "outputresolution", "custom")
+    _set(confidence_aligned, "resmult", False)
+    _expr(confidence_aligned, ("resolutionw", "resw"), "parent().par.Geometryresolution")
+    _expr(confidence_aligned, ("resolutionh", "resh"), "parent().par.Geometryresolution")
+    _set(confidence_aligned, "format", "mono16float")
     position = _glsl(comp, "depth_to_position", "depth_to_position",
-                     [color, depth], report, True)
+                     [color, depth, confidence_aligned], report, True)
     # Repair occupied 1.0.0 internal wires: both the shader and OUT_COLOR may
     # still point at the preserved legacy COLOR_ALIGNED Null TOP.
     _connect(color, position, 0, 0, report, replace=True)
     _connect(depth, position, 1, 0, report, replace=True)
+    _connect(confidence_aligned, position, 2, 0, report, replace=True)
     _out_top(comp, "OUT_POSITION", position, 0, report)
     color_out = _out_top(comp, "OUT_COLOR", color, 1, report)
+    confidence_out = _out_top(comp, "OUT_CONFIDENCE", confidence_aligned, 2, report)
     _connect(color, color_out, 0, 0, report, replace=True)
+    _connect(confidence_aligned, confidence_out, 0, 0, report, replace=True)
     _table(comp, "OUTPUT_CONTRACT", [["output", "contract"],
         ["OUT_POSITION", TOP_CONTRACTS["POSITION"]],
-        ["OUT_COLOR", TOP_CONTRACTS["COLOR"]]], report)
+        ["OUT_COLOR", TOP_CONTRACTS["COLOR"]],
+        ["OUT_CONFIDENCE", TOP_CONTRACTS["CONFIDENCE"]]], report)
     return comp
+
+
+def _build_interaction_smoothing(comp, interaction, report):
+    """Add bounded GPU smoothing after the world-space interaction shader."""
+
+    seed = _ensure(comp, "constantTOP", "INTERACTION_SMOOTH_SEED", report)
+    _set_resolution(seed, 384, 384)
+    _expr(seed, ("resolutionw", "resw"), "op('interaction_field').width")
+    _expr(seed, ("resolutionh", "resh"), "op('interaction_field').height")
+    _set(seed, "format", "rgba32float")
+    for names in (("colorr", "color1r"), ("colorg", "color1g"),
+                  ("colorb", "color1b"), ("colora", "color1a", "alpha")):
+        _set(seed, names, 0.0)
+    history = _ensure(comp, "feedbackTOP", "INTERACTION_SMOOTH_HISTORY", report)
+    _connect(seed, history, 0, 0, report, replace=True)
+    smoothed = _glsl(
+        comp, "INTERACTION_SMOOTH", "interaction_smoothing",
+        [interaction, history], report, True)
+    _set(history, ("targettop", "target", "top"), smoothed.path)
+    return smoothed
 
 
 def _build_sensor(parent, report):
@@ -813,15 +2406,38 @@ def _build_sensor(parent, report):
            "Animated fallback sensor; later replace at the same TOP contracts", 245, 110)
     position = _in_top(comp, "WORLD_POSITION_IN", 0, report)
     page = _page(comp, "Sensor")
-    _custom(comp, page, "Menu", "Mode", "simulated", ("simulated", "replay"))
+    _custom(comp, page, "Menu", "Mode", "simulated",
+            ("simulated", "replay", "depth_sensor", "disabled"))
+    _custom(comp, page, "Float", "Interactionradius", 0.55,
+            label="Interaction Radius (metres)")
+    _custom(comp, page, "Float", "Forcegain", 0.35, label="Force Gain")
+    _custom(comp, page, "Float", "Interactionsmoothing", 0.35,
+            label="Interaction Smoothing")
+    _custom(comp, page, "Float", "Sensoragems", -1.0,
+            label="Sensor Age (ms; -1 unknown)")
+    _custom(comp, page, "Int", "Sensorframeid", -1, label="Sensor Frame ID")
+    _custom(comp, page, "Str", "Sensortoworld0", "1 0 0 0", label="Sensor to World row 0")
+    _custom(comp, page, "Str", "Sensortoworld1", "0 1 0 0", label="Sensor to World row 1")
+    _custom(comp, page, "Str", "Sensortoworld2", "0 0 1 0", label="Sensor to World row 2")
+    _custom(comp, page, "Str", "Sensortoworld3", "0 0 0 1", label="Sensor to World row 3")
 
     circle = _ensure(comp, "circleTOP", "SIMULATED_SENSOR_MASK", report, optional=True)
     if circle is None:
         circle = _ensure(comp, "noiseTOP", "SIMULATED_SENSOR_MASK_FALLBACK", report)
     _set_resolution(circle, 384, 384)
-    _set(circle, ("radius", "radius1"), 0.16)
-    _expr(circle, ("centerx", "cx", "tx"), "0.5 + 0.24 * math.sin(absTime.seconds * 0.73)")
-    _expr(circle, ("centery", "cy", "ty"), "0.5 + 0.18 * math.cos(absTime.seconds * 0.91)")
+    _set(circle, "radiusx", 0.16)
+    _set(circle, "radiusy", 0.16)
+    _set(circle, "radiusunit", "fraction")
+    _set(circle, "centerunit", "fraction")
+    # Circle TOP uses (0, 0), not (0.5, 0.5), for image center.
+    _expr(circle, "centerx", "0.24 * math.sin(absTime.seconds * 0.73)")
+    _expr(circle, "centery", "0.18 * math.cos(absTime.seconds * 0.91)")
+
+    disabled_zero = _ensure(comp, "constantTOP", "DISABLED_SENSOR_ZERO", report)
+    _set_resolution(disabled_zero, 384, 384)
+    for names in (("colorr", "color1r"), ("colorg", "color1g"),
+                  ("colorb", "color1b"), ("colora", "alpha")):
+        _set(disabled_zero, names, 0.0)
 
     replay = _ensure(comp, "baseCOMP", "REPLAY_SENSOR_ADAPTER", report)
     _style(replay, -60, 140, (0.36, 0.33, 0.20),
@@ -832,17 +2448,98 @@ def _build_sensor(parent, report):
     _set_resolution(replay_mask, 384, 384)
     _set(replay_mask, ("colora", "alpha"), 0.0)
     _out_top(replay, "OUT_MASK", replay_mask, 0, report)
+    replay_position = _ensure(replay, "constantTOP", "REPLACE_WITH_REPLAY_POSITION", report)
+    _set_resolution(replay_position, 384, 384)
+    _set(replay_position, ("colora", "alpha"), 0.0)
+    _out_top(replay, "OUT_POSITION", replay_position, 1, report)
+
+    sensor_adapter = _ensure(comp, "baseCOMP", "DEPTH_SENSOR_ADAPTER", report)
+    _style(sensor_adapter, 180, 140, (0.25, 0.40, 0.32),
+           "Local hardware adapter: output sensor-local metric-position RGBA", 270, 105)
+    adapter_page = _page(sensor_adapter, "Adapter")
+    _custom(sensor_adapter, adapter_page, "Toggle", "Enabled", False)
+    _custom(sensor_adapter, adapter_page, "Str", "Positioncontract",
+            TOP_CONTRACTS["SENSOR_POSITION"])
+    adapter_position = _ensure(sensor_adapter, "constantTOP",
+                               "REPLACE_WITH_CALIBRATED_SENSOR_POSITION", report)
+    _set_resolution(adapter_position, 384, 384)
+    _set(adapter_position, ("colora", "alpha"), 0.0)
+    _out_top(sensor_adapter, "OUT_POSITION", adapter_position, 0, report)
+    adapter_mask = _ensure(sensor_adapter, "constantTOP",
+                           "REPLACE_WITH_SENSOR_MASK", report)
+    _set_resolution(adapter_mask, 384, 384)
+    _set(adapter_mask, ("colorr", "color1r"), 0.0)
+    _out_top(sensor_adapter, "OUT_MASK", adapter_mask, 1, report)
+    adapter_confidence = _ensure(sensor_adapter, "constantTOP",
+                                 "REPLACE_WITH_SENSOR_CONFIDENCE", report)
+    _set_resolution(adapter_confidence, 384, 384)
+    _set(adapter_confidence, ("colorr", "color1r"), 1.0)
+    _set(adapter_confidence, ("colorg", "color1g"), 1.0)
+    _set(adapter_confidence, ("colorb", "color1b"), 1.0)
+    _out_top(sensor_adapter, "OUT_CONFIDENCE", adapter_confidence, 2, report)
+    depth_anything_bridge = _build_depth_anything_sensor_bridge(
+        sensor_adapter, report)
+    _wire_depth_anything_sensor_routes(
+        sensor_adapter,
+        depth_anything_bridge,
+        (adapter_position, adapter_mask, adapter_confidence),
+        report,
+    )
+    calibrated_adapter_position = _glsl(
+        comp, "CALIBRATE_SENSOR_POSITION", "sensor_to_world",
+        [sensor_adapter], report, True)
 
     mask_switch = _ensure(comp, "switchTOP", "SENSOR_MASK", report)
-    _connect(circle, mask_switch, 0, 0, report)
-    _connect(replay, mask_switch, 1, 0, report)
+    _connect(circle, mask_switch, 0, 0, report, replace=True)
+    _connect(replay, mask_switch, 1, 0, report, replace=True)
+    _connect(sensor_adapter, mask_switch, 2, 1, report, replace=True)
+    _connect(disabled_zero, mask_switch, 3, 0, report, replace=True)
     _expr(mask_switch, "index", "parent().par.Mode.menuIndex")
-    sensor_position = _glsl(comp, "sensor_position", "sensor_position", [mask_switch], report, True)
-    interaction = _glsl(comp, "interaction_field", "interaction_field",
-                        [position, mask_switch], report, False)
-    _out_top(comp, "OUT_SENSOR_POSITION", sensor_position, 0, report)
+    simulated_confidence = _ensure(comp, "constantTOP",
+                                   "SIMULATED_SENSOR_CONFIDENCE", report)
+    replay_confidence = _ensure(comp, "constantTOP",
+                                "REPLAY_SENSOR_CONFIDENCE", report)
+    for node in (simulated_confidence, replay_confidence):
+        _set_resolution(node, 384, 384)
+        _set(node, ("colorr", "color1r"), 1.0)
+        _set(node, ("colorg", "color1g"), 1.0)
+        _set(node, ("colorb", "color1b"), 1.0)
+    confidence_switch = _ensure(comp, "switchTOP", "SENSOR_CONFIDENCE", report)
+    _connect(simulated_confidence, confidence_switch, 0, 0, report, replace=True)
+    _connect(replay_confidence, confidence_switch, 1, 0, report, replace=True)
+    _connect(sensor_adapter, confidence_switch, 2, 2, report, replace=True)
+    _connect(disabled_zero, confidence_switch, 3, 0, report, replace=True)
+    _expr(confidence_switch, "index", "parent().par.Mode.menuIndex")
+    simulated_position = _glsl(comp, "sensor_position", "sensor_position",
+                               [circle], report, True)
+    sensor_position = _ensure(comp, "switchTOP", "SENSOR_POSITION_SOURCE", report)
+    _connect(simulated_position, sensor_position, 0, 0, report, replace=True)
+    _connect(replay, sensor_position, 1, 1, report, replace=True)
+    _connect(calibrated_adapter_position, sensor_position, 2, 0, report, replace=True)
+    _connect(disabled_zero, sensor_position, 3, 0, report, replace=True)
+    _expr(sensor_position, "index", "parent().par.Mode.menuIndex")
+    valid_sensor_position = _glsl(
+        comp, "APPLY_SENSOR_VALIDITY", "sensor_validity",
+        [sensor_position, mask_switch, confidence_switch], report, True)
+    raw_interaction = _glsl(
+        comp, "interaction_field", "interaction_field",
+        [position, valid_sensor_position], report, False)
+    interaction = _build_interaction_smoothing(
+        comp, raw_interaction, report)
+    interaction_debug = _glsl(
+        comp, "INTERACTION_DEBUG", "interaction_debug", [interaction], report, False)
+    _out_top(comp, "OUT_SENSOR_POSITION", valid_sensor_position, 0, report)
     _out_top(comp, "OUT_INTERACTION", interaction, 1, report)
     _out_top(comp, "OUT_SENSOR_MASK", mask_switch, 2, report)
+    _out_top(comp, "OUT_INTERACTION_DEBUG", interaction_debug, 3, report)
+    _text(comp, "CALIBRATION_CONTRACT",
+          "DEPTH_SENSOR_ADAPTER/OUT_POSITION must contain sensor-local XYZ "
+          "metres in RGB and occupancy in A. OUT_MASK and OUT_CONFIDENCE are "
+          "multiplied exactly once after SENSOR_TO_WORLD calibration. Interaction "
+          "uses a bounded 8x8 world-space occupancy-primitive search (64 samples "
+          "per generated point), an explicit low-resolution SDF approximation. "
+          "OUT_INTERACTION remains signed machine-readable force/occupancy; "
+          "OUT_INTERACTION_DEBUG is a display-only color visualization.", report)
     return comp
 
 
@@ -853,23 +2550,78 @@ def _build_persistence(parent, report):
     position = _in_top(comp, "POSITION_IN", 0, report)
     color = _in_top(comp, "COLOR_IN", 1, report)
     interaction = _in_top(comp, "INTERACTION_IN", 2, report)
+    confidence = _in_top(comp, "CONFIDENCE_IN", 3, report)
+    page = _page(comp, "Temporal Lifecycle")
+    _custom(comp, page, "Float", "Confidencedecay", 0.985,
+            label="Confidence Decay")
+    _custom(comp, page, "Float", "Ageseconds", 2.0,
+            label="Maximum Carried Age (seconds)")
+    _custom(comp, page, "Int", "Sourceepoch", 0,
+            label="Observed Source Epoch")
+    _custom(comp, page, "Int", "Resetcount", 0,
+            label="Automatic Reset Count")
+    _custom(comp, page, "Toggle", "Newframe", True,
+            label="Accepted New Frame (one cook pulse)")
+    _custom(comp, page, "Toggle", "Sourcevalid", True,
+            label="Accepted Source Fresh / Valid")
+    _custom(comp, page, "Float", "Deltaseconds", 1.0 / 60.0,
+            label="Bounded Render Delta Seconds")
+
+    state_seed = _ensure(comp, "constantTOP", "STATE_SEED", report)
+    _set_resolution(state_seed, 384, 384)
+    _set(state_seed, ("colorr", "color1r"), 0.0)
+    _set(state_seed, ("colorg", "color1g"), 1.0)
+    _set(state_seed, ("colorb", "color1b"), 0.0)
+    _set(state_seed, ("colora", "alpha"), 0.0)
+    state_feedback = _ensure(comp, "feedbackTOP", "STATE_HISTORY", report)
+    _connect(state_seed, state_feedback, 0, 0, report, replace=True)
+    frame_control = _ensure(comp, "constantTOP", "FRAME_CONTROL", report)
+    _set_resolution(frame_control, 1, 1)
+    _set(frame_control, "format", "rgba32float")
+    _expr(frame_control, ("colorr", "color1r"),
+          "1 if parent().par.Newframe else 0")
+    _expr(frame_control, ("colorg", "color1g"),
+          "min(0.25, max(0.0, parent().par.Deltaseconds.eval()))")
+    _expr(frame_control, ("colorb", "color1b"),
+          "1 if parent().par.Sourcevalid else 0")
+    _expr(frame_control, ("colora", "color1a", "alpha"),
+          "max(0.05, parent().par.Ageseconds.eval())")
+    observation = _glsl(
+        comp, "TEMPORAL_OBSERVATION", "temporal_observation",
+        [position, confidence, frame_control], report, False)
+    temporal_state = _glsl(comp, "temporal_state", "temporal_state",
+                           [observation, state_feedback], report, False)
+    _set(state_feedback, ("targettop", "target", "top"), temporal_state.path)
+
     feedback = _ensure(comp, "feedbackTOP", "POSITION_HISTORY", report)
     # Feedback TOP still needs a seed input even when its target is set.  The
     # live frame is the deterministic first-frame seed; subsequent frames come
     # from the target TOP below.
-    _connect(position, feedback, 0, 0, report)
+    _connect(position, feedback, 0, 0, report, replace=True)
+    advected_history = _glsl(
+        comp, "ADVECT_HISTORY", "temporal_advect",
+        [feedback, interaction, frame_control], report, True)
     persistent = _glsl(comp, "temporal_persistence", "temporal_persistence",
-                       [position, feedback, interaction], report, True)
-    _set(feedback, ("targettop", "target"), persistent.path)
+                       [position, advected_history, temporal_state], report, True)
+    _set(feedback, ("targettop", "target", "top"), persistent.path)
+    color_feedback = _ensure(comp, "feedbackTOP", "COLOR_HISTORY", report)
+    _connect(color, color_feedback, 0, 0, report, replace=True)
+    persistent_color = _glsl(comp, "temporal_color", "temporal_color",
+                             [color, color_feedback, temporal_state], report, False)
+    _set(color_feedback, ("targettop", "target", "top"), persistent_color.path)
     shader_info = _ensure(comp, "infoDAT", "TEMPORAL_SHADER_INFO", report, optional=True)
     if shader_info is not None:
         _set(shader_info, ("op", "operator"), persistent.path)
-    color_hold = _ensure(comp, "nullTOP", "PERSISTENT_COLOR", report)
-    _connect(color, color_hold, report=report)
     _out_top(comp, "OUT_POSITION", persistent, 0, report)
-    _out_top(comp, "OUT_COLOR", color_hold, 1, report)
+    _out_top(comp, "OUT_COLOR", persistent_color, 1, report)
     _out_top(comp, "OUT_INTERACTION", interaction, 2, report)
-    _text(comp, "RESET_NOTE", "Pulse POSITION_HISTORY Reset after changing source resolution or calibration.", report)
+    _out_top(comp, "OUT_TEMPORAL_STATE", temporal_state, 3, report)
+    _text(comp, "RESET_NOTE", "FRAME_CONTROL supplies one-cook new-frame, source-valid, and "
+          "bounded dt semantics, so a held source texture decays/ages without being "
+          "reabsorbed. POSITION_HISTORY, COLOR_HISTORY, and STATE_HISTORY are reset "
+          "automatically when source session, geometry resolution, calibration, or "
+          "adapter identity changes. Pulse all three Reset parameters after any "
+          "untracked manual contract change.", report)
     return comp
 
 
@@ -883,6 +2635,10 @@ def _build_completion(parent, report):
     page = _page(comp, "Completion")
     _custom(comp, page, "Menu", "Mode", "hybrid", ("fog", "procedural", "hybrid"))
     _custom(comp, page, "Float", "Fogdensity", 0.35, label="Fog Density")
+    _custom(comp, page, "Float", "Disocclusionradius", 2.0,
+            label="Disocclusion Radius (pixels)")
+    _custom(comp, page, "Float", "Fognoise", 0.50,
+            label="Fog Noise Amount")
     _custom(comp, page, "Float", "Proceduralmix", 0.72,
             label="Procedural Mix")
 
@@ -898,9 +2654,9 @@ def _build_completion(parent, report):
     position_switch = _ensure(comp, "switchTOP", "COMPLETED_POSITION", report)
     color_switch = _ensure(comp, "switchTOP", "COMPLETED_COLOR", report)
     for index, source in enumerate((position, procedural_position, procedural_position)):
-        _connect(source, position_switch, index, 0, report)
+        _connect(source, position_switch, index, 0, report, replace=True)
     for index, source in enumerate((fog_color, procedural_color, hybrid_color)):
-        _connect(source, color_switch, index, 0, report)
+        _connect(source, color_switch, index, 0, report, replace=True)
     _expr(position_switch, "index", "parent().par.Mode.menuIndex")
     _expr(color_switch, "index", "parent().par.Mode.menuIndex")
     _out_top(comp, "OUT_POSITION", position_switch, 0, report)
@@ -915,75 +2671,270 @@ def _build_render_contract(parent, report):
     position = _in_top(comp, "POSITION_IN", 0, report)
     color = _in_top(comp, "COLOR_IN", 1, report)
     interaction = _in_top(comp, "INTERACTION_IN", 2, report)
+    temporal_state = _in_top(comp, "TEMPORAL_STATE_IN", 3, report)
     _out_top(comp, "OUT_POSITION", position, 0, report)
     _out_top(comp, "OUT_COLOR", color, 1, report)
     _out_top(comp, "OUT_INTERACTION", interaction, 2, report)
+    _out_top(comp, "OUT_TEMPORAL_STATE", temporal_state, 3, report)
     _table(comp, "TOP_CONTRACTS", [["name", "contract"]] +
            [[name, TOP_CONTRACTS[name]] for name in
-            ("POSITION", "COLOR", "INTERACTION")], report)
+            ("POSITION", "COLOR", "INTERACTION", "TEMPORAL_STATE")], report)
     return comp
 
 
 def _build_point_render(parent, report):
     comp = _ensure(parent, "baseCOMP", "POINT_RENDER", report)
     _style(comp, 390, 350, (0.38, 0.49, 0.17),
-           "TOP-to-POP point cloud with center and stereo Render Simple views", 260, 115)
+           "Metric point cloud with single, triple-surface and stereo views", 270, 120)
     position = _in_top(comp, "POSITION_IN", 0, report)
     color = _in_top(comp, "COLOR_IN", 1, report)
     page = _page(comp, "Render")
     _custom(comp, page, "Int", "Maxpoints", 120000, label="Maximum Points")
     _custom(comp, page, "Float", "Pointsize", 3.0, label="Point Thickness")
+    _custom(comp, page, "Float", "Pointkeep", 0.68,
+            label="Visible Point Fraction")
+    _custom(comp, page, "Float", "Pointopacity", 0.92,
+            label="Point Opacity")
+    _custom(comp, page, "Float", "Ipdmetres", 0.064,
+            label="Preview Inter-Pupillary Distance (metres)")
+    _custom(comp, page, "Float", "Surfacefovdegrees", 60.0,
+            label="Artistic Surface Camera FOV (degrees)")
+    _custom(comp, page, "Float", "Wrapfovdegrees", 78.0,
+            label="Panoramic Surface Camera FOV (degrees)")
+    _custom(comp, page, "Float", "Wrapyawdegrees", 30.0,
+            label="Panoramic Side Yaw (degrees)")
+    _custom(comp, page, "Float", "Artisticyawdegrees", 18.0,
+            label="Artistic Side Yaw (degrees)")
+    _custom(comp, page, "Float", "Artisticoffsetmetres", 0.45,
+            label="Artistic Side Offset (metres)")
 
     points = _ensure(comp, "toptoPOP", "POSITION_TO_POINTS", report, optional=True)
+    point_glyph = _glsl(comp, "POINT_GLYPH", "point_glyph", [], report, False)
+    _set_resolution(point_glyph, 64, 64)
     point_material = _ensure(comp, "pointspriteMAT", "POINT_SPRITE_MATERIAL",
                              report, optional=True)
     if point_material is not None:
         _expr(point_material, "pointsize", "parent().par.Pointsize")
-        _set(point_material, "colormap", color.path)
+        _expr(point_material, "alpha", "parent().par.Pointopacity")
+        _set(point_material, "colormap", point_glyph.path)
+        _set(point_material, "colormapfilter", "linear")
+        _set(point_material, "blending", True)
+        _set(point_material, "srcblend", "sa")
+        _set(point_material, "destblend", "omsa")
+        _set(point_material, "alphatest", True)
+        _set(point_material, "alphafunc", "greater")
+        _set(point_material, "alphathreshold", 0.01)
     render_center = None
     render_left = None
     render_right = None
+    triple_renders = {}
     if points is not None:
         _set(points, "rgba", "pactive")
         _set(points, "input0top", position.path)
         _set(points, "input0chanscope", "r g b a")
-        _set(points, "input0attrscope", "P P P P")
+        # TOP to POP maps one attribute component per sampled channel. Repeating
+        # a vector attribute name asks every channel to provide the whole
+        # vector, producing "More attribute values than channels specified".
+        _set(points, "input0attrscope", "P(0) P(1) P(2) active")
         _set(points, "input0filter", "nearest")
+        # Store source color on each point. Using the full source image as the
+        # Point Sprite MAT texture makes every point a tiny textured square and
+        # visually collapses the cloud back into a dense image plate.
+        if _set_sequence_blocks(points, "input", 2):
+            _set(points, "input1top", color.path)
+            _set(points, "input1chanscope", "r g b a")
+            _set(
+                points,
+                "input1attrscope",
+                "Color(0) Color(1) Color(2) Color(3)",
+            )
+            _set(points, "input1filter", "nearest")
         _set(points, "surftype", "points")
         _set(points, "texture", "point")
         _set(points, "maxpointsenable", True)
         _expr(points, "maxpoints", "parent().par.Maxpoints")
 
-        def make_render(name, eye_offset):
-            node = _ensure(comp, "rendersimpleTOP", name, report, optional=True)
+        # TouchDesigner maps the Thin Random slider cubically. Convert the
+        # public linear keep fraction so 0.68 means approximately 68% of active
+        # points, using a stable seed to avoid frame-to-frame sparkle.
+        point_source = points
+        point_thin = _ensure(comp, "deletePOP", "VISIBLE_POINT_THIN", report,
+                             optional=True)
+        if point_thin is not None:
+            _connect(points, point_thin, report=report, replace=True)
+            _set(point_thin, "entity", "point")
+            _set(point_thin, "thinenabled", True)
+            _set(point_thin, "thininvert", False)
+            _expr(
+                point_thin,
+                "thinrandom",
+                "1.0 - pow(max(0.0, 1.0 - parent().par.Pointkeep.eval()), "
+                "1.0 / 3.0)",
+            )
+            _set(point_thin, "thinrandomseed", 19)
+            point_source = point_thin
+
+        # Render Simple cannot translate a camera on X; its old eye path moved
+        # and toe-in rotated the geometry, and Normalize Geo destroyed metres.
+        # A managed Geometry/Camera/Render path preserves world scale and uses
+        # parallel per-eye Camera COMPs with +/- IPD/2 shifts.
+        geo = _ensure(comp, "geometryCOMP", "POINT_WORLD_GEO", report,
+                      optional=True)
+        selected = None
+        if geo is not None:
+            selected = _ensure(geo, "selectPOP", "SELECT_POINT_WORLD", report,
+                               optional=True)
+            if selected is not None:
+                _set(selected, "pop", point_source.path)
+                try:
+                    selected.render = True
+                    selected.display = True
+                except Exception:
+                    pass
+            # Disable only TouchDesigner's known default primitive, never an
+            # artist's unknown nodes inside the managed geometry boundary.
+            default_primitive = _child(geo, "torus1")
+            if default_primitive is not None:
+                try:
+                    default_primitive.render = False
+                    default_primitive.display = False
+                except Exception:
+                    pass
+            if point_material is not None:
+                _set(geo, "material", point_material.path)
+
+        cameras = {}
+        for camera_name, shift_expression in (
+            ("CAMERA_CENTER_METRIC", "0.0"),
+            ("CAMERA_LEFT_METRIC", "-parent().par.Ipdmetres.eval() * 0.5"),
+            ("CAMERA_RIGHT_METRIC", "parent().par.Ipdmetres.eval() * 0.5"),
+        ):
+            camera = _ensure(comp, "cameraCOMP", camera_name, report,
+                             optional=True)
+            if camera is not None:
+                _expr(camera, "tx", shift_expression)
+                _set(camera, "ty", 0.0)
+                _set(camera, "tz", 0.0)
+                _set(camera, "rx", 0.0)
+                _set(camera, "ry", 0.0)
+                _set(camera, "rz", 0.0)
+                # Match the default 60-degree vertical reconstruction
+                # intrinsics so the center camera reprojects the source
+                # without an avoidable scale mismatch.
+                _set(camera, "fov", 60.0)
+                _set(camera, "near", 0.05)
+                _set(camera, "far", 100.0)
+                _set(camera, "ipdshift", 0.0)
+            cameras[camera_name] = camera
+
+        def make_metric_render(name, camera):
+            if geo is None or selected is None or camera is None:
+                return None
+            node = _ensure(comp, "renderTOP", name, report, optional=True)
             if node is None:
                 return None
-            _set(node, "pop", points.path)
-            _set(node, "colormap", color.path)
+            _set(node, "geometry", geo.path)
+            _set(node, "camera", camera.path)
+            _set(node, "lights", "")
             if point_material is not None:
-                _set(node, "materialsource", "matnode")
-                _set(node, "mat", point_material.path)
-            else:
-                _set(node, "materialsource", "internalphong")
-            _set(node, "normalizegeo", True)
-            _set(node, "ortho", False)
-            _set(node, "fov", 55.0)
-            _set(node, "camdistance", 3.0)
-            _set(node, "geotranslatex", eye_offset)
-            _set(node, "georotatey", eye_offset * -35.0)
+                _set(node, "overridemat", point_material.path)
             _set(node, "bgcolorr", 0.005)
             _set(node, "bgcolorg", 0.009)
             _set(node, "bgcolorb", 0.018)
-            _set(node, "bgcolora", 1.0)
-            _set(node, "diffuser", 0.90)
-            _set(node, "diffuseg", 0.95)
-            _set(node, "diffuseb", 1.0)
+            _set(node, "bgcolora", 0.0)
             _set_resolution(node, 1280, 720)
             return node
 
-        render_center = make_render("RENDER_CENTER", 0.0)
-        render_left = make_render("RENDER_LEFT_EYE", -0.035)
-        render_right = make_render("RENDER_RIGHT_EYE", 0.035)
+        render_center = make_metric_render(
+            "METRIC_RENDER_CENTER", cameras.get("CAMERA_CENTER_METRIC"))
+        render_left = make_metric_render(
+            "METRIC_RENDER_LEFT_EYE", cameras.get("CAMERA_LEFT_METRIC"))
+        render_right = make_metric_render(
+            "METRIC_RENDER_RIGHT_EYE", cameras.get("CAMERA_RIGHT_METRIC"))
+
+        # The panoramic cameras share exactly one origin. Their different yaw
+        # directions form a continuous surrounding view when the physical wall
+        # angles and camera FOV are calibrated together.
+        for side, yaw_expression in (
+            # TouchDesigner Camera COMP positive Y rotation looks toward the
+            # audience's left when the camera faces -Z.
+            ("LEFT", "parent().par.Wrapyawdegrees.eval()"),
+            ("CENTER", "0.0"),
+            ("RIGHT", "-parent().par.Wrapyawdegrees.eval()"),
+        ):
+            camera_name = "CAMERA_WRAP_" + side
+            camera = _ensure(comp, "cameraCOMP", camera_name, report,
+                             optional=True)
+            if camera is not None:
+                _set(camera, "tx", 0.0)
+                _set(camera, "ty", 0.0)
+                _set(camera, "tz", 0.0)
+                _set(camera, "rx", 0.0)
+                _expr(camera, "ry", yaw_expression)
+                _set(camera, "rz", 0.0)
+                _expr(camera, "fov", "parent().par.Wrapfovdegrees.eval()")
+                _set(camera, "near", 0.05)
+                _set(camera, "far", 100.0)
+                _set(camera, "ipdshift", 0.0)
+            triple_renders["WRAP_" + side] = make_metric_render(
+                "METRIC_RENDER_WRAP_" + side, camera)
+
+        # Artistic views intentionally move as well as turn the side cameras.
+        # This sacrifices seam continuity but exposes parallax and makes the
+        # image-derived surface read more clearly as a 3D sculpture.
+        for side, offset_expression, yaw_expression in (
+            ("LEFT", "-parent().par.Artisticoffsetmetres.eval()",
+             "-parent().par.Artisticyawdegrees.eval()"),
+            ("CENTER", "0.0", "0.0"),
+            ("RIGHT", "parent().par.Artisticoffsetmetres.eval()",
+             "parent().par.Artisticyawdegrees.eval()"),
+        ):
+            camera_name = "CAMERA_ARTISTIC_" + side
+            camera = _ensure(comp, "cameraCOMP", camera_name, report,
+                             optional=True)
+            if camera is not None:
+                _expr(camera, "tx", offset_expression)
+                _set(camera, "ty", 0.0)
+                _set(camera, "tz", 0.0)
+                _set(camera, "rx", 0.0)
+                _expr(camera, "ry", yaw_expression)
+                _set(camera, "rz", 0.0)
+                _expr(camera, "fov", "parent().par.Surfacefovdegrees.eval()")
+                _set(camera, "near", 0.05)
+                _set(camera, "far", 100.0)
+                _set(camera, "ipdshift", 0.0)
+            triple_renders["ARTISTIC_" + side] = make_metric_render(
+                "METRIC_RENDER_ARTISTIC_" + side, camera)
+
+        # A stock Render Simple center view remains a safe pre-2025 fallback.
+        # It deliberately produces mono eyes: fake toe-in stereo is worse than
+        # an honest mono fallback. Metric geometry is never normalized.
+        if render_center is None:
+            legacy = _ensure(comp, "rendersimpleTOP", "METRIC_MONO_FALLBACK",
+                             report, optional=True)
+            if legacy is not None:
+                _set(legacy, "pop", points.path)
+                _set(legacy, "colormap", color.path)
+                if point_material is not None:
+                    _set(legacy, "materialsource", "matnode")
+                    _set(legacy, "mat", point_material.path)
+                _set(legacy, "normalizegeo", False)
+                _set(legacy, "ortho", False)
+                _set(legacy, "fov", 60.0)
+                _set(legacy, "camdistance", 0.0)
+                _set(legacy, "geotranslatex", 0.0)
+                _set(legacy, "georotatey", 0.0)
+                _set(legacy, "bgcolorr", 0.005)
+                _set(legacy, "bgcolorg", 0.009)
+                _set(legacy, "bgcolorb", 0.018)
+                _set(legacy, "bgcolora", 0.0)
+                _set_resolution(legacy, 1280, 720)
+            render_center = legacy
+            render_left = legacy
+            render_right = legacy
+            for mode in ("WRAP", "ARTISTIC"):
+                for side in ("LEFT", "CENTER", "RIGHT"):
+                    triple_renders[mode + "_" + side] = legacy
 
     # A valid color TOP fallback makes the project inspectable even if opened in
     # a pre-POP TouchDesigner build.  In 2025.32820 the switches select renders.
@@ -993,21 +2944,43 @@ def _build_point_render(parent, report):
     for switch, rendered in ((center_switch, render_center),
                              (left_switch, render_left),
                              (right_switch, render_right)):
-        _connect(color, switch, 0, 0, report)
+        _connect(color, switch, 0, 0, report, replace=True)
         if rendered is not None:
-            _connect(rendered, switch, 1, 0, report)
+            _connect(rendered, switch, 1, 0, report, replace=True)
             _set(switch, "index", 1)
         else:
             _set(switch, "index", 0)
     _out_top(comp, "OUT_CENTER", center_switch, 0, report)
     _out_top(comp, "OUT_LEFT_EYE", left_switch, 1, report)
     _out_top(comp, "OUT_RIGHT_EYE", right_switch, 2, report)
+    output_index = 3
+    for mode in ("WRAP", "ARTISTIC"):
+        for side in ("LEFT", "CENTER", "RIGHT"):
+            key = mode + "_" + side
+            switch = _ensure(
+                comp, "switchTOP", key + "_OR_FALLBACK", report)
+            _connect(color, switch, 0, 0, report, replace=True)
+            rendered = triple_renders.get(key)
+            if rendered is not None:
+                _connect(rendered, switch, 1, 0, report, replace=True)
+                _set(switch, "index", 1)
+            else:
+                _set(switch, "index", 0)
+            _out_top(comp, "OUT_" + key, switch, output_index, report)
+            output_index += 1
     _table(comp, "RENDER_PATH", [
         ["stage", "operator", "contract"],
-        ["unpack", "POSITION_TO_POINTS (TOP to POP)", "RGBA = Position and Active"],
-        ["thickness", "POINT_SPRITE_MATERIAL", "Pointsize parameter; 3 px default"],
-        ["center", "RENDER_CENTER (Render Simple TOP)", TOP_CONTRACTS["INSTALLATION"]],
-        ["stereo", "RENDER_LEFT_EYE / RENDER_RIGHT_EYE", TOP_CONTRACTS["STEREO"]],
+        ["unpack", "POSITION_TO_POINTS (TOP to POP)", "P + active plus aligned per-point Color"],
+        ["spacing", "VISIBLE_POINT_THIN (Delete POP)", "stable random keep; 68% default"],
+        ["glyph", "POINT_GLYPH + POINT_SPRITE_MATERIAL", "soft circular alpha; no source-image sprite texture"],
+        ["thickness", "POINT_SPRITE_MATERIAL", "Pointsize and Pointopacity controls"],
+        ["metric geometry", "POINT_WORLD_GEO/SELECT_POINT_WORLD", "no normalization; XYZ remain metres"],
+        ["center", "METRIC_RENDER_CENTER + CAMERA_CENTER_METRIC", TOP_CONTRACTS["INSTALLATION"]],
+        ["panoramic wrap", "METRIC_RENDER_WRAP_* + CAMERA_WRAP_*",
+         "shared origin; side yaw follows Wrapyawdegrees"],
+        ["artistic multi-angle", "METRIC_RENDER_ARTISTIC_* + CAMERA_ARTISTIC_*",
+         "side translation plus toe-in; deliberate parallax"],
+        ["stereo", "METRIC_RENDER_LEFT/RIGHT + parallel Camera COMPs", "+/- Ipdmetres/2; no toe-in"],
         ["fallback", "*_OR_FALLBACK input 0", "completed color TOP"],
     ], report)
     return comp
@@ -1019,12 +2992,116 @@ def _build_installation(parent, report):
            "Visually inspectable point render plus disocclusion fog plate", 255, 110)
     point_render = _in_top(comp, "POINT_RENDER_IN", 0, report)
     fog_plate = _in_top(comp, "FOG_PLATE_IN", 1, report)
+    page = _page(comp, "View Completion")
+    _custom(comp, page, "Float", "Fogdensity", 0.35, label="View Fog Density")
+    _custom(comp, page, "Float", "Fogradius", 2.0, label="View Fog Radius")
     grade = _glsl(comp, "installation_grade", "installation_grade",
                   [point_render, fog_plate], report, False)
     _set_resolution(grade, 1280, 720)
     output = _ensure(comp, "nullTOP", "OUT_INSTALLATION", report)
-    _connect(grade, output, report=report)
+    _connect(grade, output, report=report, replace=True)
     _out_top(comp, "out1", output, 0, report)
+    return comp
+
+
+def _build_triple_display(parent, report):
+    comp = _ensure(parent, "baseCOMP", "TRIPLE_DISPLAY", report)
+    _style(comp, 690, 520, (0.43, 0.42, 0.12),
+           "Three-surface panoramic wrap and artistic multi-angle outputs", 285, 125)
+    page = _page(comp, "View Completion")
+    _custom(comp, page, "Float", "Fogdensity", 0.35,
+            label="Per-Surface Fog Density")
+    _custom(comp, page, "Float", "Fogradius", 2.0,
+            label="Per-Surface Fog Radius")
+    _custom(comp, page, "Float", "Wrapcoverage", 0.55,
+            label="Panoramic Procedural Coverage")
+    _custom(comp, page, "Float", "Wrapnoise", 0.42,
+            label="Panoramic Coverage Noise")
+
+    inputs = {}
+    input_index = 0
+    for mode in ("WRAP", "ARTISTIC"):
+        for side in ("LEFT", "CENTER", "RIGHT"):
+            key = mode + "_" + side
+            inputs[key] = _in_top(
+                comp, key + "_IN", input_index, report)
+            input_index += 1
+    fog_plate = _in_top(comp, "FOG_PLATE_IN", input_index, report)
+
+    graded = {}
+    coverage = {}
+    output_index = 0
+    layouts = {}
+    for mode in ("WRAP", "ARTISTIC"):
+        for side_index, side in enumerate(("LEFT", "CENTER", "RIGHT")):
+            key = mode + "_" + side
+            grade_input = inputs[key]
+            if mode == "WRAP":
+                coverage[key] = _glsl(
+                    comp, "COVERAGE_" + key, "panoramic_coverage",
+                    [inputs[key]], report, False)
+                coverage_source = comp.op("COVERAGE_" + key + "_PIXEL")
+                _patch_shader_float(
+                    coverage_source, "wrapCoverage",
+                    "FLEXGPU_WRAP_COVERAGE",
+                    _value(comp, "Wrapcoverage", 0.55))
+                _patch_shader_float(
+                    coverage_source, "wrapNoise",
+                    "FLEXGPU_WRAP_NOISE",
+                    _value(comp, "Wrapnoise", 0.42))
+                _patch_shader_float(
+                    coverage_source, "wrapPanelIndex",
+                    "FLEXGPU_WRAP_PANEL_INDEX", float(side_index))
+                _set_resolution(coverage[key], 960, 540)
+                grade_input = coverage[key]
+            graded[key] = _glsl(
+                comp, "GRADE_" + key, "installation_grade",
+                [grade_input, fog_plate], report, False)
+            grade_source = comp.op("GRADE_" + key + "_PIXEL")
+            _patch_shader_float(
+                grade_source, "viewFogDensity",
+                "FLEXGPU_VIEW_FOG_DENSITY",
+                _value(comp, "Fogdensity", 0.35))
+            _patch_shader_float(
+                grade_source, "viewFogRadius",
+                "FLEXGPU_VIEW_FOG_RADIUS",
+                _value(comp, "Fogradius", 2.0))
+            _set_resolution(graded[key], 960, 540)
+            _out_top(comp, "OUT_" + key, graded[key], output_index, report)
+            output_index += 1
+
+        layout = _ensure(
+            comp, "layoutTOP", mode + "_MOSAIC", report, optional=True)
+        if layout is None:
+            layout = _ensure(
+                comp, "compositeTOP", mode + "_MOSAIC_FALLBACK", report)
+        for side_index, side in enumerate(("LEFT", "CENTER", "RIGHT")):
+            _connect(
+                graded[mode + "_" + side], layout, side_index, 0,
+                report, replace=True)
+        _set(layout, ("align", "direction"), "horizontal")
+        _set_resolution(layout, 2880, 540)
+        layouts[mode] = layout
+        _out_top(comp, "OUT_" + mode + "_MOSAIC", layout, output_index, report)
+        output_index += 1
+
+    _table(comp, "SURFACE_CONTRACT", [
+        ["output", "camera relationship", "use"],
+        ["OUT_WRAP_LEFT/CENTER/RIGHT", "one origin; TD camera yaw +A / 0 / -A",
+         "calibrated surrounding walls with continuous perspective"],
+        ["OUT_WRAP_MOSAIC", "left | center | right",
+         "single-canvas preview, recorder, or projector mapper input"],
+        ["OUT_ARTISTIC_LEFT/CENTER/RIGHT", "translated and rotated cameras",
+         "sculptural multi-angle presentation with intentional seams"],
+        ["OUT_ARTISTIC_MOSAIC", "left | center | right",
+         "single-canvas preview, recorder, or projector mapper input"],
+    ], report)
+    _text(comp, "README_FIRST",
+          "Each surface TOP is an independent projector/LED feed. The mosaic "
+          "TOPs concatenate left, center and right only for preview, recording "
+          "or a downstream mapping tool. Panoramic Wrap requires venue camera "
+          "yaw/FOV calibration. Artistic Multi-Angle deliberately does not "
+          "promise continuous seams.", report)
     return comp
 
 
@@ -1034,19 +3111,34 @@ def _build_stereo(parent, report):
            "Desktop left/right/SBS preview; no OpenVR dependency", 245, 105)
     left = _in_top(comp, "LEFT_IN", 0, report)
     right = _in_top(comp, "RIGHT_IN", 1, report)
+    page = _page(comp, "View Completion")
+    _custom(comp, page, "Float", "Fogdensity", 0.35, label="Per-eye Fog Density")
+    _custom(comp, page, "Float", "Fogradius", 2.0, label="Per-eye Fog Radius")
+    left_grade = _glsl(comp, "GRADE_LEFT_EYE", "view_completion", [left], report, False)
+    right_grade = _glsl(comp, "GRADE_RIGHT_EYE", "view_completion", [right], report, False)
     layout = _ensure(comp, "layoutTOP", "STEREO_SIDE_BY_SIDE", report, optional=True)
     if layout is None:
         layout = _ensure(comp, "compositeTOP", "STEREO_SIDE_BY_SIDE_FALLBACK", report)
-    _connect(left, layout, 0, 0, report)
-    _connect(right, layout, 1, 0, report)
+    _connect(left_grade, layout, 0, 0, report, replace=True)
+    _connect(right_grade, layout, 1, 0, report, replace=True)
     _set(layout, ("align", "direction"), "horizontal")
     _set_resolution(layout, 2560, 720)
-    _out_top(comp, "OUT_LEFT_EYE", left, 0, report)
-    _out_top(comp, "OUT_RIGHT_EYE", right, 1, report)
+    _out_top(comp, "OUT_LEFT_EYE", left_grade, 0, report)
+    _out_top(comp, "OUT_RIGHT_EYE", right_grade, 1, report)
     _out_top(comp, "OUT_STEREO_SBS", layout, 2, report)
     _text(comp, "README_FIRST", "This is a headset-independent stereo preview. "
-          "A future OpenXR/OpenVR adapter should consume the same point world and "
-          "replace only the camera/output layer.", report)
+          "The preview uses parallel metric Camera COMPs and does not consume a "
+          "headset pose, per-eye projection matrices, hidden-area mesh, late-latch "
+          "timing, or compositor textures. An OpenXR/OpenVR adapter must provide "
+          "those per-frame values, consume the same metric point world, and replace "
+          "the complete camera/output layer; this SBS TOP is not a headset runtime.", report)
+    _table(comp, "HEADSET_ADAPTER_CONTRACT", [
+        ["required input", "units / convention"],
+        ["world_from_eye_left/right", "right-handed row-major metres"],
+        ["projection_left/right", "runtime-supplied clip-space matrices"],
+        ["predicted_display_time", "runtime monotonic timestamp"],
+        ["submission", "headset compositor texture contract"],
+    ], report)
     return comp
 
 
@@ -1063,11 +3155,11 @@ def _build_telemetry(parent, watched, report):
     merge = _ensure(comp, "mergeCHOP", "PERFORMANCE_METRICS", report, optional=True)
     if merge is not None:
         for index, info in enumerate(info_nodes):
-            _connect(info, merge, index, 0, report)
+            _connect(info, merge, index, 0, report, replace=True)
         metrics = _ensure(comp, "nullCHOP", "OUT_PERFORMANCE", report, optional=True)
-        _connect(merge, metrics, report=report)
+        _connect(merge, metrics, report=report, replace=True)
         out = _ensure(comp, "outCHOP", "out1", report, optional=True)
-        _connect(metrics, out, report=report)
+        _connect(metrics, out, report=report, replace=True)
     status_dat = _ensure(comp, "infoDAT", "OPERATOR_STATUS", report, optional=True)
     if status_dat is not None:
         _set(status_dat, ("op", "operator"), watched[-1][1].path)
@@ -1079,6 +3171,16 @@ def _build_telemetry(parent, watched, report):
         ["world_age", "future model adapter", "drop stale AI frames; never queue"],
         ["sensor_age", "future sensor adapter", "fall back to simulated/replay mode"],
         ["target_fps", "launcher tier", "3080=60/72; 4090/5090=60/90"],
+    ], report)
+    _table(comp, "LIVE_HEALTH", [
+        ["metric", "value"],
+        ["status", "initializing"],
+        ["source_age_ms", "-1"],
+        ["sensor_age_ms", "-1"],
+        ["source_frame_id", "-1"],
+        ["sensor_frame_id", "-1"],
+        ["temporal_resets", "0"],
+        ["frame_time_ms", "0"],
     ], report)
     return comp
 
@@ -1112,6 +3214,495 @@ def _build_experimental(parent, report):
     return comp
 
 
+def _first_input(node):
+    try:
+        inputs = node.inputs
+        return inputs[0] if inputs else None
+    except Exception:
+        return None
+
+
+def _install_interaction_debug_output(sensor, pipeline, report):
+    """Add the display-only interaction view without rebuilding other stages."""
+
+    if sensor is None or pipeline is None:
+        raise RuntimeError("interaction debug requires the existing sensor and pipeline")
+    interaction = sensor.op("interaction_field")
+    if interaction is None:
+        raise RuntimeError("interaction_field is missing; build the working pipeline first")
+    interaction_debug = _glsl(
+        sensor, "INTERACTION_DEBUG", "interaction_debug", [interaction], report, False)
+    _out_top(sensor, "OUT_INTERACTION_DEBUG", interaction_debug, 3, report)
+    root_output = _ensure(pipeline, "nullTOP", "OUT_INTERACTION_DEBUG", report)
+    _connect(sensor, root_output, 0, 3, report, replace=True)
+    _style(
+        root_output, 1030, -1160, (0.18, 0.50, 0.28),
+        "OUT_INTERACTION_DEBUG", 185, 70)
+    return interaction_debug
+
+
+def install_depth_anything_sensor_bridge(root=None):
+    """Install only the default-off, replaceable sensor bridge and routes.
+
+    This bounded local-project installer never rebuilds ``WORKING_PIPELINE``.
+    It preserves the adapter's current outputs as disabled fallbacks, refreshes
+    only ``DEPTH_ANYTHING_BRIDGE`` plus three named route switches, and does
+    not delete operators or load a model/camera SDK inside TouchDesigner.
+    """
+
+    global LAST_REPORT
+    report = BuildReport()
+    LAST_REPORT = report
+    if root is None:
+        root = _op(ROOT_PATH)
+    elif isinstance(root, str):
+        root = _op(root)
+    if root is None:
+        raise RuntimeError("FlexGPU root %s does not exist" % ROOT_PATH)
+    adapter = root.op(
+        "WORKING_PIPELINE/SENSOR_INTERACTION/DEPTH_SENSOR_ADAPTER")
+    if adapter is None:
+        raise RuntimeError(
+            "depth sensor adapter is missing; build the working pipeline first")
+
+    existing_runtime = adapter.op("DEPTH_ANYTHING_BRIDGE/sensor_runtime")
+    if existing_runtime is not None:
+        try:
+            existing_runtime.module.stop(adapter.op("DEPTH_ANYTHING_BRIDGE"))
+        except Exception:
+            pass
+
+    fallback_names = (
+        ("OUT_POSITION", "DEPTH_ANYTHING_POSITION_ROUTE",
+         "REPLACE_WITH_CALIBRATED_SENSOR_POSITION"),
+        ("OUT_MASK", "DEPTH_ANYTHING_MASK_ROUTE", "REPLACE_WITH_SENSOR_MASK"),
+        ("OUT_CONFIDENCE", "DEPTH_ANYTHING_CONFIDENCE_ROUTE",
+         "REPLACE_WITH_SENSOR_CONFIDENCE"),
+    )
+    fallbacks = []
+    for output_name, route_name, placeholder_name in fallback_names:
+        output = adapter.op(output_name)
+        source = _first_input(output)
+        if source is not None and str(getattr(source, "name", "")) == route_name:
+            source = _first_input(source)
+        if source is None:
+            source = adapter.op(placeholder_name)
+        if source is None:
+            raise RuntimeError(
+                "could not preserve sensor fallback source for " + output_name)
+        fallbacks.append(source)
+
+    bridge = _build_depth_anything_sensor_bridge(adapter, report)
+    _wire_depth_anything_sensor_routes(adapter, bridge, tuple(fallbacks), report)
+    sensor = root.op("WORKING_PIPELINE/SENSOR_INTERACTION")
+    pipeline = root.op("WORKING_PIPELINE")
+    _install_interaction_debug_output(sensor, pipeline, report)
+    try:
+        bridge.store("depth_anything_bridge_install_report", report.as_dict())
+    except Exception:
+        pass
+    print("[FlexGPU runtime] Depth Anything sensor bridge installed disabled: %s "
+          "(%d created, %d reused, %d warnings)" %
+          (bridge.path, len(report.created), len(report.reused),
+           len(report.warnings)))
+    return bridge
+
+
+def install_depth_anything_geometry_bridge(root=None):
+    """Install only the alternative generated-image Depth Anything branch.
+
+    This does not touch the webcam/audience sensor bridge. It reuses the
+    adapter's current generated RGB input, adds isolated ports and routes, and
+    leaves ``Geometrysource`` on its existing value (MoGe by default).
+    """
+
+    global LAST_REPORT
+    report = BuildReport()
+    LAST_REPORT = report
+    if root is None:
+        root = _op(ROOT_PATH)
+    elif isinstance(root, str):
+        root = _op(root)
+    if root is None:
+        raise RuntimeError("FlexGPU root %s does not exist" % ROOT_PATH)
+    adapter = root.op(
+        "WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER")
+    if adapter is None:
+        raise RuntimeError(
+            "StreamDiffusion adapter is missing; build the working pipeline first")
+
+    existing = adapter.op(
+        "DEPTH_ANYTHING_GEOMETRY_BRIDGE/bridge_runtime")
+    if existing is not None:
+        try:
+            existing.module.stop(
+                adapter.op("DEPTH_ANYTHING_GEOMETRY_BRIDGE"))
+        except Exception:
+            pass
+
+    page = _page(adapter, "Adapter")
+    _custom(adapter, page, "Menu", "Geometrysource", "moge2",
+            ("moge2", "depth_anything"), label="Generated Geometry Source")
+    moge2_routes = tuple(adapter.op(name) for name in (
+        "MOGE2_RGB_ROUTE", "MOGE2_DEPTH_ROUTE",
+        "MOGE2_CONFIDENCE_ROUTE", "MOGE2_MASK_ROUTE"))
+    if any(route is None for route in moge2_routes):
+        raise RuntimeError(
+            "MoGe route boundary is missing; install the MoGe bridge first")
+    input_rgb = _first_input(adapter.op("MOGE2_BRIDGE"))
+    if input_rgb is None:
+        input_rgb = _first_input(moge2_routes[0])
+    if input_rgb is None:
+        input_rgb = adapter.op("REPLACE_WITH_STREAMDIFFUSION_RGB")
+    if input_rgb is None:
+        raise RuntimeError("could not preserve the generated RGB source")
+
+    bridge = _build_depth_anything_geometry_bridge(adapter, input_rgb, report)
+    _wire_generated_geometry_routes(adapter, bridge, moge2_routes, report)
+    try:
+        bridge.store(
+            "depth_anything_geometry_install_report", report.as_dict())
+    except Exception:
+        pass
+    print("[FlexGPU runtime] Depth Anything geometry bridge installed disabled: "
+          "%s (%d created, %d reused, %d warnings)" %
+          (bridge.path, len(report.created), len(report.reused),
+           len(report.warnings)))
+    return bridge
+
+
+def install_moge2_bridge(root=None):
+    """Install only the opt-in MoGe-2 branch into an existing working adapter.
+
+    This bounded installer is intended for an artist's local saved project. It
+    preserves the four current adapter sources as disabled fallbacks, creates
+    or refreshes only ``MOGE2_BRIDGE`` and its route switches, and never rebuilds
+    the rest of ``WORKING_PIPELINE``.
+    """
+
+    global LAST_REPORT
+    report = BuildReport()
+    LAST_REPORT = report
+    if root is None:
+        root = _op(ROOT_PATH)
+    elif isinstance(root, str):
+        root = _op(root)
+    if root is None:
+        raise RuntimeError("FlexGPU root %s does not exist" % ROOT_PATH)
+    adapter = root.op(
+        "WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER")
+    if adapter is None:
+        raise RuntimeError("StreamDiffusion adapter is missing; build the working pipeline first")
+
+    existing_runtime = adapter.op("MOGE2_BRIDGE/bridge_runtime")
+    if existing_runtime is not None:
+        try:
+            existing_runtime.module.stop(adapter.op("MOGE2_BRIDGE"))
+        except Exception:
+            pass
+
+    fallback_names = (
+        ("OUT_RGB", "GENERATED_GEOMETRY_RGB_ROUTE", "MOGE2_RGB_ROUTE",
+         "REPLACE_WITH_STREAMDIFFUSION_RGB"),
+        ("OUT_DEPTH", "GENERATED_GEOMETRY_DEPTH_ROUTE", "MOGE2_DEPTH_ROUTE",
+         "REPLACE_WITH_DEPTH_ESTIMATE"),
+        ("OUT_CONFIDENCE", "GENERATED_GEOMETRY_CONFIDENCE_ROUTE",
+         "MOGE2_CONFIDENCE_ROUTE", "REPLACE_WITH_CONFIDENCE"),
+        ("OUT_MASK", "GENERATED_GEOMETRY_MASK_ROUTE", "MOGE2_MASK_ROUTE",
+         "REPLACE_WITH_VALID_MASK"),
+    )
+    fallbacks = []
+    for output_name, selector_name, route_name, placeholder_name in fallback_names:
+        output = adapter.op(output_name)
+        source = _first_input(output)
+        if source is not None and str(getattr(source, "name", "")) == selector_name:
+            source = _first_input(source)
+        if source is not None and str(getattr(source, "name", "")) == route_name:
+            source = _first_input(source)
+        if source is None:
+            source = adapter.op(placeholder_name)
+        if source is None:
+            raise RuntimeError("could not preserve fallback source for " + output_name)
+        fallbacks.append(source)
+
+    bridge = _build_moge2_bridge(adapter, fallbacks[0], report)
+    routes = _wire_moge2_routes(adapter, bridge, tuple(fallbacks), report)
+    depth_anything = adapter.op("DEPTH_ANYTHING_GEOMETRY_BRIDGE")
+    if depth_anything is not None:
+        page = _page(adapter, "Adapter")
+        _custom(adapter, page, "Menu", "Geometrysource", "moge2",
+                ("moge2", "depth_anything"),
+                label="Generated Geometry Source")
+        _wire_generated_geometry_routes(
+            adapter, depth_anything, routes, report)
+    try:
+        bridge.store("moge2_bridge_install_report", report.as_dict())
+    except Exception:
+        pass
+    print("[FlexGPU runtime] MoGe-2 bridge installed disabled: %s "
+          "(%d created, %d reused, %d warnings)" %
+          (bridge.path, len(report.created), len(report.reused),
+           len(report.warnings)))
+    return bridge
+
+
+def _build_show_control(pipeline, report):
+    """Create one public control surface without owning private components."""
+
+    control = _ensure(pipeline, "baseCOMP", "SHOW_CONTROL", report)
+    _style(
+        control, -1080, 640, (0.52, 0.28, 0.16),
+        "Live show controls: source, display, completion, interaction and quality",
+        310, 155)
+    adapter = pipeline.op("SOURCES/STREAMDIFFUSION_ADAPTER")
+    completion = pipeline.op("COMPLETION")
+    sensor = pipeline.op("SENSOR_INTERACTION")
+    render = pipeline.op("POINT_RENDER")
+    triple = pipeline.op("TRIPLE_DISPLAY")
+
+    show_page = _page(control, "Show Controls")
+    _custom(
+        control, show_page, "Menu", "Geometryprovider",
+        _value(adapter, "Geometrysource", "moge2"),
+        ("moge2", "depth_anything"), label="Geometry Provider")
+    _custom(
+        control, show_page, "Menu", "Displaymode",
+        _value(pipeline, "Displaymode", "single"),
+        ("single", "panoramic_wrap", "artistic_multi_angle"),
+        label="Display Mode")
+    _custom(
+        control, show_page, "Menu", "Completionmode",
+        _value(completion, "Mode", "hybrid"),
+        ("fog", "procedural", "hybrid"), label="Completion Mode")
+    _custom(
+        control, show_page, "Float", "Fogdensity",
+        _value(completion, "Fogdensity", 0.35), label="Fog Density")
+    _custom(
+        control, show_page, "Float", "Interactionstrength",
+        _value(sensor, "Forcegain", 0.35), label="Interaction Strength")
+    _custom(
+        control, show_page, "Float", "Interactionsmoothing",
+        _value(sensor, "Interactionsmoothing", 0.35),
+        label="Interaction Smoothing")
+    _custom(
+        control, show_page, "Float", "Wrapyawdegrees",
+        _value(render, "Wrapyawdegrees", 30.0),
+        label="Panoramic Side Yaw")
+    _custom(
+        control, show_page, "Float", "Wrapfovdegrees",
+        _value(render, "Wrapfovdegrees", 78.0),
+        label="Panoramic Surface FOV")
+    _custom(
+        control, show_page, "Float", "Wrapcoverage",
+        _value(triple, "Wrapcoverage", 0.55),
+        label="Panoramic Coverage")
+    _custom(
+        control, show_page, "Float", "Wrapnoise",
+        _value(triple, "Wrapnoise", 0.42),
+        label="Panoramic Coverage Noise")
+    _custom(control, show_page, "Pulse", "Applyall", False,
+            label="Apply All Show Controls")
+
+    quality_page = _page(control, "Quality")
+    bridge = adapter.op("MOGE2_BRIDGE") if adapter is not None else None
+    _custom(
+        control, quality_page, "Menu", "Qualityprofile",
+        _value(bridge, "Profile", "3080ti_16gb"),
+        ("3080ti_16gb", "4090", "5090"), label="GPU Quality Profile")
+    reconstruction = pipeline.op("RECONSTRUCTION")
+    _custom(
+        control, quality_page, "Int", "Geometryresolution",
+        int(_value(reconstruction, "Geometryresolution", 384)),
+        label="Geometry Resolution")
+    _custom(
+        control, quality_page, "Int", "Pointbudget",
+        int(_value(render, "Maxpoints", 120000)), label="Point Budget")
+    _custom(
+        control, quality_page, "Float", "Pointsize",
+        _value(render, "Pointsize", 4.2), label="Point Size")
+    _custom(
+        control, quality_page, "Int", "Geometryfps",
+        int(_value(bridge, "Capturefps", 5)), label="Geometry Capture FPS")
+    _custom(
+        control, quality_page, "Str", "Profilehint",
+        "Stream 512 / geometry 384 / 5 Hz",
+        label="Profile Guidance")
+
+    callbacks = _ensure(
+        control, "parameterexecuteDAT", "show_control_callbacks",
+        report, optional=True)
+    if callbacks is not None:
+        try:
+            callbacks.text = SHOW_CONTROL_CALLBACKS
+        except Exception as exc:
+            report.warn("Could not update %s: %s" % (callbacks.path, exc))
+        _set(callbacks, "op", control.path)
+        _set(callbacks, "pars", "*")
+        _set(callbacks, "valuechange", True)
+        _set(callbacks, "onpulse", True)
+        _set(callbacks, "active", True)
+        _style(
+            callbacks, -260, 130, (0.36, 0.22, 0.16),
+            "Applies only public managed parameters", 250, 100)
+    _table(control, "CONTROL_TARGETS", [
+        ["control", "managed target"],
+        ["Geometry Provider", "STREAMDIFFUSION_ADAPTER/Geometrysource"],
+        ["Display Mode", "WORKING_PIPELINE/Displaymode"],
+        ["Completion / Fog", "COMPLETION + view-grade shader constants"],
+        ["Interaction", "SENSOR_INTERACTION force + low-latency smoothing"],
+        ["Panoramic", "wrap camera yaw/FOV + procedural atmosphere"],
+        ["Quality", "geometry grid, point budget/size, bridge capture FPS"],
+    ], report)
+    _text(
+        control, "README_FIRST",
+        "SHOW CONTROL\n\n"
+        "These controls update only the public FlexGPU managed network. GPU "
+        "profiles never modify private StreamDiffusionTD internals or output "
+        "resolution: all installation walls remain at the configured 1920x1080. "
+        "Panoramic Coverage adds procedural atmosphere only in empty wrap views; "
+        "it never stretches the source image. Use Apply All after reopening an "
+        "older saved TOE if you want every displayed value reapplied.",
+        report)
+    return control
+
+
+def install_show_control_upgrade(root=None):
+    """Install panoramic coverage, interaction smoothing and show controls.
+
+    The bounded upgrade changes only public operators below WORKING_PIPELINE.
+    Single and artistic rendering inputs remain untouched, no node is removed,
+    and the current TOE is not saved.
+    """
+
+    global LAST_REPORT
+    report = BuildReport()
+    LAST_REPORT = report
+    if root is None:
+        root = _op(ROOT_PATH)
+    elif isinstance(root, str):
+        root = _op(root)
+    if root is None:
+        raise RuntimeError("FlexGPU root %s does not exist" % ROOT_PATH)
+    pipeline = root.op(PIPELINE_NAME)
+    if pipeline is None:
+        raise RuntimeError("WORKING_PIPELINE is missing; build it first")
+
+    render = pipeline.op("POINT_RENDER")
+    if render is None:
+        raise RuntimeError("POINT_RENDER is missing")
+    render_page = _page(render, "Render")
+    _custom(render, render_page, "Float", "Wrapfovdegrees", 78.0,
+            label="Panoramic Surface Camera FOV (degrees)")
+    for side in ("LEFT", "CENTER", "RIGHT"):
+        camera = render.op("CAMERA_WRAP_" + side)
+        if camera is not None:
+            _expr(camera, "fov", "parent().par.Wrapfovdegrees.eval()")
+
+    sensor = pipeline.op("SENSOR_INTERACTION")
+    if sensor is None:
+        raise RuntimeError("SENSOR_INTERACTION is missing")
+    sensor_page = _page(sensor, "Sensor")
+    _custom(sensor, sensor_page, "Float", "Interactionsmoothing", 0.35,
+            label="Interaction Smoothing")
+    raw_interaction = sensor.op("interaction_field")
+    if raw_interaction is None:
+        raise RuntimeError("managed interaction field is missing")
+    interaction = _build_interaction_smoothing(
+        sensor, raw_interaction, report)
+    _out_top(sensor, "OUT_INTERACTION", interaction, 1, report)
+    debug = sensor.op("INTERACTION_DEBUG")
+    if debug is not None:
+        _connect(interaction, debug, 0, 0, report, replace=True)
+
+    # Rebuild only the public triple-display stage. Preserve the commissioned
+    # per-wall resolution while its six inputs and output connector order stay
+    # stable; artistic grade inputs remain direct.
+    existing_triple = pipeline.op("TRIPLE_DISPLAY")
+    reference_grade = (
+        existing_triple.op("GRADE_WRAP_CENTER")
+        if existing_triple is not None else None)
+    surface_width = int(_value(reference_grade, ("resolutionw", "resw"), 1920))
+    surface_height = int(_value(reference_grade, ("resolutionh", "resh"), 1080))
+    triple = _build_triple_display(pipeline, report)
+    for mode in ("WRAP", "ARTISTIC"):
+        for side in ("LEFT", "CENTER", "RIGHT"):
+            if mode == "WRAP":
+                _set_resolution(
+                    triple.op("COVERAGE_WRAP_" + side),
+                    surface_width, surface_height)
+            _set_resolution(
+                triple.op("GRADE_%s_%s" % (mode, side)),
+                surface_width, surface_height)
+        _set_resolution(
+            triple.op(mode + "_MOSAIC"),
+            surface_width * 3, surface_height)
+        _set_resolution(
+            triple.op(mode + "_MOSAIC_FALLBACK"),
+            surface_width * 3, surface_height)
+    control = _build_show_control(pipeline, report)
+    try:
+        control.store("show_control_upgrade_report", report.as_dict())
+    except Exception:
+        pass
+    print("[FlexGPU runtime] show-control upgrade ready: %s "
+          "(%d created, %d reused, %d warnings)" %
+          (control.path, len(report.created), len(report.reused),
+           len(report.warnings)))
+    return control
+
+
+def install_venue_1080p_outputs(root=None):
+    """Set the single wall and every triple-wall feed to native 1920x1080.
+
+    This bounded upgrade changes only public managed TOP resolutions. It does
+    not rebuild the working pipeline, change GPU/geometry budgets, touch
+    private adapters, alter stereo preview resolution, or save the TOE.
+    """
+
+    if root is None:
+        root = _op(ROOT_PATH)
+    elif isinstance(root, str):
+        root = _op(root)
+    if root is None:
+        raise RuntimeError("FlexGPU root %s does not exist" % ROOT_PATH)
+    pipeline = root.op(PIPELINE_NAME)
+    if pipeline is None:
+        raise RuntimeError("WORKING_PIPELINE is missing; build it first")
+
+    wall_width, wall_height = 1920, 1080
+    for path in (
+        "POINT_RENDER/METRIC_RENDER_CENTER",
+        "POINT_RENDER/METRIC_MONO_FALLBACK",
+        "INSTALLATION_OUTPUT/installation_grade",
+    ):
+        _set_resolution(pipeline.op(path), wall_width, wall_height)
+    for mode in ("WRAP", "ARTISTIC"):
+        for side in ("LEFT", "CENTER", "RIGHT"):
+            _set_resolution(
+                pipeline.op("POINT_RENDER/METRIC_RENDER_%s_%s" % (mode, side)),
+                wall_width, wall_height)
+            if mode == "WRAP":
+                _set_resolution(
+                    pipeline.op("TRIPLE_DISPLAY/COVERAGE_WRAP_" + side),
+                    wall_width, wall_height)
+            _set_resolution(
+                pipeline.op("TRIPLE_DISPLAY/GRADE_%s_%s" % (mode, side)),
+                wall_width, wall_height)
+        _set_resolution(
+            pipeline.op("TRIPLE_DISPLAY/%s_MOSAIC" % mode),
+            wall_width * 3, wall_height)
+        _set_resolution(
+            pipeline.op("TRIPLE_DISPLAY/%s_MOSAIC_FALLBACK" % mode),
+            wall_width * 3, wall_height)
+    try:
+        pipeline.store("venue_output_profile", "venue_1080p")
+    except Exception:
+        pass
+    print("[FlexGPU runtime] venue outputs ready: single and six wall feeds "
+          "1920x1080; mosaics 5760x1080; TOE remains unsaved")
+    return pipeline
+
+
 def build(root=None):
     """Create or update ``WORKING_PIPELINE`` below *root* and return that COMP.
 
@@ -1138,6 +3729,10 @@ def build(root=None):
     # reuses them.  Keep the visible/runtime version synchronized on upgrades.
     _set(pipeline, "Buildversion", BUILD_VERSION)
     _custom(pipeline, page, "Pulse", "Rebuild", False)
+    _custom(
+        pipeline, page, "Menu", "Displaymode", "single",
+        menu=("single", "panoramic_wrap", "artistic_multi_angle"),
+        label="Active Installation Display")
 
     sources = _build_sources(pipeline, report)
     role_bridge = _build_role_bridge(pipeline, report)
@@ -1148,44 +3743,77 @@ def build(root=None):
     contract = _build_render_contract(pipeline, report)
     point_render = _build_point_render(pipeline, report)
     installation = _build_installation(pipeline, report)
+    triple = _build_triple_display(pipeline, report)
     stereo = _build_stereo(pipeline, report)
+    _build_show_control(pipeline, report)
 
     # These wires are owned by the builder and are repaired on every rebuild.
     # This migrates older 1.0.0 networks whose connectors fell back to
     # alphabetical ordering.  StreamDiffusion adapter internals are not forced.
     _connect(sources, role_bridge, 0, 0, report, replace=True)
     _connect(sources, role_bridge, 1, 1, report, replace=True)
+    _connect(sources, role_bridge, 2, 2, report, replace=True)
+    _connect(sources, role_bridge, 3, 3, report, replace=True)
     _connect(role_bridge, reconstruction, 0, 0, report, replace=True)
     _connect(role_bridge, reconstruction, 1, 1, report, replace=True)
+    _connect(role_bridge, reconstruction, 2, 2, report, replace=True)
     _connect(reconstruction, sensor, 0, 0, report, replace=True)
     _connect(reconstruction, temporal, 0, 0, report, replace=True)
     _connect(reconstruction, temporal, 1, 1, report, replace=True)
     _connect(sensor, temporal, 2, 1, report, replace=True)
+    _connect(reconstruction, temporal, 3, 2, report, replace=True)
     _connect(temporal, completion, 0, 0, report, replace=True)
     _connect(temporal, completion, 1, 1, report, replace=True)
     _connect(temporal, completion, 2, 2, report, replace=True)
     _connect(completion, contract, 0, 0, report, replace=True)
     _connect(completion, contract, 1, 1, report, replace=True)
     _connect(sensor, contract, 2, 1, report, replace=True)
+    _connect(temporal, contract, 3, 3, report, replace=True)
     # POINT_RENDER input 0 is POSITION and input 1 is COLOR. Interaction stays
     # on RENDER_CONTRACT output 2 and is not consumed by the renderer.
     _connect(contract, point_render, 0, 0, report, replace=True)
     _connect(contract, point_render, 1, 1, report, replace=True)
     _connect(point_render, installation, 0, 0, report, replace=True)
     _connect(completion, installation, 1, 1, report, replace=True)
+    for destination_index, source_index in enumerate(range(3, 9)):
+        _connect(point_render, triple, destination_index, source_index, report, replace=True)
+    _connect(completion, triple, 6, 1, report, replace=True)
     _connect(point_render, stereo, 0, 1, report, replace=True)
     _connect(point_render, stereo, 1, 2, report, replace=True)
+
+    display_route = _ensure(
+        pipeline, "switchTOP", "DISPLAY_MODE_ROUTE", report)
+    _connect(installation, display_route, 0, 0, report, replace=True)
+    _connect(triple, display_route, 1, 3, report, replace=True)
+    _connect(triple, display_route, 2, 7, report, replace=True)
+    _expr(display_route, "index", "parent().par.Displaymode.menuIndex")
 
     # Easy-to-find root outputs for projectors, recorders, transports and later
     # VR runtimes.  They mirror the internal stable contract names.
     outputs = (
         ("OUT_POSITION", contract, 0),
+        # Preserve the geometry-aligned OUT_COLOR contract used by validators
+        # and downstream point renderers. Expose the exact synchronized source
+        # separately so it can be compared without fog/procedural completion.
+        ("OUT_SOURCE_COLOR", role_bridge, 0),
         ("OUT_COLOR", contract, 1),
         ("OUT_INTERACTION", contract, 2),
         ("OUT_INSTALLATION", installation, 0),
+        ("OUT_TRIPLE_WRAP", triple, 3),
+        ("OUT_TRIPLE_ARTISTIC", triple, 7),
+        ("OUT_DISPLAY_ACTIVE", display_route, 0),
+        ("OUT_TRIPLE_WRAP_LEFT", triple, 0),
+        ("OUT_TRIPLE_WRAP_CENTER", triple, 1),
+        ("OUT_TRIPLE_WRAP_RIGHT", triple, 2),
+        ("OUT_TRIPLE_ARTISTIC_LEFT", triple, 4),
+        ("OUT_TRIPLE_ARTISTIC_CENTER", triple, 5),
+        ("OUT_TRIPLE_ARTISTIC_RIGHT", triple, 6),
         ("OUT_LEFT_EYE", stereo, 0),
         ("OUT_RIGHT_EYE", stereo, 1),
         ("OUT_STEREO_PREVIEW", stereo, 2),
+        ("OUT_TEMPORAL_STATE", contract, 3),
+        ("OUT_SENSOR_POSITION", sensor, 0),
+        ("OUT_INTERACTION_DEBUG", sensor, 3),
     )
     output_nodes = []
     for index, (name, source, source_index) in enumerate(outputs):
@@ -1207,22 +3835,37 @@ def build(root=None):
         ["managed_scope", ROOT_PATH + "/" + PIPELINE_NAME],
         ["source_default", "built-in animated RGB/depth demo"],
         ["source_future", "SOURCES/STREAMDIFFUSION_ADAPTER"],
-        ["role_bridge", "ROLE_BRIDGE: local/shared_memory/touch_tcp RGB+depth"],
+        ["role_bridge", "ROLE_BRIDGE: atomic RGB + raw depth/confidence/mask"],
         ["position_contract", TOP_CONTRACTS["POSITION"]],
-        ["renderer", "TOP to POP -> Render Simple TOP (TouchDesigner 2025)"],
+        ["renderer", "TOP to POP -> metric Geometry/Camera/Render TOP (TD 2025)"],
         ["installation_output", "OUT_INSTALLATION"],
+        ["triple_wrap_output",
+         "OUT_TRIPLE_WRAP_LEFT/CENTER/RIGHT + OUT_TRIPLE_WRAP"],
+        ["triple_artistic_output",
+         "OUT_TRIPLE_ARTISTIC_LEFT/CENTER/RIGHT + OUT_TRIPLE_ARTISTIC"],
+        ["active_display_output", "OUT_DISPLAY_ACTIVE"],
+        ["show_control", "SHOW_CONTROL (public live parameters only)"],
         ["stereo_output", "OUT_LEFT_EYE, OUT_RIGHT_EYE, OUT_STEREO_PREVIEW"],
+        ["interaction_debug_output", "OUT_INTERACTION_DEBUG (visualization only)"],
         ["openvr_dependency", "none"],
         ["unknown_nodes", "preserved"],
     ], report)
     _text(pipeline, "README_FIRST", "FLEXGPU WORKING PIPELINE\n\n"
-          "Open OUT_INSTALLATION for the center point-cloud render and "
-          "OUT_STEREO_PREVIEW for a desktop stereo view. The animated RGB/depth "
-          "and sensor sources work immediately. Later, replace only the two "
+          "Open OUT_INSTALLATION for the unchanged single point-cloud render, "
+          "OUT_TRIPLE_WRAP or OUT_TRIPLE_ARTISTIC for three-surface mosaics, "
+          "and OUT_DISPLAY_ACTIVE for the mode selected on WORKING_PIPELINE. "
+          "Each triple mode also exposes independent LEFT/CENTER/RIGHT TOPs. "
+          "Open OUT_STEREO_PREVIEW for a desktop stereo view. "
+          "Open SHOW_CONTROL for geometry provider, display, completion, "
+          "interaction, panoramic coverage and GPU quality presets. "
+          "The animated RGB/depth and sensor sources work immediately. "
+          "Later, replace only the two "
           "labelled TOPs inside SOURCES/STREAMDIFFUSION_ADAPTER and turn on the "
           "source toggles; reconstruction, persistence, completion and outputs "
           "do not change. ROLE_BRIDGE automatically sends or receives those "
-          "same RGB/depth contracts in split roles. SHARP/Gaussian stubs remain "
+          "same RGB/raw-depth/confidence/mask contracts in split roles. "
+          "Frame-state metadata controls one-cook acceptance and held-frame decay. "
+          "SHARP/Gaussian stubs remain "
           "non-cooking by default.", report)
     try:
         pipeline.store("runtime_pipeline_report", report.as_dict())

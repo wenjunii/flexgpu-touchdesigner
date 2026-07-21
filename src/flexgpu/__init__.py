@@ -14,6 +14,15 @@ from .adaptive import (
     write_telemetry_summary,
 )
 from .config import load_config, load_config_data, required_process_roles, validate_config
+from .commissioning import (
+    AdapterFrameState,
+    CalibrationProfile,
+    CommissioningError,
+    demo_calibration,
+    generate_demo_bundle,
+    validate_bundle,
+    validate_frame_sequence,
+)
 from .diagnostics import diagnostic_summary, run_diagnostics
 from .discovery import (
     discover_nvidia_gpus,
@@ -36,11 +45,20 @@ from .models import (
 )
 from .planner import build_process_plan
 from .presets import TIER_PRESETS, auto_tier, classify_gpu, preset_for
-from .runtime import manifest_path, start_plan, stop_managed
+from .profiling import (
+    RuntimeGPUProfile,
+    build_hardware_profile,
+    query_runtime_gpu_profiles,
+    recommend_role_placement,
+)
+from .runtime import manifest_path, recover_managed, runtime_status, start_plan, stop_managed
 
 __all__ = [
     "AdaptiveDecision",
     "AdaptiveQualityGovernor",
+    "AdapterFrameState",
+    "CalibrationProfile",
+    "CommissioningError",
     "ConfigError",
     "Diagnostic",
     "DiscoveryError",
@@ -55,13 +73,16 @@ __all__ = [
     "QualityBounds",
     "QualityState",
     "RuntimeControlError",
+    "RuntimeGPUProfile",
     "TIER_PRESETS",
     "TelemetryJsonlWriter",
     "TelemetrySample",
     "auto_tier",
     "build_process_plan",
+    "build_hardware_profile",
     "classify_gpu",
     "diagnostic_summary",
+    "demo_calibration",
     "discover_nvidia_gpus",
     "load_config",
     "load_config_data",
@@ -69,14 +90,21 @@ __all__ = [
     "parse_nvidia_smi_csv",
     "preset_for",
     "quality_bounds_for_tier",
+    "query_runtime_gpu_profiles",
     "read_telemetry_jsonl",
+    "recover_managed",
     "required_process_roles",
+    "recommend_role_placement",
     "resolve_gpu_selector",
     "run_diagnostics",
+    "runtime_status",
     "start_plan",
     "stop_managed",
     "summarize_telemetry",
     "touchdesigner_bus_id",
     "validate_config",
+    "validate_bundle",
+    "validate_frame_sequence",
+    "generate_demo_bundle",
     "write_telemetry_summary",
 ]

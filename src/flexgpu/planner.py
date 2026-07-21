@@ -24,6 +24,12 @@ from .presets import auto_tier, preset_for
 _PLACEHOLDER_RE = re.compile(
     r"\{(config|role|gpu_index|gpu_uuid|gpu_bus_id|td_bus_id|experience|completion|tier)\}"
 )
+_TD_BUS_RE = re.compile(r"^(\d+):(\d+):(\d+):(\d+)$")
+_PROTECTED_ENV_PREFIXES = ("CUDA_", "FLEXGPU_")
+FLEXGPU_SRC_PATH = os.path.realpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir)
+)
+FLEXGPU_ROOT_PATH = os.path.realpath(os.path.join(FLEXGPU_SRC_PATH, os.pardir))
 
 
 def _is_path_like(value: str) -> bool:
@@ -53,6 +59,67 @@ def _replace_placeholders(value: str, context: Mapping[str, str]) -> str:
 def _looks_like_touchdesigner(executable: str) -> bool:
     name = os.path.basename(executable).lower().replace(" ", "")
     return name in {"touchdesigner", "touchdesigner.exe"} or name.startswith("touchdesigner")
+
+
+def _reject_protected_environment(definition: ProcessDefinition) -> None:
+    """Prevent config from replacing launcher-owned identity and affinity."""
+
+    protected = sorted(
+        str(key)
+        for key in definition.env
+        if str(key).upper().startswith(_PROTECTED_ENV_PREFIXES)
+    )
+    if protected:
+        raise PlanError(
+            "processes.%s.env may not override launcher-reserved variable%s: %s"
+            % (
+                definition.role,
+                "s" if len(protected) != 1 else "",
+                ", ".join(protected),
+            )
+        )
+
+
+def _normalize_touchdesigner_affinity(
+    command: list[str], gpu: GPUInfo, required: bool
+) -> None:
+    """Validate one unambiguous TouchDesigner PCI-bus selector in-place."""
+
+    affinity_flags: list[tuple[int, str]] = []
+    for index, argument in enumerate(command):
+        lowered = argument.lower()
+        if lowered in {"-gpubusid", "-gpuformonitor"}:
+            affinity_flags.append((index, lowered))
+        elif lowered.startswith("-gpubusid=") or lowered.startswith("-gpuformonitor="):
+            raise PlanError(
+                "TouchDesigner GPU selectors must use a separate value argument"
+            )
+    if len(affinity_flags) > 1:
+        raise PlanError("TouchDesigner command contains duplicate/conflicting GPU selectors")
+    if not affinity_flags:
+        if required:
+            command[1:1] = ["-gpubusid", gpu.td_bus_id]
+        return
+
+    index, flag = affinity_flags[0]
+    if index + 1 >= len(command) or command[index + 1].startswith("-"):
+        raise PlanError("TouchDesigner %s selector is missing its value" % flag)
+    if flag == "-gpuformonitor":
+        raise PlanError(
+            "TouchDesigner -gpuformonitor cannot verify physical GPU affinity; use -gpubusid %s"
+            % gpu.td_bus_id
+        )
+    match = _TD_BUS_RE.fullmatch(command[index + 1].strip())
+    if not match:
+        raise PlanError("TouchDesigner -gpubusid must be domain:bus:device:function")
+    normalized = ":".join(str(int(component)) for component in match.groups())
+    if normalized != gpu.td_bus_id:
+        raise PlanError(
+            "TouchDesigner -gpubusid %s does not match assigned GPU %s"
+            % (normalized, gpu.td_bus_id)
+        )
+    command[index] = "-gpubusid"
+    command[index + 1] = normalized
 
 
 def _role_gpu_assignments(
@@ -139,10 +206,6 @@ def _command_for(
         if definition.touchdesigner is not None
         else _looks_like_touchdesigner(executable)
     )
-    has_affinity = "-gpubusid" in command or "-gpuformonitor" in command
-    if is_td and definition.gpu_affinity and not has_affinity:
-        command[1:1] = ["-gpubusid", gpu.td_bus_id]
-
     if not definition.command:
         if definition.project:
             project_path = _resolve_path(
@@ -153,6 +216,9 @@ def _command_for(
     elif definition.args:
         command.extend(_replace_placeholders(item, context) for item in definition.args)
 
+    if is_td:
+        _normalize_touchdesigner_affinity(command, gpu, definition.gpu_affinity)
+
     cwd = _resolve_path(definition.cwd, base_dir, always=True) if definition.cwd else base_dir
     return tuple(command), cwd, project_path
 
@@ -162,6 +228,12 @@ def build_process_plan(
 ) -> ProcessPlan:
     """Build a deterministic process plan for the current local node."""
 
+    roles = required_process_roles(config.topology, config.node_role)
+    for role in roles:
+        definition = config.processes.get(role)
+        if definition is None:
+            raise PlanError("missing process definition for role %s" % role)
+        _reject_protected_environment(definition)
     assignments = _role_gpu_assignments(config, gpus)
     preferred = assignments.get("ai") or assignments.get("world")
     # ``tier`` is a per-process hardware fact when it is automatic.  A local
@@ -178,7 +250,6 @@ def build_process_plan(
         or role_tiers.get("world")
         or (auto_tier(gpus, preferred) if config.tier == "auto" else config.tier)
     )
-    roles = required_process_roles(config.topology, config.node_role)
     warnings: list[str] = []
     for role, role_tier in role_tiers.items():
         if role_tier == "custom":
@@ -204,12 +275,28 @@ def build_process_plan(
             raise PlanError("missing process definition for role %s" % role)
         gpu = assignments[role]
         role_tier = role_tiers[role]
-        quality = preset_for(role_tier).settings
+        quality = dict(preset_for(role_tier).settings)
+        # Explicit show-profile render limits must survive process launch.
+        # Otherwise the tier environment silently overrides the same values
+        # when TouchDesigner's embedded runtime materializes the JSON config.
+        render = config.raw.get("render", {})
+        if not isinstance(render, Mapping):
+            render = {}
+        if "point_budget" in render:
+            quality["max_points"] = int(render["point_budget"])
+        if "vr_fps" in render:
+            quality["vr_refresh_hz"] = int(render["vr_fps"])
         command, cwd, project_path = _command_for(definition, gpu, config, role_tier)
         env = {
             "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
             "CUDA_VISIBLE_DEVICES": gpu.uuid or str(gpu.index),
             "FLEXGPU_CONFIG": config.source_path,
+            # Embedded TouchDesigner DAT modules compile before project startup
+            # callbacks can amend sys.path. Give every managed child the exact
+            # import root used by this launcher so a saved .toe cold-reopens
+            # without relying on process cwd or a prior Textport import.
+            "FLEXGPU_ROOT": FLEXGPU_ROOT_PATH,
+            "FLEXGPU_SRC": FLEXGPU_SRC_PATH,
             "FLEXGPU_ROLE": role,
             "FLEXGPU_TOPOLOGY": config.topology,
             "FLEXGPU_EXPERIENCE": config.experience,

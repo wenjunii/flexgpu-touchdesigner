@@ -1,0 +1,5 @@
+# Pinned dependencies for the source release gate and GitHub Actions.
+# GPU/model runtimes remain isolated under integrations/* and are not installed here.
+jsonschema==4.17.3
+numpy==2.2.6
+Pillow==10.4.0
