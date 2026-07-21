@@ -727,6 +727,41 @@ assert normalized({src_path!r}) in {{
         self.assertIn("helpers.module.select_geometry_provider", self.source)
         self.assertIn("_switch_runtime_geometry_contract(provider)", self.source)
 
+    def test_show_control_exposes_wall_framing_and_safe_worker_launchers(self) -> None:
+        for marker in (
+            "Wallwidth",
+            "Wallheight",
+            "Pointcloudscale",
+            "Moge2scale",
+            "Depthanythingscale",
+            "Effectivepointcloudscale",
+            "Workspaceroot",
+            "Gpuindex",
+            "Startmogeworker",
+            "Startdepthanythingworker",
+            "Workerstatus",
+        ):
+            self.assertIn(marker, self.source)
+        compile(
+            self.module.SHOW_CONTROL_CALLBACKS,
+            "SHOW_CONTROL_CALLBACKS",
+            "exec",
+        )
+        self.assertIn("def _apply_wall_resolution():", self.source)
+        self.assertIn("width * 3", self.module.SHOW_CONTROL_CALLBACKS)
+        self.assertIn("def _apply_point_cloud_scale():", self.source)
+        self.assertIn("_scaled_camera_fov_expression", self.source)
+        self.assertIn("subprocess.Popen(", self.source)
+        self.assertIn("'powershell.exe', '-NoExit'", self.source)
+        self.assertIn("'CREATE_NEW_CONSOLE'", self.source)
+        self.assertNotIn("shell=True", self.module.SHOW_CONTROL_CALLBACKS)
+        installer = inspect.getsource(
+            self.module.install_output_framing_controls)
+        self.assertIn("_apply_point_cloud_camera_framing(render)", installer)
+        self.assertIn("_build_show_control(pipeline, report)", installer)
+        self.assertNotIn("build(", installer)
+        self.assertNotIn("project.save", installer)
+
     def test_venue_1080p_upgrade_is_bounded_and_complete(self) -> None:
         installer = inspect.getsource(self.module.install_venue_1080p_outputs)
         self.assertIn("1920, 1080", installer)
@@ -746,6 +781,7 @@ assert normalized({src_path!r}) in {{
             self.module.install_adaptive_source_resolution)
         self.assertIn("384 * 384", installer)
         self.assertIn('"512x512": "384x384"', installer)
+        self.assertIn('"1024x567": "512x284"', installer)
         self.assertIn('"1024x576": "512x288"', installer)
         self.assertIn("_build_reconstruction", installer)
         self.assertIn("_build_show_control", installer)

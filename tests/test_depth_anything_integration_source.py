@@ -110,9 +110,11 @@ class DepthAnythingIntegrationSourceTests(unittest.TestCase):
             "'--target-pixels'",
             "$TargetPixels = 147456",
             "$MaxEdge = 512",
+            "'1024x567 -> 512x284'",
             ".venv\\depth-anything",
             "contains_generated_rgb = $true",
             "opens_webcam = $false",
+            "FlexGPU Depth Anything Geometry Worker",
         ):
             self.assertIn(marker, source)
         self.assertNotIn("camera-index", source)

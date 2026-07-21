@@ -304,6 +304,17 @@ class MoGe2WorkerTests(unittest.TestCase):
             widescreen.metadata.extensions["producer_session_id"],
         )
 
+        near_widescreen = worker.process_frame(
+            source_frame(3, width=1024, height=567)
+        )
+        self.assertEqual(backend.last_rgb_shape, (284, 512, 3))
+        self.assertEqual(
+            (near_widescreen.metadata.width, near_widescreen.metadata.height),
+            (1024, 284),
+        )
+        self.assertEqual(worker.session_rollovers, 2)
+        self.assertEqual(near_widescreen.metadata.frame_id, 0)
+
     def test_bridge_ports_and_session_ids_are_bounded(self) -> None:
         parser = worker_module.build_parser()
         parsed = parser.parse_args(["serve", "--output-tcp-port", "9321"])

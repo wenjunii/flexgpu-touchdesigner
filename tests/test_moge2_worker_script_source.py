@@ -22,7 +22,9 @@ class MoGe2WorkerScriptSourceTests(unittest.TestCase):
             "'--target-pixels'",
             "$TargetPixels = 147456",
             "$MaxEdge = 512",
+            "'1024x567 -> 512x284'",
             "execution = 'foreground; press Ctrl+C to stop'",
+            "FlexGPU MoGe-2 Worker",
         ):
             self.assertIn(marker, source)
         self.assertNotIn("Start-Process", source)
