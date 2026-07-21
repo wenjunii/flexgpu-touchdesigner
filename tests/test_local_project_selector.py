@@ -88,7 +88,11 @@ class LocalProjectSelectorTests(unittest.TestCase):
         )
         self.assertIn('"status":  "updated"', result.stdout)
         written = json.loads(self.config.read_text(encoding="utf-8-sig"))
-        self.assertEqual(written["processes"]["world"]["project"], str(self.new_project))
+        self.assertTrue(
+            Path(written["processes"]["world"]["project"]).samefile(
+                self.new_project
+            )
+        )
         self.assertEqual(written["render"]["installation_width"], 1920)
         self.assertEqual(written["tier"], "3080ti_16gb")
 
