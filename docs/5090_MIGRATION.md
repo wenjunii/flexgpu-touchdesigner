@@ -20,11 +20,27 @@ Git is not a backup channel for the ignored working TOE or private assets. Keep
 at least two private copies of the accepted TOE and record its hash:
 
 ```powershell
-Get-FileHash .\projects\FlexShow-moge2-embody-local.20.toe -Algorithm SHA256
+Get-FileHash .\projects\FlexShow-moge2-embody-local-5090.28.toe -Algorithm SHA256
 ```
 
 After copying it to the new PC, run the same command and compare the complete
 hash before opening the file.
+
+## Keep the 3080 and 5090 identities separate
+
+This repository is one hardware-neutral codebase. The 3080 and 5090 are not
+separate Git branches and must not publish machine-local state. Keep these
+ignored identities distinct:
+
+| Computer | Worker profile | Local config | Working TOE pattern |
+| --- | --- | --- | --- |
+| RTX 3080 Ti Laptop 16 GB | `3080ti_16gb` | `config/local-3080ti.json` | `projects/*-3080ti-*.toe` |
+| RTX 5090 32 GB | `5090` | `config/local-5090.json` | `projects/*-5090-*.toe` |
+
+Generate each local config on its destination computer. Do not transfer GPU
+UUIDs, absolute project paths, `.flexgpu` manifests, or a saved working TOE
+back into the other machine's filename. The worker launchers require an
+explicit profile and reject a real GPU/profile mismatch by default.
 
 ## Destination prerequisites
 
@@ -69,7 +85,7 @@ run:
   -DisplayProfile venue_1080p `
   -DisplayMode panoramic_wrap `
   -GeometryProvider moge2 `
-  -Project .\projects\FlexShow-moge2-embody-local.20.toe `
+  -Project .\projects\FlexShow-moge2-embody-local-5090.28.toe `
   -Output .\config\local-5090.json
 ```
 
@@ -107,6 +123,7 @@ For the alternative generated-geometry path, stop MoGe-2, select
 `depth_anything`, and run:
 
 ```powershell
+.\scripts\Stop-GeneratedGeometryWorker.ps1 -Stop
 .\scripts\Start-DepthAnythingGeometryWorker.ps1 `
   -Profile 5090 `
   -Backend depth_anything `
@@ -116,6 +133,27 @@ For the alternative generated-geometry path, stop MoGe-2, select
 
 `Start-DepthAnythingWorker.ps1` is the separate webcam/audience-interaction
 worker; it is not the generated-image geometry worker.
+
+Use `Stop-GeneratedGeometryWorker.ps1` for provider changes, including workers
+launched in a hidden terminal. It matches this checkout's exact generated-worker
+path and cannot select the audience-camera worker or another checkout. The
+command is preview-only unless `-Stop` is supplied.
+
+## 5090 short live acceptance record
+
+On 2026-07-20, an ignored local checkpoint through `.28` was exercised on the
+RTX 5090 with TouchDesigner `2025.32820` and the private StreamDiffusionTD
+component. MoGe-2 returned synchronized geometry at 15 FPS capture. Depth
+Anything V2 Small calibrated and returned live changing geometry at about
+12 accepted FPS. Both used the existing 512x512 position/color/interaction
+contracts and 5760x1080 panoramic output; all required outputs were valid with
+zero managed operator or shader errors in the bounded scan. A GPU sample during
+Depth Anything reported about 12.3/32.6 GB VRAM and 77% utilization.
+
+The local `.28` file, private components, worker weights, logs, and
+`config/local-5090.json` remain intentionally untracked. This record is a short
+functional migration check, not the required sustained thermal, projector,
+interaction, or venue acceptance.
 
 ## Acceptance order
 

@@ -60,8 +60,11 @@ internals, change the selected provider, or touch the audience sensor.
 4. In a separate PowerShell:
 
 ```powershell
-.\scripts\Start-DepthAnythingGeometryWorker.ps1 -Backend mock
 .\scripts\Start-DepthAnythingGeometryWorker.ps1 `
+  -Profile 3080ti_16gb `
+  -Backend mock
+.\scripts\Start-DepthAnythingGeometryWorker.ps1 `
+  -Profile 3080ti_16gb `
   -Backend mock `
   -MaxFrames 30 `
   -Start

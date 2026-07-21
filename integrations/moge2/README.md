@@ -87,8 +87,8 @@ Install `MOGE2_BRIDGE` into an ignored local `.toe` and enable its result
 receiver before starting the worker. Preview-only is the default:
 
 ```powershell
-.\scripts\Start-MoGe2Worker.ps1 -Backend mock
-.\scripts\Start-MoGe2Worker.ps1 -Backend mock -Start
+.\scripts\Start-MoGe2Worker.ps1 -Profile 3080ti_16gb -Backend mock
+.\scripts\Start-MoGe2Worker.ps1 -Profile 3080ti_16gb -Backend mock -Start
 
 .\scripts\Start-MoGe2Worker.ps1 `
   -Profile 3080ti_16gb `

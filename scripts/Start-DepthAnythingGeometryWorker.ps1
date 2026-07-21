@@ -1,13 +1,18 @@
 [CmdletBinding()]
 param(
+    [Parameter(Mandatory = $true)]
     [ValidateSet('3080ti_16gb', '4090', '5090')]
-    [string]$Profile = '3080ti_16gb',
+    [string]$Profile,
 
     [ValidateSet('depth_anything', 'mock')]
     [string]$Backend = 'depth_anything',
 
     [ValidateRange(0, 31)]
     [int]$GpuIndex = 0,
+
+    [string]$NvidiaSmi = '',
+
+    [switch]$AllowProfileMismatch,
 
     [ValidateRange(1, 65535)]
     [int]$InputTcpPort = 9251,
@@ -62,6 +67,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $root = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+. (Join-Path $PSScriptRoot '_GeneratedGeometry.Common.ps1')
 $isolatedPython = Join-Path $root '.venv\depth-anything\Scripts\python.exe'
 $python = $isolatedPython
 $worker = Join-Path $root 'tools\moge2_worker.py'
@@ -76,6 +82,15 @@ if ($PseudoNearM -ge $PseudoFarM) {
 }
 if ($ForegroundFarM -lt $PseudoNearM -or $ForegroundFarM -gt $PseudoFarM) {
     throw 'ForegroundFarM must stay inside the pseudo-metre slab.'
+}
+
+$detectedGpu = $null
+if ($Backend -eq 'depth_anything') {
+    $detectedGpu = Assert-FlexGpuGeneratedGeometryProfile `
+        -Profile $Profile `
+        -GpuIndex $GpuIndex `
+        -NvidiaSmi $NvidiaSmi `
+        -AllowProfileMismatch:$AllowProfileMismatch
 }
 
 $arguments = @(
@@ -118,6 +133,8 @@ $plan = [ordered]@{
     backend = $Backend
     physical_gpu_index = $GpuIndex
     worker_device = 'cuda:0 (relative to CUDA_VISIBLE_DEVICES)'
+    detected_gpu = if ($null -eq $detectedGpu) { 'not required by mock backend' } else { $detectedGpu }
+    profile_mismatch_override = [bool]$AllowProfileMismatch
     input_tcp = "127.0.0.1`:$InputTcpPort"
     input_udp = "127.0.0.1`:$InputUdpPort"
     output_tcp = "127.0.0.1`:$OutputTcpPort"
@@ -157,6 +174,8 @@ if ($Backend -eq 'depth_anything' -and
         -not (Test-Path -LiteralPath (Join-Path $model 'model.safetensors') -PathType Leaf)) {
     throw 'The pinned V2 Small model is missing. Run Initialize-DepthAnything.ps1 -DownloadModel first.'
 }
+
+Assert-FlexGpuNoGeneratedGeometryWorker -RepositoryRoot $root
 
 $previousCuda = [Environment]::GetEnvironmentVariable('CUDA_VISIBLE_DEVICES', 'Process')
 $previousPythonUtf8 = [Environment]::GetEnvironmentVariable('PYTHONUTF8', 'Process')

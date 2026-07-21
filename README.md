@@ -71,8 +71,8 @@ touchdesigner/       TD 2025 bootstrap source and integration guide
 | Local GPU placement | Read-only `nvidia-smi` snapshot and starting recommendation; not a benchmark or scheduler |
 | Process status, readiness and AI recovery | Atomic TouchDesigner application heartbeat, read-only alive/ready/stale status, bounded readiness waits, and operator-authorized recovery of a separate AI role; not an autonomous watchdog |
 | StreamDiffusionTD and sensor SDK | Labelled manual boundaries plus opt-in private `.tox` loading with safe demo/simulated fallback; paid/private components remain excluded |
-| Live MoGe-2 generated geometry | Pinned offline worker, newest-only synchronized atlas, strict camera/frame metadata, and default-off TD bridge implemented; real worker, local `.toe` path, and cold-reopen runtime imports live-accepted on the 3080 Ti Laptop |
-| Depth Anything generated geometry | Selectable default-off alternative using the same synchronized generated RGB/depth atlas boundary, isolated ports, frozen relative-depth slab, fail-closed routing, and provider-specific reconstruction calibration; live-accepted with single, panoramic, and artistic 1920x1080 outputs on the 3080 Ti Laptop |
+| Live MoGe-2 generated geometry | Pinned offline worker, newest-only synchronized atlas, strict camera/frame metadata, and default-off TD bridge implemented; real worker, local `.toe` path, and cold-reopen runtime imports live-accepted on the 3080 Ti Laptop, then migration-checked at 512 geometry and 15 FPS capture on the RTX 5090 |
+| Depth Anything generated geometry | Selectable default-off alternative using the same synchronized generated RGB/depth atlas boundary, isolated ports, frozen relative-depth slab, fail-closed routing, and provider-specific reconstruction calibration; live-accepted with single, panoramic, and artistic 1920x1080 outputs on the 3080 Ti Laptop, then migration-checked at about 12 accepted geometry FPS on the RTX 5090 |
 | Embody/knowledge MCP integration | Project-scoped context, privacy rules, output audit order, and local MCP configuration implemented and used against an ignored working TOE; Embody remains optional and untracked |
 | Temporary laptop audience sensor | Default-off result-only TD bridge and optional Depth Anything V2 Small webcam worker implemented; mirrored live interaction, RGB-free transport, stale zero-gating, 5 Hz rehearsal, and gentler force tuning live-accepted on the 3080 Ti Laptop; paid-app and physical-sensor acceptance remain future local gates |
 | Installation and VR | Unchanged single display, selectable three-surface panoramic wrap, artistic multi-angle outputs, and parallel-camera stereo development textures; projector warping/blending, headset runtime, pose/input, compositor submission, and physical validation are user-supplied |
@@ -95,6 +95,17 @@ The local acceptance publishes no private component and establishes no physical
 metric, venue, or VR correctness. Treat all GPU budgets as commissioning
 starting points until the target system passes thermal, latency, visual, and
 failover soaks.
+
+The 2026-07-20 RTX 5090 migration check used TouchDesigner `2025.32820`, a
+private StreamDiffusionTD component, MoGe-2, and Depth Anything V2 Small in an
+ignored local working project. Both geometry providers produced live changing
+point clouds through the existing 512x512 geometry and 5760x1080 panoramic
+output contracts with zero invalid required outputs, managed operator errors,
+or shader errors in the bounded scan. The Depth Anything sample used about
+12.3/32.6 GB VRAM at 77% utilization. This was a short functional test, not a
+thermal, projector, interaction, or venue acceptance. The latest working TOE,
+private components, weights, logs, and machine-local configuration remain
+untracked.
 
 ### Verified v1.2.1 synthetic baseline
 
@@ -181,6 +192,50 @@ resolve from the repository root.
 The generated dual-local profile uses loopback Touch TCP on `127.0.0.1`, as do
 the shipped dual-local presets. The initializer does not create two-computer
 network profiles.
+
+### Keep 3080 and 5090 work separate
+
+The tracked branch is shared source code, not a machine image. Each computer
+must keep a different ignored configuration, working TOE name, GPU UUID, and
+runtime directory. A safe naming convention is:
+
+| Computer | Worker profile | Ignored configuration | Ignored working TOE pattern |
+| --- | --- | --- | --- |
+| 3080 Ti Laptop 16 GB | `3080ti_16gb` | `config/local-3080ti.json` | `projects/*-3080ti-*.toe` |
+| RTX 5090 32 GB | `5090` | `config/local-5090.json` | `projects/*-5090-*.toe` |
+
+Generate each local configuration on its own computer. Never copy or commit
+either local JSON file because it contains that computer's absolute project
+path and GPU UUID. Never open the 3080 working TOE as the 5090 save target, or
+vice versa. Git intentionally ignores all of these local files.
+
+The generated-geometry worker profile is mandatory and checked against the
+selected physical GPU before a real worker starts. The start wrappers also
+refuse to launch while another generated-geometry worker from the same checkout
+is running. Switch providers in this order:
+
+```powershell
+# 1. Stop only this checkout's generated-geometry worker.
+.\scripts\Stop-GeneratedGeometryWorker.ps1 -Stop
+
+# 2. Select Moge2 or Depth Anything in SHOW_CONTROL.
+
+# 3a. Start MoGe-2 on the 5090.
+.\scripts\Start-MoGe2Worker.ps1 -Profile 5090 -GpuIndex 0 -Start
+
+# 3b. Or start Depth Anything generated geometry on the 5090.
+.\scripts\Start-DepthAnythingGeometryWorker.ps1 `
+  -Profile 5090 `
+  -GpuIndex 0 `
+  -Start
+```
+
+On the 3080 computer use the same commands with
+`-Profile 3080ti_16gb`; do not reuse the 5090 local configuration or TOE. The
+stop wrapper matches this repository's exact `tools/moge2_worker.py` path, so
+it does not stop the separate audience-camera Depth Anything worker or a worker
+launched from another checkout. All worker commands remain preview-only without
+their explicit action switch.
 
 Alternatively, presets are ready to run in place. To make an untracked local
 copy, keep it in the same directory so its relative project paths remain
@@ -836,7 +891,7 @@ cd C:\path\to\flexgpu-touchdesigner
   -DisplayProfile venue_1080p `
   -DisplayMode panoramic_wrap `
   -GeometryProvider moge2 `
-  -Project .\projects\FlexShow-moge2-embody-local.20.toe `
+  -Project .\projects\FlexShow-moge2-embody-local-5090.28.toe `
   -Output .\config\local-5090.json
 ```
 

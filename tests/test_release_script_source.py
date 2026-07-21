@@ -27,6 +27,7 @@ class ReleaseScriptSourceTests(unittest.TestCase):
             "-m', 'compileall'",
             "tools/validate_configs.py",
             "'-m', 'unittest'",
+            "'discover', '-s', 'tests', '-q'",
             "tools/benchmark_flexshow.py",
             "Parser]::ParseFile",
             "Test-TDKnowledgeBridge.ps1",
@@ -115,6 +116,8 @@ class ReleaseScriptSourceTests(unittest.TestCase):
         self.assertIn("finally {", source)
         self.assertIn("$temporaryParent.TrimEnd", source)
         self.assertIn("Remove-Item -LiteralPath $temporaryDirectory -Recurse", source)
+        self.assertIn("Join-Path $TemporaryDirectory 'runtime'", source)
+        self.assertIn("$written.runtime_dir = $releaseRuntime", source)
 
     def test_release_script_does_not_mutate_git_or_install_dependencies(self) -> None:
         source = SCRIPT_PATH.read_text(encoding="utf-8").casefold()

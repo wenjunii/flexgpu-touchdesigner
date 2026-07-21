@@ -165,8 +165,8 @@ Textport `sys.path` edit is not preserved in a saved `.toe`.
 In the second window, preview a deterministic mock worker:
 
 ```powershell
-.\scripts\Start-MoGe2Worker.ps1 -Backend mock
-.\scripts\Start-MoGe2Worker.ps1 -Backend mock -Start
+.\scripts\Start-MoGe2Worker.ps1 -Profile 3080ti_16gb -Backend mock
+.\scripts\Start-MoGe2Worker.ps1 -Profile 3080ti_16gb -Backend mock -Start
 ```
 
 Selecting `moge2` on `SHOW_CONTROL` now enables and initializes the matching

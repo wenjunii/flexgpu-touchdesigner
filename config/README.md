@@ -23,6 +23,13 @@ The network presets use the RFC 5737 documentation range `192.0.2.0/24` on
 purpose. Replace those non-routable example addresses with static addresses
 from your actual show network before launch.
 
+Keep every computer's local identity separate. Use different ignored names,
+for example `config/local-3080ti.json` and `config/local-5090.json`, and generate
+each file on the computer that will run it. Do not copy one machine's GPU UUID,
+absolute working-TOE path, or runtime identity onto the other machine. The
+tracked presets are reusable starting points; `config/local-*.json` files are
+machine state and must remain untracked.
+
 ## Safe first run
 
 Open PowerShell in the repository root. The commands below use repository-root

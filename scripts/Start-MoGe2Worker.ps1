@@ -1,13 +1,18 @@
 [CmdletBinding()]
 param(
+    [Parameter(Mandatory = $true)]
     [ValidateSet('3080ti_16gb', '4090', '5090')]
-    [string]$Profile = '3080ti_16gb',
+    [string]$Profile,
 
     [ValidateSet('moge2', 'mock')]
     [string]$Backend = 'moge2',
 
     [ValidateRange(0, 31)]
     [int]$GpuIndex = 0,
+
+    [string]$NvidiaSmi = '',
+
+    [switch]$AllowProfileMismatch,
 
     [string]$InputHost = '127.0.0.1',
 
@@ -36,6 +41,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $root = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+. (Join-Path $PSScriptRoot '_GeneratedGeometry.Common.ps1')
 $python = Join-Path $root '.venv\moge2\Scripts\python.exe'
 $worker = Join-Path $root 'tools\moge2_worker.py'
 $model = Join-Path $root 'runtime\moge2-model\model.pt'
@@ -53,6 +59,15 @@ function Assert-SafeHost {
 
 Assert-SafeHost -Value $InputHost -Label 'InputHost'
 Assert-SafeHost -Value $OutputHost -Label 'OutputHost'
+
+$detectedGpu = $null
+if ($Backend -eq 'moge2') {
+    $detectedGpu = Assert-FlexGpuGeneratedGeometryProfile `
+        -Profile $Profile `
+        -GpuIndex $GpuIndex `
+        -NvidiaSmi $NvidiaSmi `
+        -AllowProfileMismatch:$AllowProfileMismatch
+}
 
 $arguments = @(
     $worker,
@@ -82,6 +97,8 @@ $plan = [ordered]@{
     backend = $Backend
     physical_gpu_index = $GpuIndex
     worker_device = 'cuda:0 (relative to CUDA_VISIBLE_DEVICES)'
+    detected_gpu = if ($null -eq $detectedGpu) { 'not required by mock backend' } else { $detectedGpu }
+    profile_mismatch_override = [bool]$AllowProfileMismatch
     input_tcp = "$InputHost`:$InputTcpPort"
     input_udp = "$InputHost`:$InputUdpPort"
     output_tcp = "$OutputHost`:$OutputTcpPort"
@@ -110,6 +127,8 @@ if ($InputHost -notin @('127.0.0.1', 'localhost', '::1') -or
         $OutputHost -notin @('127.0.0.1', 'localhost', '::1')) {
     Write-Warning 'WorldBus v1 is not authenticated or encrypted. Use only a trusted private show network and firewall these ports.'
 }
+
+Assert-FlexGpuNoGeneratedGeometryWorker -RepositoryRoot $root
 
 $previousCuda = [Environment]::GetEnvironmentVariable('CUDA_VISIBLE_DEVICES', 'Process')
 $previousPythonUtf8 = [Environment]::GetEnvironmentVariable('PYTHONUTF8', 'Process')

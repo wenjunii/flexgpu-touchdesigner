@@ -96,8 +96,13 @@ class DepthAnythingIntegrationSourceTests(unittest.TestCase):
     def test_generated_geometry_wrapper_is_separate_preview_first_and_no_camera(self) -> None:
         source = GEOMETRY_START.read_text(encoding="utf-8")
         for marker in (
+            "[Parameter(Mandatory = $true)]",
             "[switch]$Start",
             "if (-not $Start)",
+            "_GeneratedGeometry.Common.ps1",
+            "Assert-FlexGpuGeneratedGeometryProfile",
+            "Assert-FlexGpuNoGeneratedGeometryWorker",
+            "[switch]$AllowProfileMismatch",
             "generated_image_geometry",
             "geometry_provider = 'depth_anything'",
             "'--provider', 'depth_anything'",
@@ -114,6 +119,7 @@ class DepthAnythingIntegrationSourceTests(unittest.TestCase):
             self.assertIn(marker, source)
         self.assertNotIn("camera-index", source)
         self.assertNotIn("Start-Process", source)
+        self.assertNotIn("[string]$Profile = '3080ti_16gb'", source)
 
 
 if __name__ == "__main__":

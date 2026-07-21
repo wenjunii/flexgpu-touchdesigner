@@ -420,6 +420,18 @@ echo 1, GPU-high, 00000000:02:00.0, NVIDIA GeForce RTX 4090, 24564, 555.10
         throw 'Written initializer configuration does not match its result.'
     }
 
+    # The release smoke runs safely while a real show session is active. Give
+    # its dry-run Start/Recover checks an isolated manifest directory instead
+    # of allowing the generated config to inspect .flexgpu/local.
+    $releaseRuntime = Join-Path $TemporaryDirectory 'runtime'
+    $written.runtime_dir = $releaseRuntime
+    $utf8WithoutBom = [System.Text.UTF8Encoding]::new($false)
+    [System.IO.File]::WriteAllText(
+        $LocalConfig,
+        (($written | ConvertTo-Json -Depth 100) + "`n"),
+        $utf8WithoutBom
+    )
+
     Invoke-CheckedPython -Name 'Validate initializer output' -Arguments @(
         'tools/validate_configs.py',
         $LocalConfig
@@ -491,7 +503,9 @@ try {
         'tools/validate_configs.py'
     )
     Invoke-CheckedPython -Name 'Run unit tests' -Arguments @(
-        '-m', 'unittest', 'discover', '-s', 'tests', '-v'
+        # Quiet mode still prints failures and the final count while avoiding
+        # hundreds of progress lines on constrained CI/operator log pipes.
+        '-m', 'unittest', 'discover', '-s', 'tests', '-q'
     )
     Invoke-CheckedPython -Name 'Run synthetic 3080 Ti benchmark' -Arguments @(
         'tools/benchmark_flexshow.py',

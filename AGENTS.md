@@ -22,8 +22,15 @@ must remain untracked.
 
 ## Project boundaries
 
-- Current live baseline: TouchDesigner `2025.32820`, FlexGPU build `1.2.1`,
-  RTX 3080 Ti Laptop GPU with 16 GB VRAM.
+- Current live baselines use TouchDesigner `2025.32820` and FlexGPU build
+  `1.2.1`: the RTX 3080 Ti Laptop 16 GB remains the accepted source machine,
+  and an RTX 5090 32 GB workstation has passed a short live MoGe-2/Depth
+  Anything migration check. Neither short check replaces a thermal or venue
+  soak.
+- Treat the tracked repository as hardware-neutral. Keep 3080 and 5090 working
+  `.toe` files, `config/local-*.json`, GPU UUIDs, runtime state, components, and
+  evidence separate and untracked; never copy one machine's local config over
+  the other.
 - Managed root: `/project1/flexgpu/WORKING_PIPELINE`.
 - Keep `StreamDiffusionTD.tox`, paid Depth Anything components, model weights,
   local profiles, `.toe` working copies, captures, calibration, recordings,

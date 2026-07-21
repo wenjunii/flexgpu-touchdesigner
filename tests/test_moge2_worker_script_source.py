@@ -12,8 +12,13 @@ class MoGe2WorkerScriptSourceTests(unittest.TestCase):
     def test_worker_start_is_preview_first_and_gpu_selectable(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
         for marker in (
+            "[Parameter(Mandatory = $true)]",
             "[switch]$Start",
             "if (-not $Start)",
+            "_GeneratedGeometry.Common.ps1",
+            "Assert-FlexGpuGeneratedGeometryProfile",
+            "Assert-FlexGpuNoGeneratedGeometryWorker",
+            "[switch]$AllowProfileMismatch",
             "$env:CUDA_VISIBLE_DEVICES = [string]$GpuIndex",
             "'--device', 'cuda:0'",
             "'3080ti_16gb', '4090', '5090'",
@@ -24,6 +29,7 @@ class MoGe2WorkerScriptSourceTests(unittest.TestCase):
             self.assertIn(marker, source)
         self.assertNotIn("Start-Process", source)
         self.assertNotIn("DownloadModel", source.split("if (-not $Start)", 1)[0])
+        self.assertNotIn("[string]$Profile = '3080ti_16gb'", source)
 
     def test_worker_waits_for_touchdesigner_result_listener(self) -> None:
         worker = (ROOT / "tools" / "moge2_worker.py").read_text(
