@@ -112,14 +112,24 @@ class DepthAnythingIntegrationSourceTests(unittest.TestCase):
             "$ListenerWaitSeconds = 120.0",
             "'--output-connect-timeout-s'",
             "listener_wait_seconds = $ListenerWaitSeconds",
+            "'--target-pixels'",
+            "$effectiveTargetPixels",
+            "$effectiveMaxEdge",
+            "$Profile -eq '3080ti_16gb'",
+            "147456",
+            "'worker profile default'",
+            "'1024x567 -> 512x284'",
             ".venv\\depth-anything",
             "contains_generated_rgb = $true",
             "opens_webcam = $false",
+            "FlexGPU Depth Anything Geometry Worker",
         ):
             self.assertIn(marker, source)
         self.assertNotIn("camera-index", source)
         self.assertNotIn("Start-Process", source)
         self.assertNotIn("[string]$Profile = '3080ti_16gb'", source)
+        self.assertNotIn("[int]$TargetPixels = 147456", source)
+        self.assertIn("if ($null -ne $effectiveTargetPixels)", source)
 
 
 if __name__ == "__main__":

@@ -30,7 +30,10 @@ param(
     [int]$InputSize = 384,
 
     [ValidateRange(64, 2048)]
-    [int]$MaxEdge = 384,
+    [int]$MaxEdge,
+
+    [ValidateRange(4096, 4194304)]
+    [int]$TargetPixels,
 
     [ValidateRange(1, 120)]
     [int]$CalibrationFrames = 12,
@@ -93,6 +96,40 @@ if ($Backend -eq 'depth_anything') {
         -AllowProfileMismatch:$AllowProfileMismatch
 }
 
+$profileMaxEdges = @{
+    '3080ti_16gb' = 384
+    '4090' = 512
+    '5090' = 512
+}
+$effectiveMaxEdge = if ($PSBoundParameters.ContainsKey('MaxEdge')) {
+    $MaxEdge
+}
+elseif ($Profile -eq '3080ti_16gb') {
+    512
+}
+else {
+    [int]$profileMaxEdges[$Profile]
+}
+$effectiveTargetPixels = if ($PSBoundParameters.ContainsKey('TargetPixels')) {
+    $TargetPixels
+}
+elseif ($Profile -eq '3080ti_16gb') {
+    147456
+}
+else {
+    $null
+}
+$geometryBudgetSource = if ($PSBoundParameters.ContainsKey('TargetPixels') -or
+        $PSBoundParameters.ContainsKey('MaxEdge')) {
+    'operator override'
+}
+elseif ($Profile -eq '3080ti_16gb') {
+    '3080 adaptive default'
+}
+else {
+    'worker profile default'
+}
+
 $arguments = @(
     $worker, 'serve',
     '--profile', $Profile,
@@ -108,7 +145,7 @@ $arguments = @(
     '--output-tcp-port', [string]$OutputTcpPort,
     '--output-connect-timeout-s', [string]$ListenerWaitSeconds,
     '--input-size', [string]$InputSize,
-    '--max-edge', [string]$MaxEdge,
+    '--max-edge', [string]$effectiveMaxEdge,
     '--calibration-frames', [string]$CalibrationFrames,
     '--percentile-low', [string]$PercentileLow,
     '--percentile-high', [string]$PercentileHigh,
@@ -118,6 +155,9 @@ $arguments = @(
     '--foreground-far-m', [string]$ForegroundFarM,
     '--horizontal-fov-deg', [string]$HorizontalFovDeg
 )
+if ($null -ne $effectiveTargetPixels) {
+    $arguments += @('--target-pixels', [string]$effectiveTargetPixels)
+}
 if ($PSBoundParameters.ContainsKey('MaxFrames')) {
     $arguments += @('--max-frames', [string]$MaxFrames)
 }
@@ -140,7 +180,19 @@ $plan = [ordered]@{
     output_tcp = "127.0.0.1`:$OutputTcpPort"
     listener_wait_seconds = $ListenerWaitSeconds
     input_size = $InputSize
-    geometry_max_edge = $MaxEdge
+    geometry_max_edge = $effectiveMaxEdge
+    geometry_target_pixels = $effectiveTargetPixels
+    geometry_budget_source = $geometryBudgetSource
+    adaptive_geometry_examples = if ($Profile -eq '3080ti_16gb') {
+        @(
+            '512x512 -> 384x384',
+            '1024x567 -> 512x284',
+            '1024x576 -> 512x288'
+        )
+    }
+    else {
+        @('profile max-edge default; no 3080 target-pixel override')
+    }
     calibration_frames = $CalibrationFrames
     pseudo_metre_slab = @($PseudoNearM, $PseudoFarM)
     python = $python
@@ -182,6 +234,12 @@ $previousPythonUtf8 = [Environment]::GetEnvironmentVariable('PYTHONUTF8', 'Proce
 try {
     $env:CUDA_VISIBLE_DEVICES = [string]$GpuIndex
     $env:PYTHONUTF8 = '1'
+    try {
+        $Host.UI.RawUI.WindowTitle = "FlexGPU Depth Anything Geometry Worker [$Profile, GPU $GpuIndex]"
+    }
+    catch {
+        # Window titles are best-effort for non-console PowerShell hosts.
+    }
     Write-Host "[Depth Anything Geometry] Starting foreground worker on physical GPU $GpuIndex."
     & $python @arguments
     $exitCode = $LASTEXITCODE

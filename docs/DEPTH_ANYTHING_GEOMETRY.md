@@ -93,10 +93,21 @@ environment and checkpoint:
   -Backend depth_anything `
   -GpuIndex 0 `
   -InputSize 384 `
-  -MaxEdge 384 `
+  -MaxEdge 512 `
+  -TargetPixels 147456 `
   -CalibrationFrames 12 `
   -Start
 ```
+
+The 3080 target is a pixel budget, not a forced square: 512x512 generated RGB
+is inferred at 384x384, 1024x567 is inferred at 512x284, and 1024x576 is
+inferred at 512x288. These stay near the 147,456-sample target and feed the
+same fixed 1920x1080 wall renderers without stretching. A live source-format
+change intentionally starts a new calibration and producer session before
+publishing fresh geometry.
+The automatic target applies only to `-Profile 3080ti_16gb`. The 4090 and 5090
+profiles keep their own worker-profile geometry limits unless an operator
+explicitly supplies `-TargetPixels` or `-MaxEdge`.
 
 Default loopback ports are:
 
@@ -119,11 +130,17 @@ The same control also switches strict `FRAME_STATE` and `CAMERA_METADATA`
 lifecycle readers to this bridge and clears the previous provider session.
 This prevents a stopped MoGe worker from zero-gating fresh Depth Anything
 geometry after a live provider change.
+The `SHOW_CONTROL` Workers page can pulse `Start Depth Anything Worker` instead
+of requiring a manually typed command. It opens the same public wrapper in a
+visible PowerShell console using the selected quality profile and GPU index;
+stop it with Ctrl+C before launching MoGe-2.
 Reconstruction also keeps a separate Depth Anything calibration. Its default
 uses the worker's `0.5–4.0 m` pseudo-metric slab with scale `1` and bias `0`;
 the commissioned MoGe installation scale is not reused. Reusing the smaller
 MoGe scale would move every Depth Anything sample behind the near plane and
 produce valid RGB with zero active point alpha.
+Use `Depthanythingscale` for provider-specific framing and leave it at `1` when
+the accepted Depth Anything view already fills the wall correctly.
 
 For an ignored runtime configuration, select the provider and point the
 metadata readers at its bridge:
