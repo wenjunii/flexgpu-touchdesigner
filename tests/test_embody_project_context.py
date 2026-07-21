@@ -96,6 +96,8 @@ class EmbodyProjectContextTests(unittest.TestCase):
             "identity_operators",
             "Test-LoopbackPort",
             "RequireEnvoy",
+            "WaitReadyMs",
+            "Get-EnvoyRuntimeState",
         ):
             self.assertIn(marker, checker)
         for marker in (

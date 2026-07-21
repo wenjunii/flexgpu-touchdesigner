@@ -149,8 +149,13 @@ Run the wiring preflight after restarting TouchDesigner or the MCP client:
 
 ```powershell
 .\scripts\Test-TDKnowledgeBridge.ps1
-.\scripts\Test-TDKnowledgeBridge.ps1 -RequireEnvoy
+.\scripts\Test-TDKnowledgeBridge.ps1 -RequireEnvoy -WaitReadyMs 30000
 ```
+
+The bounded wait is recommended immediately after a cold TouchDesigner launch:
+it follows the newly registered project-scoped Envoy port instead of failing
+during the short listener startup window. It does not start or modify
+TouchDesigner.
 
 Follow [`docs/EMBODY_MCP.md`](docs/EMBODY_MCP.md) for setup, the end-to-end MCP
 tool check, the ordered visual audit, and private-component boundaries.
