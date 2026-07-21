@@ -49,13 +49,14 @@ Validate the checked-in contract and local wiring from the repository root:
 
 ```powershell
 .\scripts\Test-TDKnowledgeBridge.ps1
-.\scripts\Test-TDKnowledgeBridge.ps1 -RequireEnvoy
+.\scripts\Test-TDKnowledgeBridge.ps1 -RequireEnvoy -WaitReadyMs 30000
 ```
 
 The first command validates local paths and reports whether the registered
 Envoy instance is ready. The second makes the live TouchDesigner process and
-its loopback listener mandatory. Neither command starts or changes
-TouchDesigner, and neither publishes local paths.
+its loopback listener mandatory and follows registry changes for up to 30
+seconds, which covers a normal cold-start registration window. Neither command
+starts or changes TouchDesigner, and neither publishes local paths.
 
 With TouchDesigner closed, the MCP should still expose:
 

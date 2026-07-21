@@ -10,6 +10,10 @@ Envoy registry exist. When -RequireEnvoy is supplied, the active registry
 entry must reference a live TouchDesigner process with a reachable loopback
 port.
 
+Use -WaitReadyMs after a cold TouchDesigner launch to tolerate the bounded
+interval while Embody registers the new active instance and starts its
+loopback listener. The default remains an immediate single check.
+
 This script never prints machine-local paths and does not start or modify
 TouchDesigner. It validates wiring and registration; visual and content
 acceptance still require the ordered live audit in docs/EMBODY_MCP.md.
@@ -22,7 +26,9 @@ param(
     [switch]$SkipLocalConfig,
     [switch]$RequireEnvoy,
     [ValidateRange(100, 10000)]
-    [int]$ConnectTimeoutMs = 2000
+    [int]$ConnectTimeoutMs = 2000,
+    [ValidateRange(0, 120000)]
+    [int]$WaitReadyMs = 0
 )
 
 Set-StrictMode -Version Latest
@@ -159,6 +165,51 @@ function Test-LoopbackPort {
     }
 }
 
+function Get-EnvoyRuntimeState {
+    param(
+        [Parameter(Mandatory)]
+        [string]$RegistryPath,
+        [Parameter(Mandatory)]
+        [int]$TimeoutMs
+    )
+
+    $registry = Get-Content -LiteralPath $RegistryPath -Raw | ConvertFrom-Json
+    $activeInstance = [string]$registry.active
+    $instanceProperty = @(
+        $registry.instances.PSObject.Properties |
+            Where-Object { $_.Name -eq $activeInstance }
+    )
+    if ([string]::IsNullOrWhiteSpace($activeInstance) -or $instanceProperty.Count -ne 1) {
+        return [pscustomobject]@{
+            State = 'offline'
+            ActiveInstance = $activeInstance
+            ActivePort = $null
+            ProcessAlive = $false
+            ListenerReachable = $false
+        }
+    }
+
+    $instance = $instanceProperty[0].Value
+    $activePort = [int]$instance.port
+    $touchDesignerPid = [int]$instance.td_pid
+    if ($activePort -lt 1 -or $activePort -gt 65535 -or $touchDesignerPid -lt 1) {
+        throw 'The active FlexGPU Envoy registry entry is malformed.'
+    }
+    $processAlive = $null -ne (
+        Get-Process -Id $touchDesignerPid -ErrorAction SilentlyContinue
+    )
+    $listenerReachable = Test-LoopbackPort `
+        -Port $activePort `
+        -TimeoutMs $TimeoutMs
+    return [pscustomobject]@{
+        State = if ($processAlive -and $listenerReachable) { 'ready' } else { 'offline' }
+        ActiveInstance = $activeInstance
+        ActivePort = $activePort
+        ProcessAlive = $processAlive
+        ListenerReachable = $listenerReachable
+    }
+}
+
 $projectContextPath = Resolve-ExistingPath `
     -Path $ProjectContext `
     -PathType Leaf `
@@ -253,40 +304,29 @@ $activePort = $null
 $processAlive = $false
 $listenerReachable = $false
 if ($null -ne $envoyRegistryPath) {
-    $registry = Get-Content -LiteralPath $envoyRegistryPath -Raw | ConvertFrom-Json
-    $activeInstance = [string]$registry.active
-    $instanceProperty = @(
-        $registry.instances.PSObject.Properties |
-            Where-Object { $_.Name -eq $activeInstance }
-    )
-    if ([string]::IsNullOrWhiteSpace($activeInstance) -or $instanceProperty.Count -ne 1) {
-        if ($RequireEnvoy) {
-            throw 'The FlexGPU Envoy registry has no valid active instance.'
-        }
-        $envoyState = 'offline'
-    }
-    else {
-        $instance = $instanceProperty[0].Value
-        $activePort = [int]$instance.port
-        $touchDesignerPid = [int]$instance.td_pid
-        if ($activePort -lt 1 -or $activePort -gt 65535 -or $touchDesignerPid -lt 1) {
-            throw 'The active FlexGPU Envoy registry entry is malformed.'
-        }
-        $processAlive = $null -ne (
-            Get-Process -Id $touchDesignerPid -ErrorAction SilentlyContinue
-        )
-        $listenerReachable = Test-LoopbackPort `
-            -Port $activePort `
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($WaitReadyMs)
+    do {
+        $snapshot = Get-EnvoyRuntimeState `
+            -RegistryPath $envoyRegistryPath `
             -TimeoutMs $ConnectTimeoutMs
-        if ($processAlive -and $listenerReachable) {
-            $envoyState = 'ready'
+        $envoyState = $snapshot.State
+        $activeInstance = $snapshot.ActiveInstance
+        $activePort = $snapshot.ActivePort
+        $processAlive = $snapshot.ProcessAlive
+        $listenerReachable = $snapshot.ListenerReachable
+
+        if (-not $RequireEnvoy -or $envoyState -eq 'ready' -or $WaitReadyMs -eq 0) {
+            break
         }
-        else {
-            $envoyState = 'offline'
+        $remainingMs = [int][Math]::Ceiling(($deadline - [DateTime]::UtcNow).TotalMilliseconds)
+        if ($remainingMs -le 0) {
+            break
         }
-        if ($RequireEnvoy -and $envoyState -ne 'ready') {
-            throw 'The active FlexGPU Envoy process or loopback listener is unavailable.'
-        }
+        Start-Sleep -Milliseconds ([Math]::Min(250, $remainingMs))
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    if ($RequireEnvoy -and $envoyState -ne 'ready') {
+        throw "The active FlexGPU Envoy process or loopback listener is unavailable after waiting $WaitReadyMs ms."
     }
 }
 elseif ($RequireEnvoy) {
