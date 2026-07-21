@@ -198,6 +198,23 @@ The generated dual-local profile uses loopback Touch TCP on `127.0.0.1`, as do
 the shipped dual-local presets. The initializer does not create two-computer
 network profiles.
 
+After TouchDesigner Save As creates a new ignored working TOE, retarget the
+existing machine-local config without regenerating its GPU assignment or show
+settings. The command is previewable with `-WhatIf`, updates only
+`processes.world.project`, and refuses tracked files or obvious cross-profile
+filenames:
+
+```powershell
+.\scripts\Set-FlexShowLocalProject.ps1 `
+  -Config .\config\local-moge2-3080.json `
+  -Project .\projects\FlexShow-moge2-embody-local-3080.27.toe `
+  -ExpectedTier 3080ti_16gb
+```
+
+Stop the old managed runtime before retargeting when its manifest still owns a
+live TouchDesigner process. Preview `Start-FlexShow.ps1` afterward and confirm
+the selected GPU, tier, TouchDesigner build, and TOE before adding `-Start`.
+
 ### Keep 3080 and 5090 work separate
 
 The tracked branch is shared source code, not a machine image. Each computer

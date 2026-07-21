@@ -56,6 +56,20 @@ separate ignored candidate config. Never save the candidate over the accepted
 2025.32820 project. The complete copy, preview, and rollback commands are in
 the [side-by-side candidate workflow](../README.md#side-by-side-touchdesigner-candidate-test).
 
+When a validated versioned Save As creates a successor working TOE, keep the
+previous file as rollback and retarget only the matching ignored local config:
+
+```powershell
+.\scripts\Set-FlexShowLocalProject.ps1 `
+  -Config .\config\local-moge2-3080.json `
+  -Project .\projects\FlexShow-moge2-embody-local-3080.27.toe `
+  -ExpectedTier 3080ti_16gb
+```
+
+The helper atomically changes only `processes.world.project`. It rejects
+tracked configs/projects and conflicting 3080, 4090, or 5090 filenames; it
+never edits the TOE, GPU UUID, worker profile, or another machine's config.
+
 Run the timestamped in-process validator below from the candidate build, then
 verify application readiness, exact output dimensions, MoGe-2 active/stale
 behavior, zero/fail-closed sensor output, installation and stereo/VR previews,

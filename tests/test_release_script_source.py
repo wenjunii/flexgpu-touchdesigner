@@ -142,7 +142,7 @@ class ReleaseScriptSourceTests(unittest.TestCase):
         self.assertIn(r"-r .\requirements-test.txt", readme)
         self.assertIn("jsonschema==4.17.3", requirements)
         self.assertIn("numpy==2.2.6", requirements)
-        self.assertIn("Pillow==10.4.0", requirements)
+        self.assertIn("Pillow==12.3.0", requirements)
         self.assertIn(r".\scripts\Test-FlexShowRelease.ps1", readme)
         self.assertIn("does not launch TouchDesigner", readme)
 

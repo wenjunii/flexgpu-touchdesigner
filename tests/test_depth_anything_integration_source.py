@@ -35,6 +35,7 @@ class DepthAnythingIntegrationSourceTests(unittest.TestCase):
         for marker in (
             "numpy==2.2.6",
             "opencv-python==4.10.0.84",
+            "huggingface-hub==0.32.4",
             "transformers==4.52.4",
             "safetensors==0.5.3",
         ):
