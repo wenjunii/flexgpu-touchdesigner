@@ -137,6 +137,60 @@ class LocalProjectSelectorTests(unittest.TestCase):
         self.assertNotEqual(wrong_file.returncode, 0)
         self.assertIn("conflicts with local filename", wrong_file.stderr)
 
+    def test_rejects_ambiguous_machine_local_filenames(self) -> None:
+        ambiguous_project = self.repository / "projects" / "Show-latest.toe"
+        ambiguous_project.write_bytes(b"ambiguous machine")
+        wrong_project = self._run(
+            "-Config",
+            str(self.config),
+            "-Project",
+            str(ambiguous_project),
+            "-ExpectedTier",
+            "3080ti_16gb",
+            check=False,
+        )
+        self.assertNotEqual(wrong_project.returncode, 0)
+        self.assertIn("requires its own machine tag", wrong_project.stderr)
+
+        ambiguous_config = self.repository / "config" / "local-show.json"
+        original_config = self.config
+        self.config = ambiguous_config
+        try:
+            self._write_config("3080ti_16gb", self.new_project)
+        finally:
+            self.config = original_config
+        wrong_config = self._run(
+            "-Config",
+            str(ambiguous_config),
+            "-Project",
+            str(self.new_project),
+            "-ExpectedTier",
+            "3080ti_16gb",
+            check=False,
+        )
+        self.assertNotEqual(wrong_config.returncode, 0)
+        self.assertIn("requires its own machine tag", wrong_config.stderr)
+
+    def test_accepts_distinct_5090_identity(self) -> None:
+        project_5090 = self.repository / "projects" / "Show-5090.30.toe"
+        project_5090.write_bytes(b"5090")
+        config_5090 = self.repository / "config" / "local-5090.json"
+        original_config = self.config
+        self.config = config_5090
+        try:
+            self._write_config("5090", project_5090)
+        finally:
+            self.config = original_config
+        result = self._run(
+            "-Config",
+            str(config_5090),
+            "-Project",
+            str(project_5090),
+            "-ExpectedTier",
+            "5090",
+        )
+        self.assertIn('"status":  "unchanged"', result.stdout)
+
     def test_rejects_tracked_canonical_project(self) -> None:
         canonical = self.repository / "projects" / "FlexShow.toe"
         canonical.write_bytes(b"tracked")

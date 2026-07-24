@@ -201,15 +201,29 @@ network profiles.
 After TouchDesigner Save As creates a new ignored working TOE, retarget the
 existing machine-local config without regenerating its GPU assignment or show
 settings. The command is previewable with `-WhatIf`, updates only
-`processes.world.project`, and refuses tracked files or obvious cross-profile
-filenames:
+`processes.world.project`, requires the intended tier, and refuses tracked,
+cross-profile, or ambiguously named local files:
 
 ```powershell
+# Run this pair only on the RTX 5090 workstation.
+.\scripts\Set-FlexShowLocalProject.ps1 `
+  -Config .\config\local-5090.json `
+  -Project .\projects\FlexShow-moge2-embody-local-5090.30.toe `
+  -ExpectedTier 5090 `
+  -WhatIf
+
+# Run this separate pair only on the RTX 3080 workstation.
 .\scripts\Set-FlexShowLocalProject.ps1 `
   -Config .\config\local-moge2-3080.json `
   -Project .\projects\FlexShow-moge2-embody-local-3080.27.toe `
-  -ExpectedTier 3080ti_16gb
+  -ExpectedTier 3080ti_16gb `
+  -WhatIf
 ```
+
+Review each preview, then repeat that one command without `-WhatIf`. The helper
+requires `5090` in both 5090 filenames and accepts `3080` or `3080ti` in both
+3080 filenames. It will not retarget a generic `local-show.json` or
+`Show-latest.toe` for a tuned hardware tier.
 
 Stop the old managed runtime before retargeting when its manifest still owns a
 live TouchDesigner process. Preview `Start-FlexShow.ps1` afterward and confirm
@@ -223,13 +237,20 @@ runtime directory. A safe naming convention is:
 
 | Computer | Worker profile | Ignored configuration | Ignored working TOE pattern |
 | --- | --- | --- | --- |
-| 3080 Ti Laptop 16 GB | `3080ti_16gb` | `config/local-3080ti.json` | `projects/*-3080ti-*.toe` |
-| RTX 5090 32 GB | `5090` | `config/local-5090.json` | `projects/*-5090-*.toe` |
+| 3080 Ti Laptop 16 GB | `3080ti_16gb` | `config/local-3080*.json` | `projects/*-3080*.toe` |
+| RTX 5090 32 GB | `5090` | `config/local-5090*.json` | `projects/*-5090*.toe` |
 
 Generate each local configuration on its own computer. Never copy or commit
 either local JSON file because it contains that computer's absolute project
 path and GPU UUID. Never open the 3080 working TOE as the 5090 save target, or
 vice versa. Git intentionally ignores all of these local files.
+
+The currently identified private checkpoints are
+`FlexShow-moge2-embody-local-3080.27.toe` on the 3080 and
+`FlexShow-moge2-embody-local-5090.30.toe` on the 5090. They are independent
+working files, not Git artifacts or interchangeable release versions. The
+5090 checkpoint has the licensed private StreamDiffusionTD component connected;
+the component and its licence remain local and untracked.
 
 The generated-geometry worker profile is mandatory and checked against the
 selected physical GPU before a real worker starts. The start wrappers also
@@ -983,7 +1004,7 @@ cd C:\path\to\flexgpu-touchdesigner
   -DisplayProfile venue_1080p `
   -DisplayMode panoramic_wrap `
   -GeometryProvider moge2 `
-  -Project .\projects\FlexShow-moge2-embody-local-5090.28.toe `
+  -Project .\projects\FlexShow-moge2-embody-local-5090.30.toe `
   -Output .\config\local-5090.json
 ```
 
