@@ -10,8 +10,9 @@ Git, so the tracked synthetic project, public presets, private components, GPU
 UUIDs, and another computer's local configuration remain untouched.
 
 The write is atomic and SupportsShouldProcess provides -WhatIf. -ExpectedTier
-adds an explicit guard against selecting a 3080, 4090, or 5090 config from the
-wrong machine.
+is mandatory so the operator must name the intended machine. Tuned 3080, 4090,
+and 5090 configs and projects must also carry their own tier tag in both local
+filenames.
 #>
 #Requires -Version 5.1
 [CmdletBinding(SupportsShouldProcess = $true)]
@@ -22,8 +23,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Project,
 
-    [ValidateSet('', '3080ti_16gb', '4090', '5090', 'custom')]
-    [string]$ExpectedTier = ''
+    [Parameter(Mandatory = $true)]
+    [ValidateSet('auto', '3080ti_16gb', '4090', '5090', 'custom')]
+    [string]$ExpectedTier
 )
 
 Set-StrictMode -Version Latest
@@ -95,19 +97,27 @@ function Assert-ProfileNameCompatibility {
         [string[]]$Paths
     )
 
+    $requiredPattern = switch ($Tier) {
+        '3080ti_16gb' { '(?i)(?:^|[-_.])3080(?:ti)?(?:[-_.]|$)' }
+        '4090' { '(?i)(?:^|[-_.])4090(?:[-_.]|$)' }
+        '5090' { '(?i)(?:^|[-_.])5090(?:[-_.]|$)' }
+        default { '' }
+    }
     $conflictingPattern = switch ($Tier) {
         '3080ti_16gb' { '(?i)(?:^|[-_.])(?:4090|5090)(?:[-_.]|$)' }
         '4090' { '(?i)(?:^|[-_.])(?:3080(?:ti)?|5090)(?:[-_.]|$)' }
         '5090' { '(?i)(?:^|[-_.])(?:3080(?:ti)?|4090)(?:[-_.]|$)' }
         default { '' }
     }
-    if ([string]::IsNullOrWhiteSpace($conflictingPattern)) {
-        return
-    }
     foreach ($path in $Paths) {
         $name = [System.IO.Path]::GetFileName($path)
-        if ($name -match $conflictingPattern) {
+        if (-not [string]::IsNullOrWhiteSpace($conflictingPattern) -and
+            $name -match $conflictingPattern) {
             throw "Tier $Tier conflicts with local filename '$name'. Keep 3080, 4090, and 5090 working files separate."
+        }
+        if (-not [string]::IsNullOrWhiteSpace($requiredPattern) -and
+            $name -notmatch $requiredPattern) {
+            throw "Tier $Tier requires its own machine tag in local filename '$name'. Keep 3080, 4090, and 5090 working files separate."
         }
     }
 }
@@ -150,8 +160,7 @@ if ($null -eq $document.PSObject.Properties['processes'] -or
 }
 
 $tier = [string]$document.tier
-if (-not [string]::IsNullOrWhiteSpace($ExpectedTier) -and
-    $tier -cne $ExpectedTier) {
+if ($tier -cne $ExpectedTier) {
     throw "Config tier '$tier' does not match -ExpectedTier '$ExpectedTier'."
 }
 Assert-ProfileNameCompatibility -Tier $tier -Paths @($configPath, $projectPath)

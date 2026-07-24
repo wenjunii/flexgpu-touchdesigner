@@ -63,16 +63,19 @@ class GeneratedGeometryWorkerScriptTests(unittest.TestCase):
             + MIGRATION.read_text(encoding="utf-8")
         )
         for marker in (
-            "config/local-3080ti.json",
-            "config/local-5090.json",
-            "projects/*-3080ti-*.toe",
-            "projects/*-5090-*.toe",
+            "config/local-3080*.json",
+            "config/local-5090*.json",
+            "projects/*-3080*.toe",
+            "projects/*-5090*.toe",
             "Stop-GeneratedGeometryWorker.ps1 -Stop",
             "-Profile 3080ti_16gb",
             "-Profile 5090",
             "hardware-neutral",
             "Set-FlexShowLocalProject.ps1",
             "-ExpectedTier 3080ti_16gb",
+            "-ExpectedTier 5090",
+            "FlexShow-moge2-embody-local-3080.27.toe",
+            "FlexShow-moge2-embody-local-5090.30.toe",
         ):
             self.assertIn(marker, source)
 
@@ -85,6 +88,7 @@ class GeneratedGeometryWorkerScriptTests(unittest.TestCase):
             "local-*.json",
             "Assert-ProfileNameCompatibility",
             "Keep 3080, 4090, and 5090 working files separate",
+            "requires its own machine tag",
             "[System.IO.File]::WriteAllText",
             "Move-Item -LiteralPath $temporaryPath",
             "Get-RepositoryRelativePath -Path $projectPath",
