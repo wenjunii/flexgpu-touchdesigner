@@ -76,6 +76,10 @@ class GeneratedGeometryWorkerScriptTests(unittest.TestCase):
             "-ExpectedTier 5090",
             "FlexShow-moge2-embody-local-3080.27.toe",
             "FlexShow-moge2-embody-local-5090.30.toe",
+            "install_wall_view_controls",
+            "install_worker_stop_controls",
+            "The public installers are the migration path",
+            "5090-tagged TOE",
         ):
             self.assertIn(marker, source)
 

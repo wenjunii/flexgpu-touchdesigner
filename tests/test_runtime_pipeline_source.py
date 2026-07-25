@@ -735,13 +735,24 @@ assert normalized({src_path!r}) in {{
             "Wallwidth",
             "Wallheight",
             "Pointcloudscale",
+            "Leftwallscale",
+            "Centerwallscale",
+            "Rightwallscale",
+            "Leftwallpanhorizontaldegrees",
+            "Leftwallpanverticaldegrees",
+            "Centerwallpanhorizontaldegrees",
+            "Centerwallpanverticaldegrees",
+            "Rightwallpanhorizontaldegrees",
+            "Rightwallpanverticaldegrees",
             "Moge2scale",
             "Depthanythingscale",
             "Effectivepointcloudscale",
             "Workspaceroot",
             "Gpuindex",
             "Startmogeworker",
+            "Stopmogeworker",
             "Startdepthanythingworker",
+            "Stopdepthanythingworker",
             "Workerstatus",
         ):
             self.assertIn(marker, self.source)
@@ -757,18 +768,43 @@ assert normalized({src_path!r}) in {{
         for marker in (
             "'surfacefovdegrees'",
             "'artisticyawdegrees'",
+            "'artisticoffsetdirection'",
             "'artisticoffsetmetres'",
+            "'leftwallscale'",
+            "'centerwallscale'",
+            "'rightwallscale'",
+            "'leftwallpanhorizontaldegrees'",
+            "'leftwallpanverticaldegrees'",
+            "'centerwallpanhorizontaldegrees'",
+            "'centerwallpanverticaldegrees'",
+            "'rightwallpanhorizontaldegrees'",
+            "'rightwallpanverticaldegrees'",
         ):
             self.assertIn(marker, self.module.SHOW_CONTROL_CALLBACKS)
         self.assertIn("subprocess.Popen(", self.source)
+        self.assertIn("subprocess.run(", self.module.SHOW_CONTROL_CALLBACKS)
         self.assertIn("'powershell.exe', '-NoProfile'", self.source)
         self.assertNotIn("'powershell.exe', '-NoExit'", self.source)
         self.assertIn("'CREATE_NEW_CONSOLE'", self.source)
+        self.assertIn("'CREATE_NO_WINDOW'", self.source)
+        self.assertIn("'Stop-GeneratedGeometryWorker.ps1'", self.source)
+        self.assertIn("'-Provider', selected, '-Stop'", self.source)
+        self.assertIn("def _stop_worker(provider):", self.source)
         self.assertNotIn("shell=True", self.module.SHOW_CONTROL_CALLBACKS)
         installer = inspect.getsource(
             self.module.install_output_framing_controls)
         self.assertIn("_apply_point_cloud_camera_framing(render)", installer)
         self.assertIn("_build_show_control(pipeline, report)", installer)
+
+    def test_worker_stop_upgrade_is_bounded_and_does_not_save(self) -> None:
+        signature = inspect.signature(self.module.install_worker_stop_controls)
+        self.assertEqual(list(signature.parameters), ["root"])
+        installer = inspect.getsource(
+            self.module.install_worker_stop_controls)
+        self.assertIn("_build_show_control(pipeline, report)", installer)
+        self.assertNotIn("destroy", installer)
+        self.assertNotIn("build(", installer)
+        self.assertNotIn(".save", installer)
         self.assertNotIn("build(", installer)
         self.assertNotIn("project.save", installer)
 
@@ -859,6 +895,20 @@ assert normalized({src_path!r}) in {{
             self.source,
         )
         self.assertIn('"CAMERA_ARTISTIC_" + side', self.source)
+        self.assertIn(
+            '"parent().par.Artisticoffsetmetres.eval() * " + '
+            "offset_direction",
+            self.source,
+        )
+        self.assertIn(
+            '"-parent().par.Artisticoffsetmetres.eval() * " + '
+            "offset_direction",
+            self.source,
+        )
+        self.assertIn(
+            "parent().par.Artisticoffsetdirection.eval() == ",
+            self.source,
+        )
         self.assertIn('"tx", 0.0', self.source)
         self.assertIn("Wrapyawdegrees", self.source)
         self.assertIn("Artisticoffsetmetres", self.source)
@@ -871,6 +921,30 @@ assert normalized({src_path!r}) in {{
         )
         self.assertNotIn("eye_offset * -35.0", self.source)
         self.assertIn("HEADSET_ADAPTER_CONTRACT", self.source)
+
+    def test_wall_view_control_upgrade_is_bounded(self) -> None:
+        installer = inspect.getsource(
+            self.module.install_wall_view_controls
+        )
+        for marker in (
+            '"CAMERA_ARTISTIC_LEFT"',
+            '"CAMERA_ARTISTIC_RIGHT"',
+            '"CAMERA_" + mode + "_" + side',
+            '"Artisticoffsetdirection"',
+            'menu=("outward", "inward")',
+            'side + "wallscale"',
+            'side + "wallpanhorizontaldegrees"',
+            'side + "wallpanverticaldegrees"',
+            '"parent().par.Artisticoffsetmetres.eval() * "',
+            '"-parent().par.Artisticoffsetmetres.eval() * "',
+            '"rx", pan_vertical',
+            '"ry"',
+            "_scaled_camera_fov_expression",
+            "_build_show_control",
+        ):
+            self.assertIn(marker, installer)
+        self.assertNotIn("destroy", installer)
+        self.assertNotIn(".save", installer.casefold())
 
     def test_point_glyph_is_round_soft_and_separate_from_scene_color(self) -> None:
         glyph = self.module.SHADERS["point_glyph"]

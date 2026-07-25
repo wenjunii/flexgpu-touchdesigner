@@ -254,17 +254,40 @@ def _positive_state_int(state, name):
     return parsed
 
 
-def _active_output_dimensions(state):
+def _active_output_dimensions(
+        state, preserve_geometry_aspect=False,
+        source_width=None, source_height=None):
     expected = {}
     if _truthy(state.get("world_active")):
         geometry = _positive_state_int(state, "geometry_resolution")
+        geometry_size = (geometry, geometry)
+        if preserve_geometry_aspect:
+            if source_width is None:
+                source_width = state.get("source_width")
+            if source_height is None:
+                source_height = state.get("source_height")
+            source_width = _positive_state_int(
+                {"source_width":source_width}, "source_width")
+            source_height = _positive_state_int(
+                {"source_height":source_height}, "source_height")
+            aspect = float(source_width) / float(source_height)
+            geometry_size = (
+                max(64, min(
+                    2048,
+                    2 * int(round(
+                        (geometry * math.sqrt(aspect)) / 2.0)))),
+                max(64, min(
+                    2048,
+                    2 * int(round(
+                        (geometry / math.sqrt(aspect)) / 2.0)))),
+            )
         for name in (
             "OUT_POSITION",
             "OUT_COLOR",
             "OUT_INTERACTION",
             "OUT_INTERACTION_DEBUG",
         ):
-            expected[name] = (geometry, geometry)
+            expected[name] = geometry_size
         if _truthy(state.get("installation_active")):
             surface_width = _positive_state_int(
                 state, "triple_surface_width")
@@ -578,7 +601,16 @@ def validate(
                         (flag, actual_value, expected_value, expected_name)
                     )
     try:
-        expected_dimensions = _active_output_dimensions(state)
+        reconstruction = _op(PIPELINE_PATH + "/RECONSTRUCTION")
+        preserve_geometry_aspect = _truthy(_value(
+            reconstruction, "Preservegeometryaspect", False))
+        source_rgb = _op(PIPELINE_PATH + "/RECONSTRUCTION/RGB_IN")
+        expected_dimensions = _active_output_dimensions(
+            state,
+            preserve_geometry_aspect=preserve_geometry_aspect,
+            source_width=getattr(source_rgb, "width", None),
+            source_height=getattr(source_rgb, "height", None),
+        )
     except Exception as exc:
         expected_dimensions = {}
         state_failures.append("active output contract is invalid: %s" % exc)
@@ -822,6 +854,7 @@ def validate(
 
     triple_failures = []
     triple_camera_details = {}
+    triple_camera_fovs = {}
     if _truthy(state.get("installation_active")):
         point_render = _op(PIPELINE_PATH + "/POINT_RENDER")
         expected_wrap_yaw = float(
@@ -830,6 +863,30 @@ def validate(
             _value(point_render, "Artisticyawdegrees", 18.0) or 0.0)
         expected_art_offset = float(
             _value(point_render, "Artisticoffsetmetres", 0.45) or 0.0)
+        expected_point_scale = float(
+            _value(point_render, "Pointcloudscale", 1.0) or 1.0)
+        expected_art_direction = str(
+            _value(point_render, "Artisticoffsetdirection", "outward")
+            or "outward").strip().lower()
+        if expected_art_direction not in ("outward", "inward"):
+            triple_failures.append({
+                "invalid_artistic_offset_direction":expected_art_direction,
+            })
+            expected_art_direction = "outward"
+        offset_sign = 1.0 if expected_art_direction == "outward" else -1.0
+        wall_controls = {}
+        for side in ("LEFT", "CENTER", "RIGHT"):
+            title = side.title()
+            wall_controls[side] = {
+                "scale":float(_value(
+                    point_render, title + "wallscale", 1.0) or 1.0),
+                "pan_horizontal":float(_value(
+                    point_render,
+                    title + "wallpanhorizontaldegrees", 0.0) or 0.0),
+                "pan_vertical":float(_value(
+                    point_render,
+                    title + "wallpanverticaldegrees", 0.0) or 0.0),
+            }
         for mode, expected_transforms in (
             ("WRAP", {
                 # TouchDesigner positive camera Y rotation looks toward the
@@ -839,9 +896,13 @@ def validate(
                 "RIGHT":(0.0, -expected_wrap_yaw),
             }),
             ("ARTISTIC", {
-                "LEFT":(-expected_art_offset, -expected_art_yaw),
+                "LEFT":(
+                    expected_art_offset * offset_sign,
+                    -expected_art_yaw),
                 "CENTER":(0.0, 0.0),
-                "RIGHT":(expected_art_offset, expected_art_yaw),
+                "RIGHT":(
+                    -expected_art_offset * offset_sign,
+                    expected_art_yaw),
             }),
         ):
             for side, (expected_tx, expected_ry) in expected_transforms.items():
@@ -861,9 +922,12 @@ def validate(
                     _value(camera, axis, 0.0) or 0.0)
                     for axis in ("tx", "ty", "tz", "rx", "ry", "rz"))
                 triple_camera_details[camera_name] = list(transform)
+                controls = wall_controls[side]
+                expected_ry += controls["pan_horizontal"]
                 tolerance = 1e-4
                 expected = (
-                    expected_tx, 0.0, 0.0, 0.0, expected_ry, 0.0)
+                    expected_tx, 0.0, 0.0,
+                    controls["pan_vertical"], expected_ry, 0.0)
                 if (
                     not all(math.isfinite(value) for value in transform)
                     or any(
@@ -877,14 +941,47 @@ def validate(
                             "actual":list(transform),
                         },
                     })
+                base_fov = (
+                    float(_value(point_render, "Wrapfovdegrees", 78.0) or 78.0)
+                    if mode == "WRAP"
+                    else float(_value(
+                        point_render, "Surfacefovdegrees", 60.0) or 60.0))
+                combined_scale = max(
+                    0.2, min(
+                        10.0,
+                        expected_point_scale * controls["scale"]))
+                expected_fov = 2.0 * math.degrees(math.atan(
+                    math.tan(math.radians(base_fov) * 0.5)
+                    / combined_scale))
+                actual_fov = float(_value(camera, "fov", 0.0) or 0.0)
+                triple_camera_fovs[camera_name] = actual_fov
+                if (
+                    not math.isfinite(actual_fov)
+                    or abs(actual_fov - expected_fov) > 1e-3
+                ):
+                    triple_failures.append({
+                        "invalid_triple_camera_fov": {
+                            "camera":camera_name,
+                            "expected":expected_fov,
+                            "actual":actual_fov,
+                            "wall_scale":controls["scale"],
+                            "point_cloud_scale":expected_point_scale,
+                        },
+                    })
     check(
         "triple_display_cameras",
         not _truthy(state.get("installation_active")) or not triple_failures,
         {
             "failures":triple_failures,
             "cameras":triple_camera_details,
+            "camera_fovs":triple_camera_fovs,
+            "wall_controls":wall_controls if _truthy(
+                state.get("installation_active")) else {},
             "panoramic_contract":"shared origin with different yaw",
-            "artistic_contract":"translated and rotated side cameras",
+            "artistic_contract":"directional translated and rotated side cameras",
+            "artistic_offset_direction":(
+                expected_art_direction if _truthy(
+                    state.get("installation_active")) else ""),
         },
     )
 

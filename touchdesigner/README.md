@@ -155,7 +155,10 @@ Panoramic left/center/right cameras share one origin. Tune
 angles and overlap. `Surfacefovdegrees` is retained for the artistic cameras
 only. Artistic side cameras additionally use
 `Artisticyawdegrees` and `Artisticoffsetmetres`; this produces parallax and
-intentional discontinuities at the seams.
+intentional discontinuities at the seams. `Artisticoffsetdirection` selects
+`outward` or `inward` screen-space motion; outward moves visible left-wall
+content farther left and visible right-wall content farther right without
+changing the center or panoramic cameras.
 
 A monocular image-derived point cloud covers only the source camera's frontal
 field of view; it is not a captured 360-degree world. On the local 3080 profile,
@@ -184,6 +187,18 @@ after adding this checkout's `touchdesigner` folder to `sys.path`:
 import importlib, runtime_pipeline as rp; importlib.reload(rp); rp.install_show_control_upgrade(op('/project1/flexgpu')); rp.install_output_framing_controls(op('/project1/flexgpu'))
 ```
 
+For an existing working TOE that predates the direction, independent wall
+scale/pan controls, or worker Stop buttons, apply both bounded public upgrades:
+
+```python
+import importlib, runtime_pipeline as rp; importlib.reload(rp); flex = op('/project1/flexgpu'); rp.install_wall_view_controls(flex); rp.install_worker_stop_controls(flex)
+```
+
+On the 3080, run this only after opening the latest 3080-tagged working TOE.
+Keep `Qualityprofile` at `3080ti_16gb`, confirm `Gpuindex`, pulse `Applyall`,
+and save to a new 3080-tagged checkpoint after validation. Never use the
+5090-tagged TOE or `config/local-5090*.json` as the 3080 save/config target.
+
 Open `/project1/flexgpu/WORKING_PIPELINE/SHOW_CONTROL`. Its three parameter pages
 provide:
 
@@ -192,13 +207,19 @@ provide:
 - completion mode and fog density;
 - interaction strength and low-latency smoothing;
 - panoramic yaw, independent FOV, coverage, and noise;
-- artistic side yaw, side offset in metres, and independent surface FOV;
+- artistic side yaw, outward/inward side-offset direction, side offset in
+  metres, and independent surface FOV;
+- independent left, center, and right wall view scales for both panoramic and
+  artistic triple-wall outputs;
+- independent horizontal and vertical camera pan for each left, center, and
+  right wall in both triple-wall modes;
 - adjustable width/height for every wall feed, with three-wide mosaics;
 - a creative point-cloud scale plus independent MoGe-2 and Depth Anything
   provider scales;
 - 3080 Ti 16 GB, 4090, and 5090 geometry/point/capture presets.
-- visible PowerShell launch buttons for the two generated-geometry workers,
-  using the selected quality profile and physical GPU index.
+- visible PowerShell launch and checkout-scoped stop buttons for the two
+  generated-geometry workers, using the selected quality profile and physical
+  GPU index.
 
 The controls update only public managed operators and never inspect or change
 private StreamDiffusionTD parameters. `Wall Width` and `Wall Height` default to
@@ -209,12 +230,12 @@ Anything view. `Apply All Show Controls` reapplies the displayed values after
 reopening an older working TOE.
 
 Each worker button opens the existing public wrapper in a separate visible
-PowerShell console and selects its provider first. Stop that console with
-`Ctrl+C` before starting the other provider. A duplicate click from the same
-TouchDesigner session is refused. PowerShell exits when the foreground worker
-stops, preventing a dead worker from leaving an empty `-NoExit` console that
-blocks relaunch. `Workspace Root` must point at this checkout if the TOE was
-moved outside its `projects` folder.
+PowerShell console and selects its provider first. Use `Stop MoGe-2 Worker` or
+`Stop Depth Anything Worker` before starting the other provider; `Ctrl+C` is
+not required. A duplicate click from the same TouchDesigner session is refused.
+PowerShell exits when the foreground worker stops, preventing a dead worker
+from leaving an empty `-NoExit` console that blocks relaunch. `Workspace Root`
+must point at this checkout if the TOE was moved outside its `projects` folder.
 
 MoGe-2 is not GPU-only: inference runs on CUDA, while resize, tensor-to-array
 transfer, atlas packing, and transport can use substantial CPU. For the RTX
@@ -343,8 +364,10 @@ bridge listener. `scripts/Start-MoGe2Worker.ps1` then waits up to 120 seconds
 for result port `9221`, so it may be started while TouchDesigner is finishing
 its cold-start callbacks. Use the deterministic mock first, then the pinned
 real backend. Override the bounded wait with `-ListenerWaitSeconds` only when
-needed. Do not use `-WaitReadyMs` for the initial TouchDesigner launch because
-readiness depends on the separate worker's first returned frame.
+needed. The Workers page also provides provider-specific Stop buttons backed by
+`scripts/Stop-GeneratedGeometryWorker.ps1`; use those when the console does not
+accept `Ctrl+C`. Do not use `-WaitReadyMs` for the initial TouchDesigner launch
+because readiness depends on the separate worker's first returned frame.
 
 See [docs/MOGE2_LIVE.md](../docs/MOGE2_LIVE.md) for the exact source
 configuration, 3080 Ti starting profile, startup order, two-GPU/two-computer
@@ -364,8 +387,10 @@ from pathlib import Path; import importlib, sys; root = Path(r'C:\path\to\flexgp
 Select `depth_anything` on `SHOW_CONTROL`; it enables and initializes
 `DEPTH_ANYTHING_GEOMETRY_BRIDGE`. Then start
 `scripts/Start-DepthAnythingGeometryWorker.ps1` in another PowerShell. The
-launcher waits up to 120 seconds for result port `9261`. MoGe remains the
-default and can be selected again without rewiring. See
+launcher waits up to 120 seconds for result port `9261`. The matching Show
+Control Stop button terminates only this checkout's Depth Anything geometry
+worker and does not affect the separate audience-camera worker. MoGe remains
+the default and can be selected again without rewiring. See
 [docs/DEPTH_ANYTHING_GEOMETRY.md](../docs/DEPTH_ANYTHING_GEOMETRY.md).
 The generated-geometry path is live-accepted on the 3080 Ti Laptop with
 single, panoramic, and artistic outputs at 1920x1080 per surface; reaccept it
