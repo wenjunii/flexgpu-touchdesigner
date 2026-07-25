@@ -191,7 +191,7 @@ For an existing working TOE that predates the direction, independent wall
 scale/pan controls, or worker Stop buttons, apply both bounded public upgrades:
 
 ```python
-import importlib, runtime_pipeline as rp; importlib.reload(rp); flex = op('/project1/flexgpu'); rp.install_wall_view_controls(flex); rp.install_worker_stop_controls(flex)
+import importlib, runtime_pipeline as rp; importlib.reload(rp); flex = op('/project1/flexgpu'); rp.install_wall_view_controls(flex); rp.install_worker_stop_controls(flex); rp.install_color_adjustment_controls(flex)
 ```
 
 On the 3080, run this only after opening the latest 3080-tagged working TOE.
@@ -199,7 +199,7 @@ Keep `Qualityprofile` at `3080ti_16gb`, confirm `Gpuindex`, pulse `Applyall`,
 and save to a new 3080-tagged checkpoint after validation. Never use the
 5090-tagged TOE or `config/local-5090*.json` as the 3080 save/config target.
 
-Open `/project1/flexgpu/WORKING_PIPELINE/SHOW_CONTROL`. Its three parameter pages
+Open `/project1/flexgpu/WORKING_PIPELINE/SHOW_CONTROL`. Its four parameter pages
 provide:
 
 - MoGe-2 or Depth Anything generated geometry selection;
@@ -216,7 +216,9 @@ provide:
 - adjustable width/height for every wall feed, with three-wide mosaics;
 - a creative point-cloud scale plus independent MoGe-2 and Depth Anything
   provider scales;
-- 3080 Ti 16 GB, 4090, and 5090 geometry/point/capture presets.
+- brightness, contrast, saturation, gamma, hue shift, temperature, and tint
+  for every final rendered point-cloud view, with a neutral reset button;
+- 3080 Ti 16 GB, 4090, and 5090 geometry/point/capture presets;
 - visible PowerShell launch and checkout-scoped stop buttons for the two
   generated-geometry workers, using the selected quality profile and physical
   GPU index.
@@ -229,7 +231,14 @@ the provider scales prevent a MoGe correction from changing the accepted Depth
 Anything view. `Apply All Show Controls` reapplies the displayed values after
 reopening an older working TOE.
 
-To verify all 45 public controls after installing an upgrade, run this inside
+The `Color Adjustment` page grades the single installation output, all six
+panoramic/artistic wall feeds, and both stereo preview eyes. It does not alter
+`OUT_SOURCE_COLOR`, `OUT_COLOR`, or private StreamDiffusionTD output. All color
+defaults are neutral, and the grade is weighted by actual point coverage so
+disocclusion fog/background remains unchanged. Installing the tab therefore
+does not intentionally change an accepted visual.
+
+To verify all 53 public controls after installing an upgrade, run this inside
 TouchDesigner. It changes one control at a time, checks the corresponding
 managed operator or shader, and restores every original value in a `finally`
 block:

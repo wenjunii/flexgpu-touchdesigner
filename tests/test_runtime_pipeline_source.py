@@ -676,6 +676,46 @@ assert normalized({src_path!r}) in {{
         self.assertIn('for side in ("LEFT", "CENTER", "RIGHT")', self.source)
         self.assertIn('_set(node, "bgcolora", 0.0)', self.source)
 
+    def test_color_adjustment_grades_every_final_point_cloud_view(self) -> None:
+        markers = (
+            "FLEXGPU_COLOR_BRIGHTNESS",
+            "FLEXGPU_COLOR_CONTRAST",
+            "FLEXGPU_COLOR_SATURATION",
+            "FLEXGPU_COLOR_GAMMA",
+            "FLEXGPU_COLOR_HUE_SHIFT",
+            "FLEXGPU_COLOR_TEMPERATURE",
+            "FLEXGPU_COLOR_TINT",
+        )
+        for shader_name in ("installation_grade", "view_completion"):
+            shader = self.module.SHADERS[shader_name]
+            self.assertIn("flexgpuColorGrade", shader)
+            self.assertIn("flexgpuHueRotate", shader)
+            self.assertIn("gradedPointColor - pointToneMapped", shader)
+            self.assertIn("clamp(points.a, 0.0, 1.0)", shader)
+            self.assertIn("leaves disocclusion fog/background unchanged", shader)
+            for marker in markers:
+                self.assertIn(marker, shader)
+        for parameter in (
+                "Brightness", "Contrast", "Saturation", "Gamma",
+                "Hueshiftdegrees", "Temperature", "Tint", "Resetcolor"):
+            self.assertIn('"%s"' % parameter, self.source)
+        self.assertIn('_page(control, "Color Adjustment")', self.source)
+        self.assertIn("def _apply_color_grade():", self.module.SHOW_CONTROL_CALLBACKS)
+        self.assertIn("def _reset_color_grade():", self.module.SHOW_CONTROL_CALLBACKS)
+        for marker in markers:
+            self.assertIn(marker, self.module.SHOW_CONTROL_CALLBACKS)
+        self.assertIn("STEREO_PREVIEW/GRADE_%s_EYE_PIXEL", self.source)
+        self.assertIn("TRIPLE_DISPLAY/GRADE_%s_%s_PIXEL", self.source)
+
+        installer = inspect.getsource(
+            self.module.install_color_adjustment_controls)
+        self.assertIn("_managed_color_grade_shader_dats", installer)
+        self.assertIn("_apply_color_grade_shader_values", installer)
+        self.assertIn("dat.text = SHADERS[shader_name]", installer)
+        self.assertNotIn("destroy", installer)
+        self.assertNotIn(".save", installer.casefold())
+        self.assertNotIn("build(", installer)
+
     def test_panorama_has_independent_fov_and_procedural_only_coverage(self) -> None:
         coverage = self.module.SHADERS["panoramic_coverage"]
         self.assertIn("FLEXGPU_WRAP_COVERAGE", coverage)

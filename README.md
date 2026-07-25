@@ -863,12 +863,20 @@ For live tuning, open
 `/project1/flexgpu/WORKING_PIPELINE/SHOW_CONTROL`. It provides one public
 surface for geometry provider, display mode, completion/fog, interaction
 strength/smoothing, panoramic yaw/FOV/coverage/noise, artistic yaw/offset/FOV,
-and the 3080/4090/5090 quality profiles. `Wallwidth` and `Wallheight` set every
-individual installation feed;
+final-view color adjustment, and the 3080/4090/5090 quality profiles.
+`Wallwidth` and `Wallheight` set every individual installation feed;
 the wrap and artistic mosaics remain exactly three wall widths. Point-cloud
 framing has one creative scale plus separate MoGe-2 and Depth Anything
 provider scales. Quality changes preserve the configured wall outputs and do
 not modify private StreamDiffusionTD internals.
+
+The separate `Color Adjustment` tab controls `Brightness`, `Contrast`,
+`Saturation`, `Gamma`, `Hue Shift`, `Temperature`, and `Tint`. It grades only
+the public rendered point-cloud views: the single installation wall, all six
+panoramic/artistic wall feeds, and both stereo preview eyes. It does not alter
+`OUT_SOURCE_COLOR`, `OUT_COLOR`, or private StreamDiffusionTD output. Defaults
+are neutral; disocclusion fog/background is left ungraded, and `Reset Color
+Adjustment` returns every color value to neutral.
 
 The artistic offset has a separate outward/inward direction menu. `outward`
 moves visible content away from the center wall (left farther left, right
@@ -923,7 +931,7 @@ To refresh an older ignored working TOE without rebuilding the rest of the
 network, stop the geometry worker and run these bounded Textport installers:
 
 ```python
-from pathlib import Path; import importlib, sys; root = Path(r'C:\path\to\flexgpu-touchdesigner'); sys.path.insert(0, str(root / 'touchdesigner')); import runtime_pipeline as rp; importlib.reload(rp); flex = op('/project1/flexgpu'); rp.install_adaptive_source_resolution(flex); rp.install_output_framing_controls(flex); rp.install_wall_view_controls(flex); rp.install_worker_stop_controls(flex); rp.install_venue_1080p_outputs(flex)
+from pathlib import Path; import importlib, sys; root = Path(r'C:\path\to\flexgpu-touchdesigner'); sys.path.insert(0, str(root / 'touchdesigner')); import runtime_pipeline as rp; importlib.reload(rp); flex = op('/project1/flexgpu'); rp.install_adaptive_source_resolution(flex); rp.install_output_framing_controls(flex); rp.install_wall_view_controls(flex); rp.install_worker_stop_controls(flex); rp.install_color_adjustment_controls(flex); rp.install_venue_1080p_outputs(flex)
 ```
 
 The installers update only public reconstruction, managed Camera/Render
@@ -932,6 +940,8 @@ or inspect private StreamDiffusionTD internals. The wall-view installer adds
 outward/inward artistic offset direction, independent left/center/right view
 scale, and independent horizontal/vertical camera pan. The worker-stop
 installer adds checkout-scoped stop buttons for MoGe-2 and Depth Anything.
+The color installer updates only the nine public final-view grade shaders and
+adds neutral, bounded controls; it leaves source RGB and geometry untouched.
 
 For 3080 parity, pull this same published branch on the 3080 computer, open
 only the latest `*-3080*.toe`, run the command above, select

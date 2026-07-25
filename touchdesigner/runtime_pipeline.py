@@ -478,6 +478,42 @@ float hash21(vec2 p)
     return fract(p.x * p.y);
 }
 
+vec3 flexgpuHueRotate(vec3 color, float degrees)
+{
+    vec3 axis = normalize(vec3(1.0));
+    float angle = radians(degrees);
+    float cosine = cos(angle);
+    float sine = sin(angle);
+    return color * cosine + cross(axis, color) * sine +
+           axis * dot(axis, color) * (1.0 - cosine);
+}
+
+vec3 flexgpuColorGrade(vec3 color)
+{
+    const float colorBrightness = 0.0; // FLEXGPU_COLOR_BRIGHTNESS
+    const float colorContrast = 1.0; // FLEXGPU_COLOR_CONTRAST
+    const float colorSaturation = 1.0; // FLEXGPU_COLOR_SATURATION
+    const float colorGamma = 1.0; // FLEXGPU_COLOR_GAMMA
+    const float colorHueShiftDegrees = 0.0; // FLEXGPU_COLOR_HUE_SHIFT
+    const float colorTemperature = 0.0; // FLEXGPU_COLOR_TEMPERATURE
+    const float colorTint = 0.0; // FLEXGPU_COLOR_TINT
+    color = max(color, vec3(0.0));
+    color = flexgpuHueRotate(color, colorHueShiftDegrees);
+    color *= vec3(1.0 + colorTemperature * 0.18,
+                  1.0,
+                  1.0 - colorTemperature * 0.18);
+    color *= vec3(1.0 + colorTint * 0.10,
+                  1.0 - colorTint * 0.12,
+                  1.0 + colorTint * 0.10);
+    float luminance = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    color = mix(vec3(luminance), color, colorSaturation);
+    color = (color - vec3(0.5)) * colorContrast + vec3(0.5);
+    color += vec3(colorBrightness);
+    color = pow(max(color, vec3(0.0)),
+                vec3(1.0 / max(colorGamma, 0.05)));
+    return clamp(color, 0.0, 1.0);
+}
+
 void main()
 {
     const float viewFogDensity = 0.35; // FLEXGPU_VIEW_FOG_DENSITY
@@ -506,6 +542,13 @@ void main()
                        clamp(viewFogDensity / 0.35, 0.0, 2.0) * 0.018;
     color += vec3(0.025, 0.045, 0.070) * ambientFog;
     color = color / (1.0 + color); // inexpensive tone map
+    // Grade only actual point coverage. The delta form makes neutral defaults
+    // an exact passthrough and leaves disocclusion fog/background unchanged.
+    vec3 pointToneMapped = points.rgb / (1.0 + points.rgb);
+    vec3 gradedPointColor = flexgpuColorGrade(pointToneMapped);
+    color += (gradedPointColor - pointToneMapped) *
+             clamp(points.a, 0.0, 1.0);
+    color = clamp(color, 0.0, 1.0);
     color *= mix(0.84, 1.0, vignette);
     fragColor = TDOutputSwizzle(vec4(color, 1.0));
 }
@@ -589,6 +632,42 @@ float hash21(vec2 p)
     return fract(p.x * p.y);
 }
 
+vec3 flexgpuHueRotate(vec3 color, float degrees)
+{
+    vec3 axis = normalize(vec3(1.0));
+    float angle = radians(degrees);
+    float cosine = cos(angle);
+    float sine = sin(angle);
+    return color * cosine + cross(axis, color) * sine +
+           axis * dot(axis, color) * (1.0 - cosine);
+}
+
+vec3 flexgpuColorGrade(vec3 color)
+{
+    const float colorBrightness = 0.0; // FLEXGPU_COLOR_BRIGHTNESS
+    const float colorContrast = 1.0; // FLEXGPU_COLOR_CONTRAST
+    const float colorSaturation = 1.0; // FLEXGPU_COLOR_SATURATION
+    const float colorGamma = 1.0; // FLEXGPU_COLOR_GAMMA
+    const float colorHueShiftDegrees = 0.0; // FLEXGPU_COLOR_HUE_SHIFT
+    const float colorTemperature = 0.0; // FLEXGPU_COLOR_TEMPERATURE
+    const float colorTint = 0.0; // FLEXGPU_COLOR_TINT
+    color = max(color, vec3(0.0));
+    color = flexgpuHueRotate(color, colorHueShiftDegrees);
+    color *= vec3(1.0 + colorTemperature * 0.18,
+                  1.0,
+                  1.0 - colorTemperature * 0.18);
+    color *= vec3(1.0 + colorTint * 0.10,
+                  1.0 - colorTint * 0.12,
+                  1.0 + colorTint * 0.10);
+    float luminance = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    color = mix(vec3(luminance), color, colorSaturation);
+    color = (color - vec3(0.5)) * colorContrast + vec3(0.5);
+    color += vec3(colorBrightness);
+    color = pow(max(color, vec3(0.0)),
+                vec3(1.0 / max(colorGamma, 0.05)));
+    return clamp(color, 0.0, 1.0);
+}
+
 void main()
 {
     const float viewFogDensity = 0.35; // FLEXGPU_VIEW_FOG_DENSITY
@@ -608,6 +687,13 @@ void main()
                         vec3(0.10, 0.32, 0.42), grain);
     vec3 color = points.rgb + fogColor * fog;
     color = color / (1.0 + color);
+    // Grade only actual point coverage. The delta form makes neutral defaults
+    // an exact passthrough and leaves disocclusion fog/background unchanged.
+    vec3 pointToneMapped = points.rgb / (1.0 + points.rgb);
+    vec3 gradedPointColor = flexgpuColorGrade(pointToneMapped);
+    color += (gradedPointColor - pointToneMapped) *
+             clamp(points.a, 0.0, 1.0);
+    color = clamp(color, 0.0, 1.0);
     fragColor = TDOutputSwizzle(vec4(color, 1.0));
 }
 ''',
@@ -1205,6 +1291,61 @@ def _apply_fog():
             pipeline.op('STEREO_PREVIEW/GRADE_%s_EYE_PIXEL' % eye),
             'viewFogDensity', 'FLEXGPU_VIEW_FOG_DENSITY', density)
 
+def _color_grade_dats():
+    pipeline = _pipeline()
+    result = [
+        pipeline.op('INSTALLATION_OUTPUT/installation_grade_PIXEL'),
+    ]
+    for mode in ('WRAP', 'ARTISTIC'):
+        for side in ('LEFT', 'CENTER', 'RIGHT'):
+            result.append(pipeline.op(
+                'TRIPLE_DISPLAY/GRADE_%s_%s_PIXEL' % (mode, side)))
+    for eye in ('LEFT', 'RIGHT'):
+        result.append(pipeline.op(
+            'STEREO_PREVIEW/GRADE_%s_EYE_PIXEL' % eye))
+    return result
+
+def _apply_color_grade():
+    controls = _controls()
+    settings = (
+        ('Brightness', 'colorBrightness',
+         'FLEXGPU_COLOR_BRIGHTNESS', 0.0, -1.0, 1.0),
+        ('Contrast', 'colorContrast',
+         'FLEXGPU_COLOR_CONTRAST', 1.0, 0.0, 3.0),
+        ('Saturation', 'colorSaturation',
+         'FLEXGPU_COLOR_SATURATION', 1.0, 0.0, 3.0),
+        ('Gamma', 'colorGamma',
+         'FLEXGPU_COLOR_GAMMA', 1.0, 0.2, 3.0),
+        ('Hueshiftdegrees', 'colorHueShiftDegrees',
+         'FLEXGPU_COLOR_HUE_SHIFT', 0.0, -180.0, 180.0),
+        ('Temperature', 'colorTemperature',
+         'FLEXGPU_COLOR_TEMPERATURE', 0.0, -1.0, 1.0),
+        ('Tint', 'colorTint',
+         'FLEXGPU_COLOR_TINT', 0.0, -1.0, 1.0),
+    )
+    values = []
+    for parameter, symbol, marker, fallback, lower, upper in settings:
+        value = max(lower, min(
+            upper, float(_value(parameter, fallback))))
+        _set(controls, parameter, value)
+        values.append((symbol, marker, value))
+    for dat in _color_grade_dats():
+        for symbol, marker, value in values:
+            _patch_float(dat, symbol, marker, value)
+
+def _reset_color_grade():
+    controls = _controls()
+    for parameter, value in (
+            ('Brightness', 0.0),
+            ('Contrast', 1.0),
+            ('Saturation', 1.0),
+            ('Gamma', 1.0),
+            ('Hueshiftdegrees', 0.0),
+            ('Temperature', 0.0),
+            ('Tint', 0.0)):
+        _set(controls, parameter, value)
+    _apply_color_grade()
+
 def _apply_quality_profile():
     controls = _controls()
     profile = str(_value('Qualityprofile', '3080ti_16gb'))
@@ -1277,6 +1418,10 @@ def apply_parameter(name):
              _value('Completionmode', 'hybrid'))
     elif key == 'fogdensity':
         _apply_fog()
+    elif key in (
+            'brightness', 'contrast', 'saturation', 'gamma',
+            'hueshiftdegrees', 'temperature', 'tint'):
+        _apply_color_grade()
     elif key == 'interactionstrength':
         strength = max(0.0, min(2.0, float(_value('Interactionstrength', 0.35))))
         _set(pipeline.op('SENSOR_INTERACTION'), 'Forcegain', strength)
@@ -1353,6 +1498,8 @@ def apply_parameter(name):
 def apply_all():
     for name in (
         'Geometryprovider', 'Displaymode', 'Completionmode', 'Fogdensity',
+        'Brightness', 'Contrast', 'Saturation', 'Gamma',
+        'Hueshiftdegrees', 'Temperature', 'Tint',
         'Interactionstrength', 'Interactionsmoothing', 'Wrapyawdegrees',
         'Wrapfovdegrees', 'Wrapcoverage', 'Wrapnoise',
         'Surfacefovdegrees', 'Artisticyawdegrees',
@@ -1375,6 +1522,8 @@ def onPulse(par):
     key = str(par.name).lower()
     if key == 'applyall':
         apply_all()
+    elif key == 'resetcolor':
+        _reset_color_grade()
     elif key == 'startmogeworker':
         _launch_worker('moge2')
     elif key == 'stopmogeworker':
@@ -1702,7 +1851,36 @@ def _page(comp, name):
         return None
 
 
-def _custom(comp, page, kind, name, default, menu=None, label=None):
+def _set_parameter_bounds(
+        parameter, minimum=None, maximum=None, clamp=True):
+    """Set useful slider bounds while tolerating TouchDesigner API variants."""
+
+    if parameter is None:
+        return
+    for attribute, value in (
+            ("min", minimum), ("normMin", minimum),
+            ("max", maximum), ("normMax", maximum)):
+        if value is None:
+            continue
+        try:
+            setattr(parameter, attribute, value)
+        except Exception:
+            pass
+    if minimum is not None:
+        try:
+            parameter.clampMin = bool(clamp)
+        except Exception:
+            pass
+    if maximum is not None:
+        try:
+            parameter.clampMax = bool(clamp)
+        except Exception:
+            pass
+
+
+def _custom(
+        comp, page, kind, name, default, menu=None, label=None,
+        minimum=None, maximum=None, clamp=True):
     existing = _par(comp, name)
     if existing is not None:
         if menu and kind == "Menu":
@@ -1712,6 +1890,8 @@ def _custom(comp, page, kind, name, default, menu=None, label=None):
                     str(value).replace("_", " ").title() for value in menu]
             except Exception:
                 pass
+        _set_parameter_bounds(
+            existing, minimum=minimum, maximum=maximum, clamp=clamp)
         return existing
     if page is None:
         return None
@@ -1730,6 +1910,8 @@ def _custom(comp, page, kind, name, default, menu=None, label=None):
             parameter.menuLabels = [str(value).replace("_", " ").title() for value in menu]
         parameter.default = default
         parameter.val = default
+        _set_parameter_bounds(
+            parameter, minimum=minimum, maximum=maximum, clamp=clamp)
         return parameter
     except Exception:
         return None
@@ -4016,6 +4198,32 @@ def _build_show_control(pipeline, report):
     _custom(control, show_page, "Pulse", "Applyall", False,
             label="Apply All Show Controls")
 
+    color_page = _page(control, "Color Adjustment")
+    _custom(
+        control, color_page, "Float", "Brightness", 0.0,
+        label="Brightness", minimum=-1.0, maximum=1.0)
+    _custom(
+        control, color_page, "Float", "Contrast", 1.0,
+        label="Contrast", minimum=0.0, maximum=3.0)
+    _custom(
+        control, color_page, "Float", "Saturation", 1.0,
+        label="Saturation", minimum=0.0, maximum=3.0)
+    _custom(
+        control, color_page, "Float", "Gamma", 1.0,
+        label="Gamma", minimum=0.2, maximum=3.0)
+    _custom(
+        control, color_page, "Float", "Hueshiftdegrees", 0.0,
+        label="Hue Shift (degrees)", minimum=-180.0, maximum=180.0)
+    _custom(
+        control, color_page, "Float", "Temperature", 0.0,
+        label="Temperature", minimum=-1.0, maximum=1.0)
+    _custom(
+        control, color_page, "Float", "Tint", 0.0,
+        label="Tint", minimum=-1.0, maximum=1.0)
+    _custom(
+        control, color_page, "Pulse", "Resetcolor", False,
+        label="Reset Color Adjustment")
+
     quality_page = _page(control, "Quality")
     bridge = adapter.op("MOGE2_BRIDGE") if adapter is not None else None
     _custom(
@@ -4110,6 +4318,7 @@ def _build_show_control(pipeline, report):
         ["Geometry Provider", "STREAMDIFFUSION_ADAPTER/Geometrysource"],
         ["Display Mode", "WORKING_PIPELINE/Displaymode"],
         ["Completion / Fog", "COMPLETION + view-grade shader constants"],
+        ["Color Adjustment", "single, six wall views + stereo grade shaders"],
         ["Interaction", "SENSOR_INTERACTION force + low-latency smoothing"],
         ["Panoramic", "wrap camera yaw/FOV + procedural atmosphere"],
         ["Artistic", "side camera yaw/offset + artistic surface FOV"],
@@ -4126,7 +4335,11 @@ def _build_show_control(pipeline, report):
         "resolution. Wall Width and Wall Height control every installation "
         "surface; triple mosaics remain exactly three wall widths. Point "
         "Cloud Scale is creative framing, while the provider scales preserve "
-        "separate MoGe-2 and Depth Anything tuning. Worker buttons open a "
+        "separate MoGe-2 and Depth Anything tuning. The Color Adjustment tab "
+        "grades the rendered point-cloud views only: single wall, all six "
+        "triple-wall feeds, and both stereo preview eyes. Neutral defaults "
+        "leave the accepted image unchanged, and Reset Color Adjustment "
+        "restores them. Worker buttons open a "
         "visible PowerShell console. Use the matching Stop button before "
         "starting the other provider; Ctrl+C is not required. "
         "Panoramic Coverage adds procedural atmosphere only in empty wrap views; "
@@ -4137,6 +4350,118 @@ def _build_show_control(pipeline, report):
         "wall. Use Apply All after reopening an older saved TOE if you want "
         "every displayed value reapplied.",
         report)
+    return control
+
+
+def _managed_color_grade_shader_dats(pipeline):
+    """Return every public final-view grade DAT and its canonical shader."""
+
+    targets = [(
+        "INSTALLATION_OUTPUT/installation_grade_PIXEL",
+        "installation_grade",
+    )]
+    for mode in ("WRAP", "ARTISTIC"):
+        for side in ("LEFT", "CENTER", "RIGHT"):
+            targets.append((
+                "TRIPLE_DISPLAY/GRADE_%s_%s_PIXEL" % (mode, side),
+                "installation_grade",
+            ))
+    for eye in ("LEFT", "RIGHT"):
+        targets.append((
+            "STEREO_PREVIEW/GRADE_%s_EYE_PIXEL" % eye,
+            "view_completion",
+        ))
+    result = []
+    for path, shader_name in targets:
+        dat = pipeline.op(path)
+        if dat is None:
+            raise RuntimeError(
+                "managed color-grade shader is missing: %s/%s" %
+                (pipeline.path, path))
+        result.append((dat, shader_name))
+    return result
+
+
+def _apply_color_grade_shader_values(pipeline, control):
+    """Patch current Color Adjustment values into every final-view shader."""
+
+    settings = (
+        ("Brightness", "colorBrightness",
+         "FLEXGPU_COLOR_BRIGHTNESS", 0.0, -1.0, 1.0),
+        ("Contrast", "colorContrast",
+         "FLEXGPU_COLOR_CONTRAST", 1.0, 0.0, 3.0),
+        ("Saturation", "colorSaturation",
+         "FLEXGPU_COLOR_SATURATION", 1.0, 0.0, 3.0),
+        ("Gamma", "colorGamma",
+         "FLEXGPU_COLOR_GAMMA", 1.0, 0.2, 3.0),
+        ("Hueshiftdegrees", "colorHueShiftDegrees",
+         "FLEXGPU_COLOR_HUE_SHIFT", 0.0, -180.0, 180.0),
+        ("Temperature", "colorTemperature",
+         "FLEXGPU_COLOR_TEMPERATURE", 0.0, -1.0, 1.0),
+        ("Tint", "colorTint",
+         "FLEXGPU_COLOR_TINT", 0.0, -1.0, 1.0),
+    )
+    grade_dats = [
+        dat for dat, _shader_name
+        in _managed_color_grade_shader_dats(pipeline)
+    ]
+    for parameter, symbol, marker, fallback, lower, upper in settings:
+        value = max(
+            lower, min(upper, float(_value(control, parameter, fallback))))
+        _set(control, parameter, value)
+        for dat in grade_dats:
+            if not _patch_shader_float(dat, symbol, marker, value):
+                raise RuntimeError(
+                    "%s is missing managed color marker %s" %
+                    (dat.path, marker))
+
+
+def install_color_adjustment_controls(root=None):
+    """Add a neutral final-view Color Adjustment tab to an existing TOE.
+
+    This bounded upgrade replaces only the nine public final-view grade shader
+    DAT sources and updates ``SHOW_CONTROL``. It does not touch source RGB,
+    geometry, cameras, resolution, private adapters, or save the current TOE.
+    """
+
+    global LAST_REPORT
+    report = BuildReport()
+    LAST_REPORT = report
+    if root is None:
+        root = _op(ROOT_PATH)
+    elif isinstance(root, str):
+        root = _op(root)
+    if root is None:
+        raise RuntimeError("FlexGPU root %s does not exist" % ROOT_PATH)
+    pipeline = root.op(PIPELINE_NAME)
+    if pipeline is None:
+        raise RuntimeError("WORKING_PIPELINE is missing; build it first")
+
+    control = _build_show_control(pipeline, report)
+    grade_dats = _managed_color_grade_shader_dats(pipeline)
+    for dat, shader_name in grade_dats:
+        try:
+            dat.text = SHADERS[shader_name]
+        except Exception as exc:
+            raise RuntimeError(
+                "could not update %s: %s" % (dat.path, exc))
+
+    density = max(
+        0.0, min(1.5, float(_value(control, "Fogdensity", 0.35))))
+    for dat, _shader_name in grade_dats:
+        if not _patch_shader_float(
+                dat, "viewFogDensity",
+                "FLEXGPU_VIEW_FOG_DENSITY", density):
+            raise RuntimeError(
+                "%s is missing managed fog marker" % dat.path)
+    _apply_color_grade_shader_values(pipeline, control)
+    try:
+        control.store("color_adjustment_controls_report", report.as_dict())
+    except Exception:
+        pass
+    print("[FlexGPU runtime] Color Adjustment tab ready for single, triple "
+          "and stereo point-cloud views; neutral defaults preserve the "
+          "accepted visual; TOE remains unsaved")
     return control
 
 
