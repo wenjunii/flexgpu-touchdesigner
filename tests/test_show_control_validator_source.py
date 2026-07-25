@@ -31,16 +31,16 @@ class ShowControlValidatorSourceTests(unittest.TestCase):
 
     def test_validator_is_import_safe_and_covers_every_public_control(self) -> None:
         ast.parse(self.source)
-        self.assertEqual(len(self.module.VALUE_CONTROLS), 36)
-        self.assertEqual(len(self.module.PULSE_CONTROLS), 5)
+        self.assertEqual(len(self.module.VALUE_CONTROLS), 43)
+        self.assertEqual(len(self.module.PULSE_CONTROLS), 6)
         self.assertEqual(len(self.module.STATUS_CONTROLS), 4)
         controls = (
             self.module.VALUE_CONTROLS
             + self.module.PULSE_CONTROLS
             + self.module.STATUS_CONTROLS
         )
-        self.assertEqual(len(controls), 45)
-        self.assertEqual(len(set(controls)), 45)
+        self.assertEqual(len(controls), 53)
+        self.assertEqual(len(set(controls)), 53)
 
     def test_validator_restores_state_even_when_a_check_fails(self) -> None:
         self.assertIn("finally:", self.source)
@@ -50,6 +50,10 @@ class ShowControlValidatorSourceTests(unittest.TestCase):
         self.assertIn("Qualityprofile_points", self.source)
         self.assertIn("147456", self.source)
         self.assertIn("operator_lookup=None", self.source)
+        self.assertIn("FLEXGPU_COLOR_BRIGHTNESS", self.source)
+        self.assertIn("FLEXGPU_COLOR_CONTRAST", self.source)
+        self.assertIn("FLEXGPU_COLOR_SATURATION", self.source)
+        self.assertIn("callbacks._reset_color_grade()", self.source)
 
     def test_envoy_repair_is_dry_run_first_and_never_kills_touchdesigner(self) -> None:
         source = REPAIR_PATH.read_text(encoding="utf-8-sig")

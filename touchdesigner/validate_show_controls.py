@@ -27,6 +27,13 @@ VALUE_CONTROLS = (
     "Displaymode",
     "Completionmode",
     "Fogdensity",
+    "Brightness",
+    "Contrast",
+    "Saturation",
+    "Gamma",
+    "Hueshiftdegrees",
+    "Temperature",
+    "Tint",
     "Interactionstrength",
     "Interactionsmoothing",
     "Wrapyawdegrees",
@@ -63,6 +70,7 @@ VALUE_CONTROLS = (
 
 PULSE_CONTROLS = (
     "Applyall",
+    "Resetcolor",
     "Startmogeworker",
     "Stopmogeworker",
     "Startdepthanythingworker",
@@ -300,6 +308,49 @@ def validate(
                 completion.op("fog_completion_PIXEL"),
                 "FLEXGPU_FOG_DENSITY", 0.47),
             True)
+
+        color_tests = (
+            ("Brightness", 0.12, "FLEXGPU_COLOR_BRIGHTNESS"),
+            ("Contrast", 1.18, "FLEXGPU_COLOR_CONTRAST"),
+            ("Saturation", 0.82, "FLEXGPU_COLOR_SATURATION"),
+            ("Gamma", 1.14, "FLEXGPU_COLOR_GAMMA"),
+            ("Hueshiftdegrees", 17.0, "FLEXGPU_COLOR_HUE_SHIFT"),
+            ("Temperature", 0.16, "FLEXGPU_COLOR_TEMPERATURE"),
+            ("Tint", -0.11, "FLEXGPU_COLOR_TINT"),
+        )
+        for name, test_value, marker in color_tests:
+            _apply(callbacks, control, name, test_value)
+            _record(
+                checks, name, _value(control, name), test_value)
+            grade_dats = [
+                pipeline.op(
+                    "INSTALLATION_OUTPUT/installation_grade_PIXEL"),
+            ]
+            for mode in ("WRAP", "ARTISTIC"):
+                for side in ("LEFT", "CENTER", "RIGHT"):
+                    grade_dats.append(triple.op(
+                        "GRADE_%s_%s_PIXEL" % (mode, side)))
+            for eye in ("LEFT", "RIGHT"):
+                grade_dats.append(pipeline.op(
+                    "STEREO_PREVIEW/GRADE_%s_EYE_PIXEL" % eye))
+            for dat in grade_dats:
+                _record(
+                    checks,
+                    "%s_shader_%s" % (name, dat.name),
+                    _shader_contains(dat, marker, test_value), True)
+
+        callbacks._reset_color_grade()
+        for name, expected in (
+                ("Brightness", 0.0),
+                ("Contrast", 1.0),
+                ("Saturation", 1.0),
+                ("Gamma", 1.0),
+                ("Hueshiftdegrees", 0.0),
+                ("Temperature", 0.0),
+                ("Tint", 0.0)):
+            _record(
+                checks, "Resetcolor_" + name,
+                _value(control, name), expected)
 
         _set_and_check(
             checks, callbacks, control, "Interactionstrength",
