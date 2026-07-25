@@ -2078,6 +2078,37 @@ class TouchDesignerRuntimeHelperTests(unittest.TestCase):
         self.assertEqual(external_root.error_inspections, 1)
         self.assertEqual(private_child.error_inspections, 0)
 
+    def test_readiness_treats_embedded_streamdiffusion_as_private_boundary(self) -> None:
+        helpers = load_helpers()
+        private_child = FakeNode(
+            "/project1/flexgpu/WORKING_PIPELINE/SOURCES/"
+            "STREAMDIFFUSION_ADAPTER/StreamDiffusionTD/private_child",
+            operator_errors=["private implementation detail"],
+        )
+        private_root = FakeNode(
+            "/project1/flexgpu/WORKING_PIPELINE/SOURCES/"
+            "STREAMDIFFUSION_ADAPTER/StreamDiffusionTD",
+            operator_errors=["propagated private component error"],
+        )
+        private_root.children = [private_child]
+        managed = FakeNode("/project1/flexgpu/WORKING_PIPELINE/MANAGED")
+        root = FakeRoot({})
+        root.children = [private_root, managed]
+
+        nodes, truncated = helpers["_bounded_managed_nodes"](root)
+        self.assertFalse(truncated)
+        self.assertEqual(
+            {node.path for node in nodes},
+            {root.path, managed.path, private_root.path},
+        )
+
+        health = helpers["_inspect_readiness_health"](
+            root, {"state": {}}, 30.0, force=True
+        )
+        self.assertEqual(health["operator_error_count"], 1)
+        self.assertEqual(private_root.error_inspections, 1)
+        self.assertEqual(private_child.error_inspections, 0)
+
     def test_readiness_requires_an_observed_output_cook_advance_when_available(self) -> None:
         helpers = load_helpers()
         root = complete_runtime_root()

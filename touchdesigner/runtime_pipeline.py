@@ -1209,7 +1209,7 @@ def _apply_quality_profile():
     controls = _controls()
     profile = str(_value('Qualityprofile', '3080ti_16gb'))
     presets = {
-        '3080ti_16gb': (384, 120000, 4.2, 5,
+        '3080ti_16gb': (384, 147456, 4.2, 5,
                         '147k adaptive: 384x384 or 512x288 / 5 Hz'),
         '4090': (512, 250000, 3.4, 10, 'Stream 512+ / geometry 512 / 10 Hz'),
         '5090': (512, 262144, 3.0, 15, 'Stream 512+ / geometry 512 / 15 Hz'),
@@ -4040,10 +4040,14 @@ def _build_show_control(pipeline, report):
     _custom(
         control, quality_page, "Int", "Geometryfps",
         int(_value(bridge, "Capturefps", 5)), label="Geometry Capture FPS")
-    _custom(
+    profile_hint = _custom(
         control, quality_page, "Str", "Profilehint",
         "147k adaptive: 384x384 or 512x288 / 5 Hz",
         label="Profile Guidance")
+    try:
+        profile_hint.readOnly = True
+    except Exception:
+        pass
 
     worker_page = _page(control, "Workers")
     try:

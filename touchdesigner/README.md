@@ -229,6 +229,32 @@ the provider scales prevent a MoGe correction from changing the accepted Depth
 Anything view. `Apply All Show Controls` reapplies the displayed values after
 reopening an older working TOE.
 
+To verify all 45 public controls after installing an upgrade, run this inside
+TouchDesigner. It changes one control at a time, checks the corresponding
+managed operator or shader, and restores every original value in a `finally`
+block:
+
+```python
+from pathlib import Path
+import importlib, sys
+root = Path(r'C:\path\to\flexgpu-touchdesigner')
+sys.path.insert(0, str(root / 'touchdesigner'))
+import validate_show_controls as vsc
+importlib.reload(vsc)
+result = vsc.validate(
+    report_path=root / 'runtime' / 'validation' / 'show-controls-3080.json',
+    expected_profile='3080ti_16gb',
+    operator_lookup=op)
+print(result['status'], result['summary'])
+```
+
+The live validator covers every slider, menu, toggle, status field, and Apply
+button. Worker Start/Stop buttons are checked externally so TouchDesigner's
+main thread remains free to cook: start each provider once, verify the matching
+checkout-scoped worker, confirm a duplicate start is refused, stop it with its
+matching button, then repeat for the other provider. Never run the two
+generated-geometry workers together on the 3080.
+
 Each worker button opens the existing public wrapper in a separate visible
 PowerShell console and selects its provider first. Use `Stop MoGe-2 Worker` or
 `Stop Depth Anything Worker` before starting the other provider; `Ctrl+C` is
