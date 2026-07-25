@@ -108,8 +108,8 @@ else {
 $backupPath = $null
 $status = if ($stale.Count -eq 0) { 'clean' } else { 'preview' }
 if ($Repair -and $stale.Count -gt 0) {
-    $directory = Split-Path -LiteralPath $registryPath -Parent
-    $leaf = Split-Path -LiteralPath $registryPath -Leaf
+    $directory = [System.IO.Path]::GetDirectoryName($registryPath)
+    $leaf = [System.IO.Path]::GetFileName($registryPath)
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
     $backupPath = Join-Path $directory "$leaf.stale-$stamp.bak"
     Copy-Item -LiteralPath $registryPath -Destination $backupPath -ErrorAction Stop
