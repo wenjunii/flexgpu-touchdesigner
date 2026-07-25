@@ -58,6 +58,21 @@ its loopback listener mandatory and follows registry changes for up to 30
 seconds, which covers a normal cold-start registration window. Neither command
 starts or changes TouchDesigner, and neither publishes local paths.
 
+If a previous TouchDesigner process ended without unregistering and Embody
+reports that ports 9870-9879 are occupied, use:
+
+```powershell
+.\scripts\Repair-FlexShowEnvoyRegistry.ps1
+.\scripts\Repair-FlexShowEnvoyRegistry.ps1 -Repair
+```
+
+The first command is a dry-run. The second creates a timestamped backup and
+atomically prunes only entries that do not have both a live TouchDesigner PID
+and a matching loopback listener. It never kills TouchDesigner and it is
+restricted to this checkout's ignored runtime registry. Also close the
+TouchDesigner Textport after diagnostics; while it is open, the timeline can be
+paused and live Envoy calls that require cooking may time out.
+
 With TouchDesigner closed, the MCP should still expose:
 
 - `get_td_project_context`

@@ -326,7 +326,12 @@ if ($null -ne $envoyRegistryPath) {
     } while ([DateTime]::UtcNow -lt $deadline)
 
     if ($RequireEnvoy -and $envoyState -ne 'ready') {
-        throw "The active FlexGPU Envoy process or loopback listener is unavailable after waiting $WaitReadyMs ms."
+        throw (
+            "The active FlexGPU Envoy process or loopback listener is unavailable " +
+            "after waiting $WaitReadyMs ms. Preview stale registrations with " +
+            "scripts\Repair-FlexShowEnvoyRegistry.ps1, then use -Repair only " +
+            "after reviewing its output."
+        )
     }
 }
 elseif ($RequireEnvoy) {

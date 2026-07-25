@@ -157,6 +157,20 @@ it follows the newly registered project-scoped Envoy port instead of failing
 during the short listener startup window. It does not start or modify
 TouchDesigner.
 
+If the preflight reports that every Envoy port is occupied after an abnormal
+shutdown, preview the project-scoped registry before changing it:
+
+```powershell
+.\scripts\Repair-FlexShowEnvoyRegistry.ps1
+.\scripts\Repair-FlexShowEnvoyRegistry.ps1 -Repair
+```
+
+The first command is read-only. `-Repair` backs up the registry and atomically
+removes only entries whose TouchDesigner PID and declared loopback listener no
+longer match; it never terminates a process. Close TouchDesigner's Textport
+after troubleshooting because an open Textport can pause timeline cooking and
+make otherwise healthy live MCP calls appear unresponsive.
+
 Follow [`docs/EMBODY_MCP.md`](docs/EMBODY_MCP.md) for setup, the end-to-end MCP
 tool check, the ordered visual audit, and private-component boundaries.
 
@@ -246,7 +260,7 @@ path and GPU UUID. Never open the 3080 working TOE as the 5090 save target, or
 vice versa. Git intentionally ignores all of these local files.
 
 The currently identified private checkpoints are
-`FlexShow-moge2-embody-local-3080.27.toe` on the 3080 and
+`FlexShow-moge2-embody-local-3080.28.toe` on the 3080 and
 `FlexShow-moge2-embody-local-5090.30.toe` on the 5090. They are independent
 working files, not Git artifacts or interchangeable release versions. The
 5090 checkpoint has the licensed private StreamDiffusionTD component connected;
@@ -279,6 +293,11 @@ stop wrapper matches this repository's exact `tools/moge2_worker.py` path, so
 it does not stop the separate audience-camera Depth Anything worker or a worker
 launched from another checkout. All worker commands remain preview-only without
 their explicit action switch.
+
+The `3080ti_16gb` Show Control preset uses geometry resolution 384, a 147,456
+point budget, point size 4.2, and 5 Hz geometry capture. These values apply only
+to the 3080 public control surface; selecting another profile uses that
+profile's own limits.
 
 Alternatively, presets are ready to run in place. To make an untracked local
 copy, keep it in the same directory so its relative project paths remain

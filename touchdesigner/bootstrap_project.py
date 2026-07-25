@@ -2954,6 +2954,25 @@ def _readiness_external_tox_path(node):
         except Exception:
             return ''
 
+_READINESS_PRIVATE_BOUNDARIES = (
+    'working_pipeline/sources/streamdiffusion_adapter/streamdiffusiontd',
+)
+
+def _readiness_private_boundary(root_comp, node):
+    """Return True for stable private boundaries that readiness must not enter."""
+    root_path = str(getattr(root_comp, 'path', '')).replace('\\', '/').rstrip('/')
+    node_path = str(getattr(node, 'path', '')).replace('\\', '/').rstrip('/')
+    if not root_path or not node_path:
+        return False
+    prefix = root_path + '/'
+    if not node_path.lower().startswith(prefix.lower()):
+        return False
+    relative = node_path[len(prefix):].lower()
+    for boundary in _READINESS_PRIVATE_BOUNDARIES:
+        if relative == boundary or relative.startswith(boundary + '/'):
+            return True
+    return False
+
 def _bounded_managed_nodes(root_comp, limit=READINESS_MANAGED_OPERATOR_LIMIT):
     pending = [root_comp]
     seen = set()
@@ -2970,7 +2989,9 @@ def _bounded_managed_nodes(root_comp, limit=READINESS_MANAGED_OPERATOR_LIMIT):
         # The root COMP still exposes propagated errors from an external TOX.
         # Descending into its implementation would make readiness depend on the
         # size and licensing details of private third-party components.
-        if node is not root_comp and _readiness_external_tox_path(node):
+        if node is not root_comp and (
+                _readiness_external_tox_path(node) or
+                _readiness_private_boundary(root_comp, node)):
             continue
         try:
             iterator = iter(node.children)

@@ -764,6 +764,11 @@ assert normalized({src_path!r}) in {{
         self.assertIn("def _apply_wall_resolution():", self.source)
         self.assertIn("width * 3", self.module.SHOW_CONTROL_CALLBACKS)
         self.assertIn("def _apply_point_cloud_scale():", self.source)
+        self.assertIn(
+            "'3080ti_16gb': (384, 147456, 4.2, 5,",
+            self.module.SHOW_CONTROL_CALLBACKS,
+        )
+        self.assertIn("profile_hint.readOnly = True", self.source)
         self.assertIn("_scaled_camera_fov_expression", self.source)
         for marker in (
             "'surfacefovdegrees'",
