@@ -1002,6 +1002,42 @@ def _apply_point_cloud_scale():
     _set(pipeline.op('POINT_RENDER'), 'Pointcloudscale', effective)
     _set(_controls(), 'Effectivepointcloudscale', effective)
 
+def _apply_artistic_offset_direction():
+    controls = _controls()
+    pipeline = _pipeline()
+    direction = str(
+        _value('Artisticoffsetdirection', 'outward')).strip().lower()
+    if direction not in ('outward', 'inward'):
+        direction = 'outward'
+    _set(pipeline.op('POINT_RENDER'), 'Artisticoffsetdirection', direction)
+    _set(controls, 'Artisticoffsetdirection', direction)
+
+def _apply_wall_view_control(name):
+    key = str(name).lower()
+    scale_parameters = {
+        'leftwallscale': 'Leftwallscale',
+        'centerwallscale': 'Centerwallscale',
+        'rightwallscale': 'Rightwallscale',
+    }
+    pan_parameters = {
+        'leftwallpanhorizontaldegrees': 'Leftwallpanhorizontaldegrees',
+        'leftwallpanverticaldegrees': 'Leftwallpanverticaldegrees',
+        'centerwallpanhorizontaldegrees': 'Centerwallpanhorizontaldegrees',
+        'centerwallpanverticaldegrees': 'Centerwallpanverticaldegrees',
+        'rightwallpanhorizontaldegrees': 'Rightwallpanhorizontaldegrees',
+        'rightwallpanverticaldegrees': 'Rightwallpanverticaldegrees',
+    }
+    parameter = scale_parameters.get(key) or pan_parameters.get(key)
+    if parameter is None:
+        return
+    fallback, lower, upper = (
+        (1.0, 0.25, 4.0) if key in scale_parameters
+        else (0.0, -89.0, 89.0))
+    value = max(
+        lower, min(upper, float(_value(parameter, fallback))))
+    _set(_pipeline().op('POINT_RENDER'), parameter, value)
+    _set(_controls(), parameter, value)
+
 def _workspace_root():
     configured = str(_value('Workspaceroot', '') or '').strip()
     candidates = []
@@ -1079,6 +1115,74 @@ def _launch_worker(provider):
         _set(controls, 'Workerstatus',
              'Worker start failed: %s' % str(exc)[:240])
         return False
+
+def _stop_worker(provider):
+    controls = _controls()
+    selected = str(provider).strip().lower()
+    if selected not in ('moge2', 'depth_anything'):
+        _set(controls, 'Workerstatus',
+             'Worker stop refused: unsupported provider %s' % selected)
+        return False
+    root = _workspace_root()
+    if not root:
+        _set(controls, 'Workerstatus',
+             'Worker stop failed: set Workspace Root to this checkout')
+        return False
+    script = os.path.abspath(os.path.join(
+        root, 'scripts', 'Stop-GeneratedGeometryWorker.ps1'))
+    scripts_root = os.path.abspath(os.path.join(root, 'scripts'))
+    try:
+        if (os.path.commonpath((script, scripts_root)) != scripts_root or
+                not os.path.isfile(script)):
+            raise ValueError('stop script is outside or missing from workspace')
+    except Exception as exc:
+        _set(controls, 'Workerstatus', 'Worker stop refused: %s' % exc)
+        return False
+    _set(controls, 'Workerstatus', 'Stopping %s worker...' % selected)
+    args = [
+        'powershell.exe', '-NoProfile',
+        '-ExecutionPolicy', 'Bypass', '-File', script,
+        '-Provider', selected, '-Stop',
+    ]
+    try:
+        completed = subprocess.run(
+            args, cwd=root, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, timeout=20,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    except subprocess.TimeoutExpired:
+        _set(controls, 'Workerstatus',
+             '%s worker stop timed out after 20 seconds' % selected)
+        return False
+    except Exception as exc:
+        _set(controls, 'Workerstatus',
+             'Worker stop failed: %s' % str(exc)[:240])
+        return False
+    if completed.returncode != 0:
+        detail = ' '.join(str(completed.stdout or '').split())
+        if not detail:
+            detail = 'PowerShell returned %s' % completed.returncode
+        _set(controls, 'Workerstatus',
+             '%s worker stop failed: %s' % (selected, detail[-240:]))
+        return False
+    previous = _WORKER_PROCESSES.pop(selected, None)
+    if previous is not None and previous.poll() is None:
+        try:
+            previous.wait(timeout=5)
+        except Exception:
+            try:
+                previous.terminate()
+                previous.wait(timeout=2)
+            except Exception:
+                pass
+    output = str(completed.stdout or '')
+    _set(controls, 'Workerpid', 0)
+    if 'No matching worker is running' in output:
+        _set(controls, 'Workerstatus',
+             'No %s worker is running' % selected)
+    else:
+        _set(controls, 'Workerstatus',
+             '%s worker stopped; its console should close' % selected)
+    return True
 
 def _apply_fog():
     pipeline = _pipeline()
@@ -1199,6 +1303,14 @@ def apply_parameter(name):
         value = max(lower, min(upper, float(_value(parameter, fallback))))
         _set(pipeline.op('POINT_RENDER'), parameter, value)
         _set(_controls(), parameter, value)
+    elif key == 'artisticoffsetdirection':
+        _apply_artistic_offset_direction()
+    elif key in (
+            'leftwallscale', 'centerwallscale', 'rightwallscale',
+            'leftwallpanhorizontaldegrees', 'leftwallpanverticaldegrees',
+            'centerwallpanhorizontaldegrees', 'centerwallpanverticaldegrees',
+            'rightwallpanhorizontaldegrees', 'rightwallpanverticaldegrees'):
+        _apply_wall_view_control(key)
     elif key in ('wallwidth', 'wallheight'):
         _apply_wall_resolution()
     elif key in ('pointcloudscale', 'moge2scale', 'depthanythingscale'):
@@ -1244,8 +1356,12 @@ def apply_all():
         'Interactionstrength', 'Interactionsmoothing', 'Wrapyawdegrees',
         'Wrapfovdegrees', 'Wrapcoverage', 'Wrapnoise',
         'Surfacefovdegrees', 'Artisticyawdegrees',
-        'Artisticoffsetmetres',
+        'Artisticoffsetdirection', 'Artisticoffsetmetres',
         'Wallwidth', 'Wallheight', 'Pointcloudscale',
+        'Leftwallscale', 'Centerwallscale', 'Rightwallscale',
+        'Leftwallpanhorizontaldegrees', 'Leftwallpanverticaldegrees',
+        'Centerwallpanhorizontaldegrees', 'Centerwallpanverticaldegrees',
+        'Rightwallpanhorizontaldegrees', 'Rightwallpanverticaldegrees',
         'Moge2scale', 'Depthanythingscale',
         'Geometryresolution', 'Preservegeometryaspect',
         'Pointbudget', 'Pointsize', 'Geometryfps'):
@@ -1261,8 +1377,12 @@ def onPulse(par):
         apply_all()
     elif key == 'startmogeworker':
         _launch_worker('moge2')
+    elif key == 'stopmogeworker':
+        _stop_worker('moge2')
     elif key == 'startdepthanythingworker':
         _launch_worker('depth_anything')
+    elif key == 'stopdepthanythingworker':
+        _stop_worker('depth_anything')
     return
 '''
 
@@ -1692,14 +1812,16 @@ def _set_horizontal_layout(node):
         _set(node, "direction", "horizontal")
 
 
-def _scaled_camera_fov_expression(base_expression):
+def _scaled_camera_fov_expression(
+        base_expression, wall_scale_expression="1.0"):
     """Return a perspective-correct view-scale expression for a Camera COMP."""
 
     return (
         "2.0 * math.degrees(math.atan("
         "math.tan(math.radians(%s) * 0.5) / "
-        "max(0.35, min(4.0, parent().par.Pointcloudscale.eval()))))"
-        % base_expression
+        "max(0.2, min(10.0, "
+        "parent().par.Pointcloudscale.eval() * (%s)))))"
+        % (base_expression, wall_scale_expression)
     )
 
 
@@ -1712,21 +1834,55 @@ def _apply_point_cloud_camera_framing(render):
     _custom(
         render, render_page, "Float", "Pointcloudscale", 1.0,
         label="Effective Point Cloud View Scale")
+    for side in ("Left", "Center", "Right"):
+        _custom(
+            render, render_page, "Float", side + "wallscale", 1.0,
+            label=side + " Wall View Scale")
+        _custom(
+            render, render_page, "Float",
+            side + "wallpanhorizontaldegrees", 0.0,
+            label=side + " Camera Horizontal Pan (degrees)")
+        _custom(
+            render, render_page, "Float",
+            side + "wallpanverticaldegrees", 0.0,
+            label=side + " Camera Vertical Pan (degrees)")
     for camera_name in (
         "CAMERA_CENTER_METRIC", "CAMERA_LEFT_METRIC", "CAMERA_RIGHT_METRIC",
     ):
         _expr(
             render.op(camera_name), "fov",
             _scaled_camera_fov_expression("60.0"))
+    wrap_yaw = {
+        "LEFT": "parent().par.Wrapyawdegrees.eval()",
+        "CENTER": "0.0",
+        "RIGHT": "-parent().par.Wrapyawdegrees.eval()",
+    }
+    artistic_yaw = {
+        "LEFT": "-parent().par.Artisticyawdegrees.eval()",
+        "CENTER": "0.0",
+        "RIGHT": "parent().par.Artisticyawdegrees.eval()",
+    }
     for side in ("LEFT", "CENTER", "RIGHT"):
-        _expr(
-            render.op("CAMERA_WRAP_" + side), "fov",
-            _scaled_camera_fov_expression(
-                "parent().par.Wrapfovdegrees.eval()"))
-        _expr(
-            render.op("CAMERA_ARTISTIC_" + side), "fov",
-            _scaled_camera_fov_expression(
-                "parent().par.Surfacefovdegrees.eval()"))
+        wall_scale_expression = (
+            "parent().par.%swallscale.eval()" % side.title())
+        pan_horizontal = (
+            "parent().par.%swallpanhorizontaldegrees.eval()" % side.title())
+        pan_vertical = (
+            "parent().par.%swallpanverticaldegrees.eval()" % side.title())
+        for mode, base_yaw, base_fov in (
+                ("WRAP", wrap_yaw[side],
+                 "parent().par.Wrapfovdegrees.eval()"),
+                ("ARTISTIC", artistic_yaw[side],
+                 "parent().par.Surfacefovdegrees.eval()")):
+            camera = render.op("CAMERA_" + mode + "_" + side)
+            _expr(camera, "rx", pan_vertical)
+            _expr(
+                camera, "ry",
+                "(%s) + (%s)" % (base_yaw, pan_horizontal))
+            _expr(
+                camera, "fov",
+                _scaled_camera_fov_expression(
+                    base_fov, wall_scale_expression))
 
 
 def _embedded_runtime_source(filename, label, report):
@@ -2959,6 +3115,10 @@ def _build_point_render(parent, report):
             label="Panoramic Side Yaw (degrees)")
     _custom(comp, page, "Float", "Artisticyawdegrees", 18.0,
             label="Artistic Side Yaw (degrees)")
+    _custom(
+        comp, page, "Menu", "Artisticoffsetdirection", "outward",
+        menu=("outward", "inward"),
+        label="Artistic Side Offset Direction")
     _custom(comp, page, "Float", "Artisticoffsetmetres", 0.45,
             label="Artistic Side Offset (metres)")
 
@@ -3120,11 +3280,19 @@ def _build_point_render(parent, report):
             camera = _ensure(comp, "cameraCOMP", camera_name, report,
                              optional=True)
             if camera is not None:
+                pan_horizontal = (
+                    "parent().par.%swallpanhorizontaldegrees.eval()"
+                    % side.title())
+                pan_vertical = (
+                    "parent().par.%swallpanverticaldegrees.eval()"
+                    % side.title())
                 _set(camera, "tx", 0.0)
                 _set(camera, "ty", 0.0)
                 _set(camera, "tz", 0.0)
-                _set(camera, "rx", 0.0)
-                _expr(camera, "ry", yaw_expression)
+                _expr(camera, "rx", pan_vertical)
+                _expr(
+                    camera, "ry",
+                    "(%s) + (%s)" % (yaw_expression, pan_horizontal))
                 _set(camera, "rz", 0.0)
                 _expr(camera, "fov", "parent().par.Wrapfovdegrees.eval()")
                 _set(camera, "near", 0.05)
@@ -3134,24 +3302,39 @@ def _build_point_render(parent, report):
                 "METRIC_RENDER_WRAP_" + side, camera)
 
         # Artistic views intentionally move as well as turn the side cameras.
-        # This sacrifices seam continuity but exposes parallax and makes the
-        # image-derived surface read more clearly as a 3D sculpture.
+        # Camera translation moves visible content in the opposite screen
+        # direction. The default therefore moves the left camera right and the
+        # right camera left, pushing both wall images away from the center wall.
+        # The public direction menu can restore the older inward screen motion.
+        offset_direction = (
+            "(1.0 if parent().par.Artisticoffsetdirection.eval() == "
+            "'outward' else -1.0)")
         for side, offset_expression, yaw_expression in (
-            ("LEFT", "-parent().par.Artisticoffsetmetres.eval()",
+            ("LEFT",
+             "parent().par.Artisticoffsetmetres.eval() * " + offset_direction,
              "-parent().par.Artisticyawdegrees.eval()"),
             ("CENTER", "0.0", "0.0"),
-            ("RIGHT", "parent().par.Artisticoffsetmetres.eval()",
+            ("RIGHT",
+             "-parent().par.Artisticoffsetmetres.eval() * " + offset_direction,
              "parent().par.Artisticyawdegrees.eval()"),
         ):
             camera_name = "CAMERA_ARTISTIC_" + side
             camera = _ensure(comp, "cameraCOMP", camera_name, report,
                              optional=True)
             if camera is not None:
+                pan_horizontal = (
+                    "parent().par.%swallpanhorizontaldegrees.eval()"
+                    % side.title())
+                pan_vertical = (
+                    "parent().par.%swallpanverticaldegrees.eval()"
+                    % side.title())
                 _expr(camera, "tx", offset_expression)
                 _set(camera, "ty", 0.0)
                 _set(camera, "tz", 0.0)
-                _set(camera, "rx", 0.0)
-                _expr(camera, "ry", yaw_expression)
+                _expr(camera, "rx", pan_vertical)
+                _expr(
+                    camera, "ry",
+                    "(%s) + (%s)" % (yaw_expression, pan_horizontal))
                 _set(camera, "rz", 0.0)
                 _expr(camera, "fov", "parent().par.Surfacefovdegrees.eval()")
                 _set(camera, "near", 0.05)
@@ -3776,9 +3959,30 @@ def _build_show_control(pipeline, report):
         _value(render, "Artisticyawdegrees", 18.0),
         label="Artistic Side Yaw")
     _custom(
+        control, show_page, "Menu", "Artisticoffsetdirection",
+        _value(render, "Artisticoffsetdirection", "outward"),
+        ("outward", "inward"),
+        label="Artistic Offset Direction")
+    _custom(
         control, show_page, "Float", "Artisticoffsetmetres",
         _value(render, "Artisticoffsetmetres", 0.45),
         label="Artistic Side Offset (metres)")
+    for side in ("Left", "Center", "Right"):
+        parameter = side + "wallscale"
+        _custom(
+            control, show_page, "Float", parameter,
+            _value(render, parameter, 1.0),
+            label=side + " Wall View Scale")
+        horizontal = side + "wallpanhorizontaldegrees"
+        vertical = side + "wallpanverticaldegrees"
+        _custom(
+            control, show_page, "Float", horizontal,
+            _value(render, horizontal, 0.0),
+            label=side + " Camera Horizontal Pan")
+        _custom(
+            control, show_page, "Float", vertical,
+            _value(render, vertical, 0.0),
+            label=side + " Camera Vertical Pan")
     _custom(
         control, show_page, "Float", "Pointcloudscale", 1.0,
         label="Point Cloud Scale")
@@ -3860,8 +4064,14 @@ def _build_show_control(pipeline, report):
         control, worker_page, "Pulse", "Startmogeworker", False,
         label="Start MoGe-2 Worker")
     _custom(
+        control, worker_page, "Pulse", "Stopmogeworker", False,
+        label="Stop MoGe-2 Worker")
+    _custom(
         control, worker_page, "Pulse", "Startdepthanythingworker", False,
         label="Start Depth Anything Worker")
+    _custom(
+        control, worker_page, "Pulse", "Stopdepthanythingworker", False,
+        label="Stop Depth Anything Worker")
     worker_pid = _custom(
         control, worker_page, "Int", "Workerpid", 0,
         label="Last Worker Console PID")
@@ -3913,13 +4123,15 @@ def _build_show_control(pipeline, report):
         "surface; triple mosaics remain exactly three wall widths. Point "
         "Cloud Scale is creative framing, while the provider scales preserve "
         "separate MoGe-2 and Depth Anything tuning. Worker buttons open a "
-        "visible PowerShell console; use Ctrl+C there before starting the "
-        "other provider. "
+        "visible PowerShell console. Use the matching Stop button before "
+        "starting the other provider; Ctrl+C is not required. "
         "Panoramic Coverage adds procedural atmosphere only in empty wrap views; "
         "it never stretches the source image. Artistic Surface FOV, Side Yaw, "
-        "and Side Offset expose the fixed sculptural cameras without adding "
-        "camera animation. Use Apply All after reopening an "
-        "older saved TOE if you want every displayed value reapplied.",
+        "Side Offset Direction, and Side Offset expose the fixed sculptural "
+        "cameras without adding camera animation. Left/Center/Right Wall View "
+        "Scale and camera pan affect only the matching panoramic and artistic "
+        "wall. Use Apply All after reopening an older saved TOE if you want "
+        "every displayed value reapplied.",
         report)
     return control
 
@@ -3957,6 +4169,146 @@ def install_output_framing_controls(root=None):
     print("[FlexGPU runtime] adjustable output/framing controls ready: "
           "wall width/height, provider-aware point-cloud scale and visible "
           "worker consoles; TOE remains unsaved")
+    return control
+
+
+def install_worker_stop_controls(root=None):
+    """Add checkout-scoped worker stop buttons to an existing local TOE.
+
+    This bounded upgrade updates only the public ``SHOW_CONTROL`` component.
+    Stop actions call the public provider-specific wrapper for this exact
+    checkout; the installer itself does not start or stop a worker, inspect
+    private adapters, rebuild the network, or save the TOE.
+    """
+
+    global LAST_REPORT
+    report = BuildReport()
+    LAST_REPORT = report
+    if root is None:
+        root = _op(ROOT_PATH)
+    elif isinstance(root, str):
+        root = _op(root)
+    if root is None:
+        raise RuntimeError("FlexGPU root %s does not exist" % ROOT_PATH)
+    pipeline = root.op(PIPELINE_NAME)
+    if pipeline is None:
+        raise RuntimeError("WORKING_PIPELINE is missing; build it first")
+
+    control = _build_show_control(pipeline, report)
+    try:
+        control.store("worker_stop_controls_report", report.as_dict())
+    except Exception:
+        pass
+    print("[FlexGPU runtime] checkout-scoped MoGe-2 and Depth Anything "
+          "worker stop buttons ready; TOE remains unsaved")
+    return control
+
+
+def install_wall_view_controls(root=None):
+    """Add wall scales and artistic offset direction to an existing TOE.
+
+    This bounded upgrade changes only the six managed triple-wall camera
+    FOV/pan expressions, the two artistic side-camera X expressions, related
+    render parameters, and the public ``SHOW_CONTROL`` component. It does not
+    touch single/stereo cameras, geometry, resolution, or private adapters.
+    The current TOE is not saved.
+    """
+
+    global LAST_REPORT
+    report = BuildReport()
+    LAST_REPORT = report
+    if root is None:
+        root = _op(ROOT_PATH)
+    elif isinstance(root, str):
+        root = _op(root)
+    if root is None:
+        raise RuntimeError("FlexGPU root %s does not exist" % ROOT_PATH)
+    pipeline = root.op(PIPELINE_NAME)
+    if pipeline is None:
+        raise RuntimeError("WORKING_PIPELINE is missing; build it first")
+    render = pipeline.op("POINT_RENDER")
+    if render is None:
+        raise RuntimeError("POINT_RENDER is missing")
+    left = render.op("CAMERA_ARTISTIC_LEFT")
+    right = render.op("CAMERA_ARTISTIC_RIGHT")
+    if left is None or right is None:
+        raise RuntimeError("managed artistic side cameras are missing")
+
+    render_page = _page(render, "Render")
+    _custom(
+        render, render_page, "Menu", "Artisticoffsetdirection", "outward",
+        menu=("outward", "inward"),
+        label="Artistic Side Offset Direction")
+    for side in ("Left", "Center", "Right"):
+        _custom(
+            render, render_page, "Float", side + "wallscale", 1.0,
+            label=side + " Wall View Scale")
+        _custom(
+            render, render_page, "Float",
+            side + "wallpanhorizontaldegrees", 0.0,
+            label=side + " Camera Horizontal Pan (degrees)")
+        _custom(
+            render, render_page, "Float",
+            side + "wallpanverticaldegrees", 0.0,
+            label=side + " Camera Vertical Pan (degrees)")
+    direction = str(_value(
+        render, "Artisticoffsetdirection", "outward")).strip().lower()
+    if direction not in ("outward", "inward"):
+        direction = "outward"
+        _set(render, "Artisticoffsetdirection", direction)
+    offset_direction = (
+        "(1.0 if parent().par.Artisticoffsetdirection.eval() == "
+        "'outward' else -1.0)")
+    _expr(
+        left, "tx",
+        "parent().par.Artisticoffsetmetres.eval() * " + offset_direction)
+    _expr(
+        right, "tx",
+        "-parent().par.Artisticoffsetmetres.eval() * " + offset_direction)
+    wrap_yaw = {
+        "LEFT": "parent().par.Wrapyawdegrees.eval()",
+        "CENTER": "0.0",
+        "RIGHT": "-parent().par.Wrapyawdegrees.eval()",
+    }
+    artistic_yaw = {
+        "LEFT": "-parent().par.Artisticyawdegrees.eval()",
+        "CENTER": "0.0",
+        "RIGHT": "parent().par.Artisticyawdegrees.eval()",
+    }
+    for side in ("LEFT", "CENTER", "RIGHT"):
+        wall_scale_expression = (
+            "parent().par.%swallscale.eval()" % side.title())
+        pan_horizontal = (
+            "parent().par.%swallpanhorizontaldegrees.eval()" % side.title())
+        pan_vertical = (
+            "parent().par.%swallpanverticaldegrees.eval()" % side.title())
+        for mode, base_yaw, base_fov in (
+                ("WRAP", wrap_yaw[side],
+                 "parent().par.Wrapfovdegrees.eval()"),
+                ("ARTISTIC", artistic_yaw[side],
+                 "parent().par.Surfacefovdegrees.eval()")):
+            camera = render.op("CAMERA_" + mode + "_" + side)
+            _expr(camera, "rx", pan_vertical)
+            _expr(
+                camera, "ry",
+                "(%s) + (%s)" % (base_yaw, pan_horizontal))
+            _expr(
+                camera, "fov",
+                _scaled_camera_fov_expression(
+                    base_fov, wall_scale_expression))
+    control = _build_show_control(pipeline, report)
+    _set(control, "Artisticoffsetdirection", direction)
+    try:
+        render.store(
+            "artistic_wall_offset_direction",
+            "show-control selectable: outward or inward screen motion")
+        control.store(
+            "wall_view_controls_report", report.as_dict())
+    except Exception:
+        pass
+    print("[FlexGPU runtime] wall view controls ready: left/center/right "
+          "scales and camera pan plus outward/inward artistic offset; "
+          "TOE remains unsaved")
     return control
 
 

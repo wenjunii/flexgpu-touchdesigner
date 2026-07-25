@@ -131,6 +131,28 @@ class TouchDesignerValidationSourceTests(unittest.TestCase):
                         dict(base, geometry_resolution=value)
                     )
 
+    def test_active_dimension_contract_preserves_source_aspect(self) -> None:
+        module = load_module()
+        state = {
+            "world_active": True,
+            "installation_active": False,
+            "vr_active": False,
+            "geometry_resolution": 512,
+        }
+        dimensions = module._active_output_dimensions(
+            state,
+            preserve_geometry_aspect=True,
+            source_width=1024,
+            source_height=576,
+        )
+        for name in (
+            "OUT_POSITION",
+            "OUT_COLOR",
+            "OUT_INTERACTION",
+            "OUT_INTERACTION_DEBUG",
+        ):
+            self.assertEqual(dimensions[name], (682, 384))
+
     def test_experience_activation_contract_requires_the_complete_world_mode(self) -> None:
         module = load_module()
         self.assertEqual(
@@ -190,7 +212,11 @@ class TouchDesignerValidationSourceTests(unittest.TestCase):
         self.assertIn("left/right eye images are identical", source)
         self.assertIn('"triple_display_cameras"', source)
         self.assertIn('"shared origin with different yaw"', source)
-        self.assertIn('"translated and rotated side cameras"', source)
+        self.assertIn(
+            '"directional translated and rotated side cameras"', source)
+        self.assertIn('"invalid_artistic_offset_direction"', source)
+        self.assertIn('"invalid_triple_camera_fov"', source)
+        self.assertIn('"wall_controls"', source)
 
     def test_atomic_report_writer_replaces_complete_json(self) -> None:
         module = load_module()

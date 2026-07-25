@@ -851,14 +851,30 @@ framing has one creative scale plus separate MoGe-2 and Depth Anything
 provider scales. Quality changes preserve the configured wall outputs and do
 not modify private StreamDiffusionTD internals.
 
+The artistic offset has a separate outward/inward direction menu. `outward`
+moves visible content away from the center wall (left farther left, right
+farther right); `inward` restores the older motion. It affects only the two
+artistic side cameras. The artistic center and all panoramic-wrap cameras are
+unchanged.
+
+`Left Wall View Scale`, `Center Wall View Scale`, and `Right Wall View Scale`
+independently zoom the corresponding panoramic and artistic wall cameras. They
+multiply the existing global/provider point-cloud scale, do not change the
+1920x1080 wall resolution, and do not affect the single or stereo views.
+Each wall also has signed horizontal and vertical camera-pan controls in
+degrees. Zero preserves the base panoramic/artistic orientation; nonzero
+values add a local pan only to that wall in both triple-wall modes.
+
 The `Workers` page can open either public worker wrapper in its own visible
 PowerShell console. It selects and initializes the matching provider before
 launch, uses the selected quality profile and physical GPU index, and refuses
-duplicate clicks from the same TouchDesigner session. Stop the visible worker
-with `Ctrl+C` before starting the other provider. The console now exits with
-the foreground worker, so a stopped or failed worker cannot leave an empty
-`-NoExit` shell that blocks the next launch as "already running." The button
-never embeds model weights, credentials, or private component paths.
+duplicate clicks from the same TouchDesigner session. `Stop MoGe-2 Worker` and
+`Stop Depth Anything Worker` call the existing checkout-scoped public stop
+wrapper, so `Ctrl+C` is not required. Stop the active provider before starting
+the other one. The console exits with the foreground worker, so a stopped or
+failed worker cannot leave an empty `-NoExit` shell that blocks the next launch
+as "already running." The buttons never embed model weights, credentials, or
+private component paths.
 
 For the current 3080 installation, generated-image aspect is preserved before
 unprojection instead of forcing every source into a square. The MoGe-2 and
@@ -888,12 +904,23 @@ To refresh an older ignored working TOE without rebuilding the rest of the
 network, stop the geometry worker and run these bounded Textport installers:
 
 ```python
-from pathlib import Path; import importlib, sys; root = Path(r'C:\path\to\flexgpu-touchdesigner'); sys.path.insert(0, str(root / 'touchdesigner')); import runtime_pipeline as rp; importlib.reload(rp); rp.install_adaptive_source_resolution(op('/project1/flexgpu')); rp.install_output_framing_controls(op('/project1/flexgpu')); rp.install_venue_1080p_outputs(op('/project1/flexgpu'))
+from pathlib import Path; import importlib, sys; root = Path(r'C:\path\to\flexgpu-touchdesigner'); sys.path.insert(0, str(root / 'touchdesigner')); import runtime_pipeline as rp; importlib.reload(rp); flex = op('/project1/flexgpu'); rp.install_adaptive_source_resolution(flex); rp.install_output_framing_controls(flex); rp.install_wall_view_controls(flex); rp.install_worker_stop_controls(flex); rp.install_venue_1080p_outputs(flex)
 ```
 
 The installers update only public reconstruction, managed Camera/Render
 parameters, wall TOP resolutions, and `SHOW_CONTROL`. They never save the TOE
-or inspect private StreamDiffusionTD internals.
+or inspect private StreamDiffusionTD internals. The wall-view installer adds
+outward/inward artistic offset direction, independent left/center/right view
+scale, and independent horizontal/vertical camera pan. The worker-stop
+installer adds checkout-scoped stop buttons for MoGe-2 and Depth Anything.
+
+For 3080 parity, pull this same published branch on the 3080 computer, open
+only the latest `*-3080*.toe`, run the command above, select
+`3080ti_16gb`, verify the physical GPU index, and pulse `Apply All Show
+Controls`. Test both generated-geometry providers and all three display modes
+before saving a new 3080-tagged checkpoint. Do not copy the 5090 `.toe`,
+`config/local-5090*.json`, GPU UUID, worker state, or private component into
+the 3080 project. The public installers are the migration path.
 
 TouchDesigner Non-Commercial limits every image to 1280x1280. For development
 without a Commercial/Educational/Pro key, apply the separate bounded preview
