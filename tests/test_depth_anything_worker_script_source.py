@@ -43,6 +43,8 @@ class DepthAnythingWorkerScriptSourceTests(unittest.TestCase):
             'MODEL_REPOSITORY = "depth-anything/Depth-Anything-V2-Small-hf"',
             'MODEL_REVISION = "870a35c76c2bc1d82fbde922d95015496cb7dd6c"',
             'MODEL_SHA256 = "3152477ce0d8d6978d76b995120de97cb5b928701fd0f817769f59e249a16b70"',
+            'MODEL_CONFIG_SHA256 = "c56698d3643dde1f83ea2212759e6b31a22b8f827246a36dd007ee8a22b3ff75"',
+            'PROCESSOR_CONFIG_SHA256 = "d41175c0d889477ca8fc67191e540faef14baf6275157b3fdecf78469e6bbf84"',
             'os.environ["HF_HUB_OFFLINE"] = "1"',
             'os.environ["TRANSFORMERS_OFFLINE"] = "1"',
             "local_files_only=True",
