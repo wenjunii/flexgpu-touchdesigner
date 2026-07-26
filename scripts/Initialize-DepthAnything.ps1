@@ -16,6 +16,8 @@ $model = Join-Path $root 'runtime\depth-anything-v2-small'
 $modelId = 'depth-anything/Depth-Anything-V2-Small-hf'
 $modelRevision = '870a35c76c2bc1d82fbde922d95015496cb7dd6c'
 $modelSha256 = '3152477ce0d8d6978d76b995120de97cb5b928701fd0f817769f59e249a16b70'
+$modelConfigSha256 = 'c56698d3643dde1f83ea2212759e6b31a22b8f827246a36dd007ee8a22b3ff75'
+$processorConfigSha256 = 'd41175c0d889477ca8fc67191e540faef14baf6275157b3fdecf78469e6bbf84'
 $torchIndex = 'https://download.pytorch.org/whl/cu128'
 
 function Invoke-Checked {
@@ -60,6 +62,8 @@ $plan = [ordered]@{
     model_id = $modelId
     model_revision = $modelRevision
     model_sha256 = $modelSha256
+    model_config_sha256 = $modelConfigSha256
+    processor_config_sha256 = $processorConfigSha256
     model_license = 'Apache-2.0 (Small only; review upstream terms before deployment)'
     model_path = $model
     cache_path = $cache

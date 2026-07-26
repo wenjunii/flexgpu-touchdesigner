@@ -4,6 +4,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -48,6 +49,14 @@ class DepthAnythingWorkerTests(unittest.TestCase):
         payload = json.loads(profiles.stdout)
         self.assertEqual(payload["pins"]["model_revision"], worker_module.MODEL_REVISION)
         self.assertEqual(payload["pins"]["model_sha256"], worker_module.MODEL_SHA256)
+        self.assertEqual(
+            payload["pins"]["model_config_sha256"],
+            worker_module.MODEL_CONFIG_SHA256,
+        )
+        self.assertEqual(
+            payload["pins"]["processor_config_sha256"],
+            worker_module.PROCESSOR_CONFIG_SHA256,
+        )
         self.assertEqual(payload["profiles"]["3080ti_16gb"]["input_size"], 384)
         self.assertEqual(payload["profiles"]["3080ti_16gb"]["output_width"], 256)
         self.assertEqual(payload["profiles"]["3080ti_16gb"]["output_height"], 144)
@@ -79,6 +88,57 @@ class DepthAnythingWorkerTests(unittest.TestCase):
             "msmf" if worker_module.os.name == "nt" else "any",
         )
         self.assertEqual(plan["output_limits"]["max_pixels"], 307200)
+
+    def test_model_verification_pins_weight_and_both_configs_before_load(self) -> None:
+        model_config = (
+            b'{"architectures":["DepthAnythingForDepthEstimation"],'
+            b'"model_type":"depth_anything"}'
+        )
+        processor_config = b'{"image_processor_type":"DPTImageProcessor"}'
+        weight = b"synthetic-safetensors"
+        with tempfile.TemporaryDirectory() as temporary:
+            model_dir = Path(temporary)
+            (model_dir / worker_module.MODEL_CONFIG_FILENAME).write_bytes(model_config)
+            (model_dir / worker_module.PROCESSOR_CONFIG_FILENAME).write_bytes(
+                processor_config
+            )
+            (model_dir / worker_module.MODEL_FILENAME).write_bytes(weight)
+            with (
+                mock.patch.object(worker_module, "MODEL_BYTES", len(weight)),
+                mock.patch.object(
+                    worker_module,
+                    "MODEL_SHA256",
+                    worker_module.hashlib.sha256(weight).hexdigest(),
+                ),
+                mock.patch.object(
+                    worker_module,
+                    "MODEL_CONFIG_SHA256",
+                    worker_module.hashlib.sha256(model_config).hexdigest(),
+                ),
+                mock.patch.object(
+                    worker_module,
+                    "PROCESSOR_CONFIG_SHA256",
+                    worker_module.hashlib.sha256(processor_config).hexdigest(),
+                ),
+            ):
+                worker_module.verify_model_directory(model_dir)
+                (model_dir / worker_module.MODEL_CONFIG_FILENAME).write_bytes(
+                    model_config + b" "
+                )
+                with self.assertRaisesRegex(
+                    worker_module.ModelError, "model config failed SHA-256"
+                ):
+                    worker_module.verify_model_directory(model_dir)
+                (model_dir / worker_module.MODEL_CONFIG_FILENAME).write_bytes(
+                    model_config
+                )
+                (model_dir / worker_module.PROCESSOR_CONFIG_FILENAME).write_bytes(
+                    processor_config + b" "
+                )
+                with self.assertRaisesRegex(
+                    worker_module.ModelError, "processor config failed SHA-256"
+                ):
+                    worker_module.verify_model_directory(model_dir)
 
     def test_camera_backend_selection_prefers_msmf_on_windows(self) -> None:
         fake_cv2 = mock.Mock(CAP_MSMF=1400, CAP_DSHOW=700, CAP_ANY=0)

@@ -1083,6 +1083,14 @@ source/destination checklist and private-transfer boundary.
 
 ## Testing and security
 
+The optional Depth Anything runtime pins `transformers==5.5.0` with its
+compatible `huggingface-hub==1.24.0` dependency. The worker runs normal
+inference offline with `trust_remote_code=False`, loads safetensors only, and
+verifies the exact model, model-config, and processor-config SHA-256 values
+before Transformers parses them. Treat any dependency update as one coherent
+runtime change: repeat the pinned local-model inference audit and never merge a
+single-package Dependabot bump into either the 3080 or 5090 working setup.
+
 ### Public GitHub sync policy
 
 Sync project-owned source, documentation, tests, public configurations, CI,

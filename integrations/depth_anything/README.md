@@ -20,7 +20,9 @@ The optional real backend pins the official Transformers-compatible
 
 - revision `870a35c76c2bc1d82fbde922d95015496cb7dd6c`;
 - `model.safetensors` size `99173660` bytes;
-- SHA-256 `3152477ce0d8d6978d76b995120de97cb5b928701fd0f817769f59e249a16b70`.
+- model SHA-256 `3152477ce0d8d6978d76b995120de97cb5b928701fd0f817769f59e249a16b70`;
+- model-config SHA-256 `c56698d3643dde1f83ea2212759e6b31a22b8f827246a36dd007ee8a22b3ff75`;
+- processor-config SHA-256 `d41175c0d889477ca8fc67191e540faef14baf6275157b3fdecf78469e6bbf84`.
 
 The upstream project and model card label **V2 Small** Apache-2.0. Upstream
 labels Base/Large/Giant CC-BY-NC-4.0, so this integration deliberately does
@@ -45,7 +47,10 @@ Model acquisition is a separate, explicit network action:
 
 The environment lives under ignored `.venv/depth-anything/`; the snapshot and
 cache remain under ignored `runtime/`. Normal inference is forced offline and
-verifies the pinned weight before loading it.
+verifies the pinned weight and both configuration files before loading them.
+The public runtime pins `transformers==5.5.0` and
+`huggingface-hub==1.24.0` together; partial automated upgrades must not be
+merged without repeating the pinned offline-model inference audit.
 
 ## Rehearse without a webcam or model
 

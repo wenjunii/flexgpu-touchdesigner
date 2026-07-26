@@ -35,14 +35,16 @@ class DepthAnythingIntegrationSourceTests(unittest.TestCase):
         for marker in (
             "numpy==2.2.6",
             "opencv-python==4.10.0.84",
-            "huggingface-hub==0.32.4",
-            "transformers==4.52.4",
+            "huggingface-hub==1.24.0",
+            "transformers==5.5.0",
             "safetensors==0.5.3",
         ):
             self.assertIn(marker, requirements)
         installer = INITIALIZE.read_text(encoding="utf-8")
         self.assertIn("870a35c76c2bc1d82fbde922d95015496cb7dd6c", installer)
         self.assertIn("3152477ce0d8d6978d76b995120de97cb5b928701fd0f817769f59e249a16b70", installer)
+        self.assertIn("c56698d3643dde1f83ea2212759e6b31a22b8f827246a36dd007ee8a22b3ff75", installer)
+        self.assertIn("d41175c0d889477ca8fc67191e540faef14baf6275157b3fdecf78469e6bbf84", installer)
         self.assertNotIn("@main", installer + requirements)
 
     def test_start_wrapper_requires_explicit_start_and_defaults_loopback(self) -> None:

@@ -47,6 +47,10 @@ MODEL_REVISION = "870a35c76c2bc1d82fbde922d95015496cb7dd6c"
 MODEL_FILENAME = "model.safetensors"
 MODEL_BYTES = 99_173_660
 MODEL_SHA256 = "3152477ce0d8d6978d76b995120de97cb5b928701fd0f817769f59e249a16b70"
+MODEL_CONFIG_FILENAME = "config.json"
+MODEL_CONFIG_SHA256 = "c56698d3643dde1f83ea2212759e6b31a22b8f827246a36dd007ee8a22b3ff75"
+PROCESSOR_CONFIG_FILENAME = "preprocessor_config.json"
+PROCESSOR_CONFIG_SHA256 = "d41175c0d889477ca8fc67191e540faef14baf6275157b3fdecf78469e6bbf84"
 MODEL_LICENSE = "Apache-2.0"
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 MAX_SESSION_ID_BYTES = 64
@@ -183,9 +187,9 @@ def _sha256_file(path: Path) -> str:
 
 
 def verify_model_directory(path: Path) -> None:
-    """Require the exact pinned safetensors weight and local config files."""
+    """Require the exact pinned safetensors weight and configuration files."""
 
-    required = ("config.json", "preprocessor_config.json", MODEL_FILENAME)
+    required = (MODEL_CONFIG_FILENAME, PROCESSOR_CONFIG_FILENAME, MODEL_FILENAME)
     if not path.is_dir() or any(not (path / name).is_file() for name in required):
         raise ModelError("pinned Depth Anything V2 Small snapshot is not installed")
     weight = path / MODEL_FILENAME
@@ -193,12 +197,20 @@ def verify_model_directory(path: Path) -> None:
         raise ModelError("pinned Depth Anything V2 Small weight has the wrong byte length")
     if _sha256_file(weight) != MODEL_SHA256:
         raise ModelError("pinned Depth Anything V2 Small weight failed SHA-256 verification")
+    model_config = path / MODEL_CONFIG_FILENAME
+    if _sha256_file(model_config) != MODEL_CONFIG_SHA256:
+        raise ModelError("pinned model config failed SHA-256 verification")
+    processor_config = path / PROCESSOR_CONFIG_FILENAME
+    if _sha256_file(processor_config) != PROCESSOR_CONFIG_SHA256:
+        raise ModelError("pinned processor config failed SHA-256 verification")
     try:
-        config = json.loads((path / "config.json").read_text(encoding="utf-8"))
+        config = json.loads(model_config.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError) as exc:
         raise ModelError("pinned model config is unreadable") from exc
     if config.get("architectures") != ["DepthAnythingForDepthEstimation"]:
         raise ModelError("pinned model config has an unexpected architecture")
+    if config.get("model_type") != "depth_anything":
+        raise ModelError("pinned model config has an unexpected model type")
 
 
 def _configure_offline_cache(cache_dir: Path) -> None:
@@ -241,6 +253,8 @@ def install_model(model_dir: Path, cache_dir: Path) -> dict[str, Any]:
         "model_id": MODEL_REPOSITORY,
         "model_revision": MODEL_REVISION,
         "model_sha256": MODEL_SHA256,
+        "model_config_sha256": MODEL_CONFIG_SHA256,
+        "processor_config_sha256": PROCESSOR_CONFIG_SHA256,
         "model_path": str(model_dir),
     }
 
@@ -1252,6 +1266,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     "model_id": MODEL_REPOSITORY,
                     "model_revision": MODEL_REVISION,
                     "model_sha256": MODEL_SHA256,
+                    "model_config_sha256": MODEL_CONFIG_SHA256,
+                    "processor_config_sha256": PROCESSOR_CONFIG_SHA256,
                     "model_license": MODEL_LICENSE,
                 },
                 "contains_rgb": False,
@@ -1273,7 +1289,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 model_error = str(exc)
             packages = {
                 name: _package_version(name)
-                for name in ("torch", "torchvision", "transformers", "numpy", "opencv-python", "safetensors")
+                for name in (
+                    "torch",
+                    "torchvision",
+                    "transformers",
+                    "huggingface-hub",
+                    "numpy",
+                    "opencv-python",
+                    "safetensors",
+                )
             }
             ok = model_error is None and all(packages.values())
             _print(
