@@ -9,6 +9,7 @@ atomic machine-local report.  Reports and captures belong under ignored
 
 from __future__ import print_function
 
+import hashlib
 import json
 import math
 import os
@@ -18,10 +19,15 @@ import time
 VALIDATION_VERSION = "flexgpu-td-validation/v1"
 ROOT_PATH = "/project1/flexgpu"
 PIPELINE_PATH = ROOT_PATH + "/WORKING_PIPELINE"
+PERFORM_WINDOW_PATH = ROOT_PATH + "/INSTALLATION_OUT/window1"
+LIVE_SOURCE_PATH = (
+    PIPELINE_PATH + "/SOURCES/STREAMDIFFUSION_ADAPTER/OUT_RGB")
 
 REQUIRED_OPERATORS = (
     ROOT_PATH + "/CONFIG",
     ROOT_PATH + "/STARTUP/runtime_helpers",
+    ROOT_PATH + "/INSTALLATION_OUT",
+    PERFORM_WINDOW_PATH,
     PIPELINE_PATH,
     PIPELINE_PATH + "/SOURCES",
     PIPELINE_PATH + "/ROLE_BRIDGE",
@@ -74,6 +80,8 @@ OUTPUTS = (
 EXPECTED_OPERATOR_TYPES = {
     ROOT_PATH + "/CONFIG": ("base",),
     ROOT_PATH + "/STARTUP/runtime_helpers": ("text",),
+    ROOT_PATH + "/INSTALLATION_OUT": ("base",),
+    PERFORM_WINDOW_PATH: ("window",),
     PIPELINE_PATH: ("base",),
     PIPELINE_PATH + "/SOURCES": ("base",),
     PIPELINE_PATH + "/ROLE_BRIDGE": ("base",),
@@ -105,6 +113,8 @@ EXPECTED_OPERATOR_TYPES = {
 
 MAX_SIGNAL_SAMPLES = 262144
 MIN_CAPTURE_BYTES = 128
+LIVE_VISIBLE_LEVEL = 0.08
+MIN_LIVE_VISIBLE_FRACTION = 0.005
 
 
 def _op(path):
@@ -410,6 +420,13 @@ def _signal_sample(node):
     maximum = float(sampled.max())
     mean = float(sampled.mean())
     span = maximum - minimum
+    pixel_peak = sampled.max(axis=1)
+    p99 = float(numpy.percentile(pixel_peak, 99.0))
+    visible_fraction = float(
+        numpy.count_nonzero(pixel_peak >= LIVE_VISIBLE_LEVEL)
+    ) / float(max(1, pixel_peak.size))
+    digest = hashlib.sha256(
+        numpy.ascontiguousarray(sampled).tobytes()).hexdigest()
     stats = {
         "shape": [int(item) for item in values.shape],
         "sample_count": int(sampled.shape[0]),
@@ -417,7 +434,15 @@ def _signal_sample(node):
         "rgb_max": maximum,
         "rgb_mean": mean,
         "rgb_range": span,
+        "rgb_peak_p99": p99,
+        "visible_fraction": visible_fraction,
+        "sample_sha256": digest,
         "has_signal": maximum > 1e-5 and span > 1e-6,
+        "has_visible_content": (
+            p99 >= LIVE_VISIBLE_LEVEL
+            and visible_fraction >= MIN_LIVE_VISIBLE_FRACTION
+            and span > 1e-3
+        ),
     }
     return stats, sampled
 
@@ -533,6 +558,8 @@ def validate(
     report_path=None,
     capture_dir=None,
     expected_experience=None,
+    require_live_source=False,
+    previous_live_source_digest=None,
 ):
     """Validate the generated network and return a JSON-compatible report."""
 
@@ -572,6 +599,29 @@ def validate(
                 "actual": actual,
             }
     check("managed_operator_types", not type_mismatches, type_mismatches)
+
+    perform_window = _op(PERFORM_WINDOW_PATH)
+    perform_operator = _value(perform_window, "winop", None)
+    perform_operator_path = str(
+        getattr(perform_operator, "path", perform_operator or ""))
+    expected_perform_operator = PIPELINE_PATH + "/OUT_DISPLAY_ACTIVE"
+    perform_failures = []
+    if perform_window is None:
+        perform_failures.append("canonical Perform Mode Window COMP is missing")
+    elif perform_operator_path != expected_perform_operator:
+        perform_failures.append(
+            "Window Operator is %r, expected %r" %
+            (perform_operator_path, expected_perform_operator))
+    check(
+        "perform_window_contract",
+        not perform_failures,
+        {
+            "path": PERFORM_WINDOW_PATH,
+            "window_operator": perform_operator_path,
+            "expected_window_operator": expected_perform_operator,
+            "failures": perform_failures,
+        },
+    )
 
     state = _runtime_state(root)
     state_failures = []
@@ -719,6 +769,47 @@ def validate(
         "active_visual_signal",
         bool(signal_outputs) and not signal_failures,
         {"active": list(signal_outputs), "failures": signal_failures, "stats": signals},
+    )
+
+    live_source = {
+        "required": bool(require_live_source),
+        "path": LIVE_SOURCE_PATH,
+    }
+    live_source_failures = []
+    if require_live_source:
+        live_node = _op(LIVE_SOURCE_PATH)
+        if live_node is None:
+            live_source_failures.append(
+                "stable StreamDiffusion adapter RGB output is missing")
+        else:
+            try:
+                live_stats, _live_sample = _signal_sample(live_node)
+                live_source["stats"] = live_stats
+                live_source["digest"] = live_stats["sample_sha256"]
+                if not live_stats["has_visible_content"]:
+                    live_source_failures.append(
+                        "live RGB is blank, constant, or below the visible-range "
+                        "commissioning threshold")
+                if (
+                    previous_live_source_digest is not None
+                    and str(previous_live_source_digest)
+                    == live_stats["sample_sha256"]
+                ):
+                    live_source_failures.append(
+                        "live RGB sample is unchanged from the previous audit")
+            except Exception as exc:
+                live_source_failures.append(str(exc))
+    check(
+        "live_source_visual_and_change",
+        not live_source_failures,
+        {
+            "required": bool(require_live_source),
+            "previous_digest": previous_live_source_digest,
+            "failures": live_source_failures,
+            "source": live_source,
+            "visible_level": LIVE_VISIBLE_LEVEL,
+            "minimum_visible_fraction": MIN_LIVE_VISIBLE_FRACTION,
+        },
     )
 
     stereo_difference = {}
@@ -1059,6 +1150,7 @@ def validate(
             "vr_active": state.get("vr_active"),
         },
         "signals": signals,
+        "live_source": live_source,
         "captures": captures,
     }
     if report_path:

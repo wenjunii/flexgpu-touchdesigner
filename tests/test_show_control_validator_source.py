@@ -34,6 +34,8 @@ class ShowControlValidatorSourceTests(unittest.TestCase):
         self.assertEqual(len(self.module.VALUE_CONTROLS), 45)
         self.assertEqual(len(self.module.PULSE_CONTROLS), 6)
         self.assertEqual(len(self.module.STATUS_CONTROLS), 4)
+        self.assertEqual(len(self.module.ADAPTER_VALUE_CONTROLS), 14)
+        self.assertEqual(len(self.module.ADAPTER_PULSE_CONTROLS), 4)
         controls = (
             self.module.VALUE_CONTROLS
             + self.module.PULSE_CONTROLS
@@ -41,12 +43,24 @@ class ShowControlValidatorSourceTests(unittest.TestCase):
         )
         self.assertEqual(len(controls), 55)
         self.assertEqual(len(set(controls)), 55)
+        adapter_controls = (
+            self.module.ADAPTER_VALUE_CONTROLS
+            + self.module.ADAPTER_PULSE_CONTROLS
+        )
+        self.assertEqual(len(adapter_controls), 18)
+        self.assertEqual(len(set(adapter_controls)), 18)
 
     def test_validator_restores_state_even_when_a_check_fails(self) -> None:
         self.assertIn("finally:", self.source)
         self.assertIn("callbacks.apply_all()", self.source)
         self.assertIn('"restoration_failures"', self.source)
         self.assertIn('"external_validation_required"', self.source)
+        self.assertIn('"adapter_control_inventory"', self.source)
+        self.assertIn('"adapter_ui_buttons"', self.source)
+        self.assertIn('"adapter_restored"', self.source)
+        self.assertIn('"Crossfadesec"', self.source)
+        self.assertIn('"Colorenabled"', self.source)
+        self.assertIn('"Resetcolor"', self.source)
         self.assertIn("Qualityprofile_points", self.source)
         self.assertIn("147456", self.source)
         self.assertIn("operator_lookup=None", self.source)

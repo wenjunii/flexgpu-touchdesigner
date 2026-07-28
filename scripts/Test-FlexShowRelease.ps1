@@ -7,7 +7,10 @@ Compiles Python sources, validates shipped profiles, runs the unit suite and
 synthetic benchmark, parses every PowerShell script, smoke-tests the machine
 initializer with synthetic hardware, verifies the default-off Depth Anything
 wrapper's accepted rehearsal defaults, validates the public TD Knowledge
-bridge wiring, and checks the exact public surface.
+bridge wiring, and checks the exact public surface. The Python source tests
+also require the canonical Perform Mode Window COMP contract, strict optional
+live-source visibility/change gates, and both the FlexGPU and combined-podcast
+public Show Control inventories.
 The unit stage includes cold-reopen bridge imports, component-qualified
 TOP-to-POP attribute mappings, and native/fallback Windows process-identity
 regressions.

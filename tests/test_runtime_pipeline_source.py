@@ -843,6 +843,14 @@ assert normalized({src_path!r}) in {{
         self.assertIn("'Stop-GeneratedGeometryWorker.ps1'", self.source)
         self.assertIn("'-Provider', selected, '-Stop'", self.source)
         self.assertIn("def _stop_worker(provider):", self.source)
+        self.assertIn(
+            "use its Stop button",
+            self.module.SHOW_CONTROL_CALLBACKS,
+        )
+        self.assertNotIn(
+            "Ctrl+C stops it",
+            self.module.SHOW_CONTROL_CALLBACKS,
+        )
         self.assertNotIn("shell=True", self.module.SHOW_CONTROL_CALLBACKS)
         installer = inspect.getsource(
             self.module.install_output_framing_controls)
@@ -888,6 +896,19 @@ assert normalized({src_path!r}) in {{
         self.assertNotIn(".save", installer)
         self.assertNotIn("build(", installer)
         self.assertNotIn("project.save", installer)
+
+    def test_perform_window_upgrade_is_bounded_and_hardware_neutral(self) -> None:
+        signature = inspect.signature(self.module.install_perform_window)
+        self.assertEqual(list(signature.parameters), ["root"])
+        installer = inspect.getsource(self.module.install_perform_window)
+        self.assertIn('"windowCOMP", "window1"', installer)
+        self.assertIn('"OUT_DISPLAY_ACTIVE"', installer)
+        self.assertIn('("winop", "operator")', installer)
+        self.assertNotIn("setperform", installer.casefold())
+        self.assertNotIn("winopen", installer.casefold())
+        self.assertNotIn("project.save", installer)
+        self.assertNotIn("3080", installer)
+        self.assertNotIn("5090", installer)
 
     def test_venue_1080p_upgrade_is_bounded_and_complete(self) -> None:
         installer = inspect.getsource(self.module.install_venue_1080p_outputs)

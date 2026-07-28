@@ -5,7 +5,10 @@ The validator changes one public parameter at a time, verifies its managed
 target, and restores every original value in a ``finally`` block.  Worker
 start/stop pulses are intentionally tested by the external PowerShell release
 gate because waiting for a worker inside TouchDesigner's main thread would
-prevent bridge callbacks from cooking.
+prevent bridge callbacks from cooking.  When the optional combined-podcast
+``show_control`` exists at the stable adapter boundary, its complete public
+parameter inventory and safe value controls are checked without inspecting
+private StreamDiffusionTD internals.
 """
 
 from __future__ import print_function
@@ -86,6 +89,30 @@ STATUS_CONTROLS = (
     "Workerstatus",
 )
 
+ADAPTER_VALUE_CONTROLS = (
+    "Play",
+    "Audioenabled",
+    "Randomseeds",
+    "Crossfadesec",
+    "Audiosource",
+    "Colorenabled",
+    "Brightness",
+    "Contrast",
+    "Gamma",
+    "Blacklevel",
+    "Opacity",
+    "Hue",
+    "Saturation",
+    "Value",
+)
+
+ADAPTER_PULSE_CONTROLS = (
+    "Newseeds",
+    "Restart",
+    "Reload",
+    "Resetcolor",
+)
+
 
 def _operator(path, lookup=None):
     try:
@@ -161,12 +188,12 @@ def _assert_operator(node, path):
     return node
 
 
-def _snapshot(node, names):
+def _snapshot(node, names, label="SHOW_CONTROL"):
     values = {}
     for name in names:
         parameter = _parameter(node, name)
         if parameter is None:
-            raise RuntimeError("SHOW_CONTROL is missing %s" % name)
+            raise RuntimeError("%s is missing %s" % (label, name))
         values[name] = _value(node, name)
     return values
 
@@ -298,6 +325,13 @@ def validate(
         "switch_index": _parameter_state(audio_switch, "index"),
         "out_active": _parameter_state(audio_out, "active"),
     }
+    adapter_control_snapshot = {}
+    if adapter_show_control is not None:
+        adapter_control_snapshot = _snapshot(
+            adapter_show_control,
+            ADAPTER_VALUE_CONTROLS,
+            label="adapter show_control",
+        )
     checks = []
     started_ns = time.time_ns()
 
@@ -314,6 +348,57 @@ def validate(
                 "pulse_controls": len(PULSE_CONTROLS),
                 "status_controls": len(STATUS_CONTROLS),
             })
+
+        if adapter_show_control is None:
+            _record(
+                checks, "adapter_control_inventory",
+                "missing", "present")
+        else:
+            adapter_names = set(
+                _custom_parameter_names(adapter_show_control))
+            expected_adapter_names = set(
+                ADAPTER_VALUE_CONTROLS + ADAPTER_PULSE_CONTROLS)
+            missing_adapter_names = sorted(
+                expected_adapter_names - adapter_names)
+            _record(
+                checks, "adapter_control_inventory",
+                missing_adapter_names, [],
+                details={
+                    "path": adapter_show_control.path,
+                    "required_value_controls": len(ADAPTER_VALUE_CONTROLS),
+                    "required_pulse_controls": len(ADAPTER_PULSE_CONTROLS),
+                })
+            for name in ADAPTER_PULSE_CONTROLS:
+                _record(
+                    checks, "adapter_" + name + "_present",
+                    _parameter(adapter_show_control, name) is not None, True)
+            for name, test_value in (
+                    ("Randomseeds", not bool(_value(
+                        adapter_show_control, "Randomseeds", True))),
+                    ("Crossfadesec", 1.75),
+                    ("Colorenabled", not bool(_value(
+                        adapter_show_control, "Colorenabled", True))),
+                    ("Brightness", 1.12),
+                    ("Contrast", 1.18),
+                    ("Gamma", 1.14),
+                    ("Blacklevel", 0.03),
+                    ("Opacity", 0.91),
+                    ("Hue", 0.08),
+                    ("Saturation", 0.82),
+                    ("Value", 0.93)):
+                _set(adapter_show_control, name, test_value)
+                _record(
+                    checks, "adapter_" + name,
+                    _value(adapter_show_control, name), test_value)
+            _record(
+                checks, "adapter_Play_ui_test_required",
+                _parameter(adapter_show_control, "Play") is not None, True,
+                details={
+                    "reason": (
+                        "Play, Restart, Reload and New Seeds are exercised "
+                        "through the live panel so pausing the timeline cannot "
+                        "deadlock this synchronous validator.")
+                })
 
         for name in STATUS_CONTROLS:
             _record(
@@ -628,6 +713,8 @@ def validate(
                 _set(
                     adapter_show_control, "Audiosource",
                     audio_snapshot["show_source"])
+                for name, value in adapter_control_snapshot.items():
+                    _set(adapter_show_control, name, value)
             _restore_parameter_state(
                 audio_switch, "index", audio_snapshot["switch_index"])
             _restore_parameter_state(
@@ -647,31 +734,57 @@ def validate(
     restoration_failures = [
         name for name, item in restored.items()
         if item["status"] != "pass"]
+    adapter_restored = {}
+    for name, expected in adapter_control_snapshot.items():
+        actual = _value(adapter_show_control, name)
+        adapter_restored[name] = {
+            "status": "pass" if _near(actual, expected) else "fail",
+            "actual": actual,
+            "expected": expected,
+        }
+    adapter_restoration_failures = [
+        name for name, item in adapter_restored.items()
+        if item["status"] != "pass"]
+    all_restoration_failures = (
+        list(restoration_failures)
+        + ["adapter." + name for name in adapter_restoration_failures]
+    )
     result = {
         "version": REPORT_VERSION,
         "captured_ns": time.time_ns(),
         "duration_ms": round((time.time_ns() - started_ns) / 1_000_000.0, 3),
         "profile": expected_profile,
         "status": (
-            "pass" if not failures and not restoration_failures else "fail"),
+            "pass" if not failures and not all_restoration_failures else "fail"),
         "summary": {
             "pass": len(checks) - len(failures),
             "fail": len(failures),
-            "restoration_failures": len(restoration_failures),
+            "restoration_failures": len(all_restoration_failures),
         },
         "controls": {
             "value": list(VALUE_CONTROLS),
             "pulse": list(PULSE_CONTROLS),
             "status": list(STATUS_CONTROLS),
+            "adapter_value": list(ADAPTER_VALUE_CONTROLS),
+            "adapter_pulse": list(ADAPTER_PULSE_CONTROLS),
         },
         "checks": checks,
         "restored": restored,
-        "restoration_failures": restoration_failures,
+        "adapter_restored": adapter_restored,
+        "restoration_failures": all_restoration_failures,
         "worker_buttons": {
             "status": "external_validation_required",
             "reason": (
                 "Worker start/stop is verified by the PowerShell release gate "
                 "so TouchDesigner's main thread remains free to cook."),
+        },
+        "adapter_ui_buttons": {
+            "status": "external_validation_required",
+            "controls": [
+                "Play", "Newseeds", "Restart", "Reload", "Resetcolor"],
+            "reason": (
+                "Exercise timeline and scene pulses in the visible panel, "
+                "then verify two externally separated OUT_RGB samples."),
         },
     }
     if report_path:

@@ -94,6 +94,17 @@ class BootstrapRuntimeSourceTests(unittest.TestCase):
         self.assertIn('("3080ti_16gb", "4090", "5090", "custom")', self.source)
         self.assertIn('3080ti_16gb|4090|5090|custom', self.source)
 
+    def test_bootstrap_creates_the_canonical_perform_window(self) -> None:
+        self.assertIn(
+            '_ensure(install, "windowCOMP", "window1", report)',
+            self.source,
+        )
+        self.assertIn(
+            '"/project1/flexgpu/WORKING_PIPELINE/OUT_DISPLAY_ACTIVE"',
+            self.source,
+        )
+        self.assertIn('("winop", "operator")', self.source)
+
     def test_frame_lifecycle_and_heartbeat_are_driven_at_frame_start(self) -> None:
         for marker in (
             "def _validate_frame_state", "def _accept_explicit_frame",

@@ -914,6 +914,24 @@ failed worker cannot leave an empty `-NoExit` shell that blocks the next launch
 as "already running." The buttons never embed model weights, credentials, or
 private component paths.
 
+For combined podcast checkpoints, the validator also treats the nested public
+`STREAMDIFFUSION_ADAPTER/show_control` as a black-box integration boundary. It
+requires all 18 exposed values and pulses (playback, crossfade/random seed,
+exclusive audio source, and source-side color controls) while never reading
+private StreamDiffusionTD internals. Run the timeline/scene pulses from the
+visible panel and compare two stable `OUT_RGB` samples after a scene interval;
+an unchanged or effectively near-black frame is a failed visual check even when
+operator errors and output dimensions are clean.
+
+If F1 reports that
+`/project1/flexgpu/INSTALLATION_OUT/window1` is missing, run
+`runtime_pipeline.install_perform_window(op('/project1/flexgpu'))` in the
+TouchDesigner Textport. This bounded installer creates only the canonical
+Window COMP and points it at `WORKING_PIPELINE/OUT_DISPLAY_ACTIVE`; it does not
+select a monitor or save the TOE. Use Window Placement locally on each machine,
+then re-run `validate_project.validate(..., require_live_source=True)` twice,
+passing the first report's live-source digest to the second call.
+
 For the current 3080 installation, generated-image aspect is preserved before
 unprojection instead of forcing every source into a square. The MoGe-2 and
 Depth Anything geometry launchers both use `-TargetPixels 147456` and
