@@ -194,15 +194,32 @@ scale/pan controls, or worker Stop buttons, apply both bounded public upgrades:
 import importlib, runtime_pipeline as rp; importlib.reload(rp); flex = op('/project1/flexgpu'); rp.install_wall_view_controls(flex); rp.install_worker_stop_controls(flex); rp.install_color_adjustment_controls(flex)
 ```
 
+For a combined podcast TOE, install the optional hardware-neutral audio
+contract without importing any audio file or private component:
+
+```python
+import importlib, runtime_pipeline as rp; importlib.reload(rp); rp.install_audio_source_controls(op('/project1/flexgpu'))
+```
+
+This adds `Audio Enabled` and `Audio Source` to the public `SHOW_CONTROL` and
+mirrors them to `STREAMDIFFUSION_ADAPTER`. If the local integration supplies
+`show_control`, `audiosource_switch`, and `audio_out`, the selector routes
+`voices_only_audio` or `soundscape_audio` exclusively and keeps `audio_out`
+bound to the adapter's enabled state. The installer never creates tracks,
+stores media paths, inspects private StreamDiffusionTD internals, or saves the
+TOE.
+
 On the 3080, run this only after opening the latest 3080-tagged working TOE.
 Keep `Qualityprofile` at `3080ti_16gb`, confirm `Gpuindex`, pulse `Applyall`,
 and save to a new 3080-tagged checkpoint after validation. Never use the
 5090-tagged TOE or `config/local-5090*.json` as the 3080 save/config target.
 
-Open `/project1/flexgpu/WORKING_PIPELINE/SHOW_CONTROL`. Its four parameter pages
+Open `/project1/flexgpu/WORKING_PIPELINE/SHOW_CONTROL`. Its five parameter pages
 provide:
 
 - MoGe-2 or Depth Anything generated geometry selection;
+- optional enabled/disabled audio plus exclusive Human Voices Only or
+  Soundscape Only routing;
 - single, panoramic-wrap, or artistic display selection;
 - completion mode and fog density;
 - interaction strength and low-latency smoothing;
@@ -238,7 +255,7 @@ defaults are neutral, and the grade is weighted by actual point coverage so
 disocclusion fog/background remains unchanged. Installing the tab therefore
 does not intentionally change an accepted visual.
 
-To verify all 53 public controls after installing an upgrade, run this inside
+To verify all 55 public controls after installing an upgrade, run this inside
 TouchDesigner. It changes one control at a time, checks the corresponding
 managed operator or shader, and restores every original value in a `finally`
 block:

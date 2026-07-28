@@ -1124,6 +1124,33 @@ def _apply_wall_view_control(name):
     _set(_pipeline().op('POINT_RENDER'), parameter, value)
     _set(_controls(), parameter, value)
 
+def _apply_audio_controls():
+    controls = _controls()
+    pipeline = _pipeline()
+    adapter = pipeline.op('SOURCES/STREAMDIFFUSION_ADAPTER')
+    enabled = bool(_value('Audioenabled', False))
+    source = str(_value('Audiosource', 'voices')).strip().lower()
+    if source not in ('voices', 'soundscape'):
+        source = 'voices'
+    _set(controls, 'Audioenabled', enabled)
+    _set(controls, 'Audiosource', source)
+    _set(adapter, 'Audioenabled', enabled)
+    _set(adapter, 'Audiosource', source)
+    if adapter is None:
+        return
+    adapter_control = adapter.op('show_control')
+    _set(adapter_control, 'Audioenabled', enabled)
+    _set(adapter_control, 'Audiosource', source)
+    audio_switch = adapter.op('audiosource_switch')
+    _set(audio_switch, 'index', 1 if source == 'soundscape' else 0)
+    audio_out = adapter.op('audio_out')
+    if audio_out is not None:
+        try:
+            audio_out.par.active.expr = 'parent().par.Audioenabled'
+            audio_out.par.active.mode = ParMode.EXPRESSION
+        except Exception:
+            _set(audio_out, 'active', enabled)
+
 def _workspace_root():
     configured = str(_value('Workspaceroot', '') or '').strip()
     candidates = []
@@ -1411,6 +1438,8 @@ def apply_parameter(name):
              'Geometrysource', provider)
         _switch_runtime_geometry_contract(provider)
         _apply_point_cloud_scale()
+    elif key in ('audioenabled', 'audiosource'):
+        _apply_audio_controls()
     elif key == 'displaymode':
         _set(pipeline, 'Displaymode', _value('Displaymode', 'single'))
     elif key == 'completionmode':
@@ -1497,7 +1526,8 @@ def apply_parameter(name):
 
 def apply_all():
     for name in (
-        'Geometryprovider', 'Displaymode', 'Completionmode', 'Fogdensity',
+        'Geometryprovider', 'Audioenabled', 'Audiosource',
+        'Displaymode', 'Completionmode', 'Fogdensity',
         'Brightness', 'Contrast', 'Saturation', 'Gamma',
         'Hueshiftdegrees', 'Temperature', 'Tint',
         'Interactionstrength', 'Interactionsmoothing', 'Wrapyawdegrees',
@@ -1915,6 +1945,31 @@ def _custom(
         return parameter
     except Exception:
         return None
+
+
+def _ensure_audio_adapter_contract(adapter):
+    """Expose optional audio controls without owning tracks or private nodes."""
+
+    if adapter is None:
+        return None, None
+    page = _page(adapter, "Optional Audio")
+    enabled = _custom(
+        adapter, page, "Toggle", "Audioenabled",
+        bool(_value(adapter, "Audioenabled", False)),
+        label="Audio Enabled")
+    source = _custom(
+        adapter, page, "Menu", "Audiosource",
+        str(_value(adapter, "Audiosource", "voices")),
+        ("voices", "soundscape"), label="Audio Source")
+    if source is not None:
+        try:
+            source.menuLabels = [
+                "Human Voices Only",
+                "Soundscape Only",
+            ]
+        except Exception:
+            pass
+    return enabled, source
 
 
 def _in_top(parent, name, index, report):
@@ -2574,6 +2629,7 @@ def _build_sources(parent, report):
             ("moge2", "depth_anything"), label="Generated Geometry Source")
     _custom(adapter, adapter_page, "Str", "RGBContract", TOP_CONTRACTS["RGB"])
     _custom(adapter, adapter_page, "Str", "DepthContract", TOP_CONTRACTS["DEPTH"])
+    _ensure_audio_adapter_contract(adapter)
     tox_rgb = _ensure(adapter, "constantTOP", "REPLACE_WITH_STREAMDIFFUSION_RGB", report)
     _set_resolution(tox_rgb, 512, 512)
     _set(tox_rgb, ("colorr", "color1r"), 0.04)
@@ -2610,6 +2666,12 @@ def _build_sources(parent, report):
         ["OUT_MASK", "R valid mask normalized 0..1",
          "GENERATED_GEOMETRY_MASK_ROUTE"],
     ], report)
+    _table(adapter, "OPTIONAL_AUDIO_CONTRACT", [
+        ["control", "public contract"],
+        ["Audioenabled", "mirrors optional show_control/Audioenabled"],
+        ["Audiosource", "voices or soundscape; drives audiosource_switch"],
+        ["audio_out", "one exclusive output downstream of audiosource_switch"],
+    ], report)
     _text(adapter, "README_FIRST", "STREAMDIFFUSIONTD ADAPTER BOUNDARY\n\n"
           "Demo mode works without this branch. Later place StreamDiffusionTD.tox here, "
           "wire its image to OUT_RGB, depth estimate to OUT_DEPTH, and optional "
@@ -2617,6 +2679,9 @@ def _build_sources(parent, report):
           "model, prompt generation, calibration, or producer session changes. "
           "If the TOX emits only RGB, choose MoGe-2 or Depth Anything on "
           "Geometry Source; each bridge returns synchronized generated RGB and depth. "
+          "Optional podcast audio remains local: Audio Enabled and Audio Source "
+          "mirror a public show_control and an exclusive audiosource_switch when "
+          "those operators exist, but no track path or audio asset is embedded. "
           "Do not modify downstream POSITION/COLOR contracts.", report)
 
     rgb_switch = _ensure(comp, "switchTOP", "RGB_SOURCE", report)
@@ -3206,6 +3271,18 @@ def _build_persistence(parent, report):
     _out_top(comp, "OUT_COLOR", persistent_color, 1, report)
     _out_top(comp, "OUT_INTERACTION", interaction, 2, report)
     _out_top(comp, "OUT_TEMPORAL_STATE", temporal_state, 3, report)
+    # Newframe is intentionally a one-cook pulse.  Keep both lifecycle
+    # branches consuming it even when no wall/window output currently demands
+    # a cook, otherwise an idle project can miss accepted frames and age its
+    # carried point cloud to zero.
+    for name, source in (
+            ("POSITION_LIFECYCLE_KEEPALIVE", persistent),
+            ("COLOR_LIFECYCLE_KEEPALIVE", persistent_color)):
+        keepalive = _ensure(comp, "cacheTOP", name, report)
+        _connect(source, keepalive, report=report, replace=True)
+        _set(keepalive, "cachesize", 1)
+        _set(keepalive, "step", 1)
+        _set(keepalive, "alwayscook", True)
     _text(comp, "RESET_NOTE", "FRAME_CONTROL supplies one-cook new-frame, source-valid, and "
           "bounded dt semantics, so a held source texture decays/ages without being "
           "reabsorbed. POSITION_HISTORY, COLOR_HISTORY, and STATE_HISTORY are reset "
@@ -4085,6 +4162,7 @@ def _build_show_control(pipeline, report):
         reference_wall, ("resolutionw", "resw"), 1920))
     wall_height = int(_value(
         reference_wall, ("resolutionh", "resh"), 1080))
+    _ensure_audio_adapter_contract(adapter)
 
     show_page = _page(control, "Show Controls")
     _custom(
@@ -4197,6 +4275,24 @@ def _build_show_control(pipeline, report):
     _set(control, "Effectivepointcloudscale", active_scale)
     _custom(control, show_page, "Pulse", "Applyall", False,
             label="Apply All Show Controls")
+
+    audio_page = _page(control, "Audio")
+    _custom(
+        control, audio_page, "Toggle", "Audioenabled",
+        bool(_value(adapter, "Audioenabled", False)),
+        label="Audio Enabled")
+    audio_source = _custom(
+        control, audio_page, "Menu", "Audiosource",
+        str(_value(adapter, "Audiosource", "voices")),
+        ("voices", "soundscape"), label="Audio Source")
+    if audio_source is not None:
+        try:
+            audio_source.menuLabels = [
+                "Human Voices Only",
+                "Soundscape Only",
+            ]
+        except Exception:
+            pass
 
     color_page = _page(control, "Color Adjustment")
     _custom(
@@ -4316,6 +4412,7 @@ def _build_show_control(pipeline, report):
     _table(control, "CONTROL_TARGETS", [
         ["control", "managed target"],
         ["Geometry Provider", "STREAMDIFFUSION_ADAPTER/Geometrysource"],
+        ["Audio", "optional adapter enable + exclusive voices/soundscape route"],
         ["Display Mode", "WORKING_PIPELINE/Displaymode"],
         ["Completion / Fog", "COMPLETION + view-grade shader constants"],
         ["Color Adjustment", "single, six wall views + stereo grade shaders"],
@@ -4342,6 +4439,9 @@ def _build_show_control(pipeline, report):
         "restores them. Worker buttons open a "
         "visible PowerShell console. Use the matching Stop button before "
         "starting the other provider; Ctrl+C is not required. "
+        "The Audio tab mirrors only the optional public adapter contract. "
+        "It selects Human Voices Only or Soundscape Only through one exclusive "
+        "audiosource_switch and never embeds audio files or private paths. "
         "Panoramic Coverage adds procedural atmosphere only in empty wrap views; "
         "it never stretches the source image. Artistic Surface FOV, Side Yaw, "
         "Side Offset Direction, and Side Offset expose the fixed sculptural "
@@ -4722,6 +4822,43 @@ def install_show_control_upgrade(root=None):
         pass
     print("[FlexGPU runtime] show-control upgrade ready: %s "
           "(%d created, %d reused, %d warnings)" %
+          (control.path, len(report.created), len(report.reused),
+           len(report.warnings)))
+    return control
+
+
+def install_audio_source_controls(root=None):
+    """Add optional public audio controls without importing local media.
+
+    The bounded upgrade adds only the hardware-neutral adapter parameters and
+    refreshes ``SHOW_CONTROL`` plus its callback DAT. It never creates audio
+    tracks, embeds machine paths, inspects private components, or saves the TOE.
+    """
+
+    global LAST_REPORT
+    report = BuildReport()
+    LAST_REPORT = report
+    if root is None:
+        root = _op(ROOT_PATH)
+    elif isinstance(root, str):
+        root = _op(root)
+    if root is None:
+        raise RuntimeError("FlexGPU root %s does not exist" % ROOT_PATH)
+    pipeline = root.op(PIPELINE_NAME)
+    if pipeline is None:
+        raise RuntimeError("WORKING_PIPELINE is missing; build it first")
+    adapter = pipeline.op("SOURCES/STREAMDIFFUSION_ADAPTER")
+    if adapter is None:
+        raise RuntimeError("STREAMDIFFUSION_ADAPTER is missing")
+
+    _ensure_audio_adapter_contract(adapter)
+    control = _build_show_control(pipeline, report)
+    try:
+        control.store("audio_source_controls_report", report.as_dict())
+    except Exception:
+        pass
+    print("[FlexGPU runtime] optional audio-source controls ready: %s "
+          "(%d created, %d reused, %d warnings); TOE remains unsaved" %
           (control.path, len(report.created), len(report.reused),
            len(report.warnings)))
     return control

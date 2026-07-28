@@ -660,6 +660,14 @@ assert normalized({src_path!r}) in {{
         self.assertIn('"TEMPORAL_OBSERVATION"', self.source)
         self.assertIn('"ADVECT_HISTORY"', self.source)
 
+    def test_temporal_lifecycle_keeps_cooking_without_active_windows(self) -> None:
+        persistence = inspect.getsource(self.module._build_persistence)
+        self.assertIn('"POSITION_LIFECYCLE_KEEPALIVE"', persistence)
+        self.assertIn('"COLOR_LIFECYCLE_KEEPALIVE"', persistence)
+        self.assertIn('_ensure(comp, "cacheTOP", name, report)', persistence)
+        self.assertIn('_set(keepalive, "cachesize", 1)', persistence)
+        self.assertIn('_set(keepalive, "alwayscook", True)', persistence)
+
     def test_completion_is_applied_in_each_output_view(self) -> None:
         installation = self.module.SHADERS["installation_grade"]
         view = self.module.SHADERS["view_completion"]
@@ -840,6 +848,34 @@ assert normalized({src_path!r}) in {{
             self.module.install_output_framing_controls)
         self.assertIn("_apply_point_cloud_camera_framing(render)", installer)
         self.assertIn("_build_show_control(pipeline, report)", installer)
+
+    def test_show_control_exposes_optional_exclusive_audio_routing(self) -> None:
+        for marker in (
+                "Audioenabled",
+                "Audiosource",
+                "Human Voices Only",
+                "Soundscape Only",
+                "audiosource_switch",
+                "audio_out",
+        ):
+            self.assertIn(marker, self.source)
+        self.assertIn("def _apply_audio_controls():", self.source)
+        self.assertIn(
+            "audio_out.par.active.expr = 'parent().par.Audioenabled'",
+            self.module.SHOW_CONTROL_CALLBACKS,
+        )
+        self.assertIn(
+            "1 if source == 'soundscape' else 0",
+            self.module.SHOW_CONTROL_CALLBACKS,
+        )
+        installer = inspect.getsource(
+            self.module.install_audio_source_controls)
+        self.assertIn("_ensure_audio_adapter_contract(adapter)", installer)
+        self.assertIn("_build_show_control(pipeline, report)", installer)
+        self.assertNotIn("destroy", installer)
+        self.assertNotIn(".save", installer.casefold())
+        self.assertNotIn("build(", installer)
+        self.assertNotIn(".mp3", installer.casefold())
 
     def test_worker_stop_upgrade_is_bounded_and_does_not_save(self) -> None:
         signature = inspect.signature(self.module.install_worker_stop_controls)

@@ -24,6 +24,8 @@ REPORT_VERSION = "flexgpu-show-controls-validation/v1"
 
 VALUE_CONTROLS = (
     "Geometryprovider",
+    "Audioenabled",
+    "Audiosource",
     "Displaymode",
     "Completionmode",
     "Fogdensity",
@@ -169,6 +171,32 @@ def _snapshot(node, names):
     return values
 
 
+def _parameter_state(node, name):
+    parameter = _parameter(node, name)
+    if parameter is None:
+        return None
+    state = {"value": _value(node, name)}
+    for attribute in ("expr", "mode"):
+        try:
+            state[attribute] = getattr(parameter, attribute)
+        except Exception:
+            pass
+    return state
+
+
+def _restore_parameter_state(node, name, state):
+    if state is None:
+        return
+    parameter = _parameter(node, name)
+    if parameter is None:
+        return
+    parameter.val = state["value"]
+    if "expr" in state:
+        parameter.expr = state["expr"]
+    if "mode" in state:
+        parameter.mode = state["mode"]
+
+
 def _apply(callbacks, control, name, value):
     _set(control, name, value)
     callbacks.apply_parameter(name)
@@ -250,12 +278,25 @@ def validate(
     depth_bridge = _assert_operator(
         adapter.op("DEPTH_ANYTHING_GEOMETRY_BRIDGE"),
         adapter.path + "/DEPTH_ANYTHING_GEOMETRY_BRIDGE")
+    adapter_show_control = adapter.op("show_control")
+    audio_switch = adapter.op("audiosource_switch")
+    audio_out = adapter.op("audio_out")
 
     snapshot = _snapshot(control, VALUE_CONTROLS)
     bridge_snapshot = {
         "moge_enabled": _value(moge_bridge, "Enabled", False),
         "depth_enabled": _value(depth_bridge, "Enabled", False),
         "adapter_geometry": _value(adapter, "Geometrysource", "moge2"),
+    }
+    audio_snapshot = {
+        "adapter_enabled": _value(adapter, "Audioenabled", False),
+        "adapter_source": _value(adapter, "Audiosource", "voices"),
+        "show_enabled": _value(
+            adapter_show_control, "Audioenabled", None),
+        "show_source": _value(
+            adapter_show_control, "Audiosource", None),
+        "switch_index": _parameter_state(audio_switch, "index"),
+        "out_active": _parameter_state(audio_out, "active"),
     }
     checks = []
     started_ns = time.time_ns()
@@ -291,6 +332,40 @@ def validate(
         _record(
             checks, "Geometryprovider_moge_bridge",
             bool(_value(moge_bridge, "Enabled", False)), True)
+
+        _apply(callbacks, control, "Audioenabled", False)
+        _record(
+            checks, "Audioenabled_adapter",
+            bool(_value(adapter, "Audioenabled", True)), False)
+        if adapter_show_control is not None:
+            _record(
+                checks, "Audioenabled_adapter_show_control",
+                bool(_value(
+                    adapter_show_control, "Audioenabled", True)), False)
+        if audio_out is not None:
+            _record(
+                checks, "Audioenabled_audio_out",
+                bool(_value(audio_out, "active", True)), False)
+
+        _apply(callbacks, control, "Audiosource", "soundscape")
+        _record(
+            checks, "Audiosource_adapter",
+            _value(adapter, "Audiosource"), "soundscape")
+        if adapter_show_control is not None:
+            _record(
+                checks, "Audiosource_adapter_show_control",
+                _value(adapter_show_control, "Audiosource"), "soundscape")
+        if audio_switch is not None:
+            _record(
+                checks, "Audiosource_exclusive_switch_index",
+                int(_value(audio_switch, "index", -1)), 1)
+            try:
+                selected_audio = audio_switch.inputs[1].name
+            except Exception:
+                selected_audio = None
+            _record(
+                checks, "Audiosource_exclusive_switch_input",
+                selected_audio, "soundscape_audio")
 
         _set_and_check(
             checks, callbacks, control, "Displaymode",
@@ -540,6 +615,23 @@ def validate(
             _set(
                 adapter, "Geometrysource",
                 bridge_snapshot["adapter_geometry"])
+            _set(
+                adapter, "Audioenabled",
+                audio_snapshot["adapter_enabled"])
+            _set(
+                adapter, "Audiosource",
+                audio_snapshot["adapter_source"])
+            if adapter_show_control is not None:
+                _set(
+                    adapter_show_control, "Audioenabled",
+                    audio_snapshot["show_enabled"])
+                _set(
+                    adapter_show_control, "Audiosource",
+                    audio_snapshot["show_source"])
+            _restore_parameter_state(
+                audio_switch, "index", audio_snapshot["switch_index"])
+            _restore_parameter_state(
+                audio_out, "active", audio_snapshot["out_active"])
         except Exception:
             pass
 

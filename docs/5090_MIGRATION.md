@@ -20,7 +20,7 @@ Git is not a backup channel for the ignored working TOE or private assets. Keep
 at least two private copies of the accepted TOE and record its hash:
 
 ```powershell
-Get-FileHash .\projects\FlexShow-moge2-embody-local-5090.30.toe -Algorithm SHA256
+Get-FileHash .\projects\FlexShow-moge2-embody-podcast-local-5090.49.toe -Algorithm SHA256
 ```
 
 After copying it to the new PC, run the same command and compare the complete
@@ -42,10 +42,12 @@ UUIDs, absolute project paths, `.flexgpu` manifests, or a saved working TOE
 back into the other machine's filename. The worker launchers require an
 explicit profile and reject a real GPU/profile mismatch by default.
 
-The known local checkpoints are `.27` for the 3080 and `.30` for the 5090.
+The known local checkpoints are `.27` for the 3080 and `.49` for the 5090.
 These numbers are machine-local histories, not a cross-machine upgrade order.
 Never point `config/local-5090.json` at the 3080 `.27` file or use the 5090
-`.30` file as a 3080 save target.
+`.49` file as a 3080 save target. The `.49` name includes `podcast` because
+that local checkpoint combines the two networks; the audio tracks, private
+components, and TOE remain outside Git.
 
 ## Destination prerequisites
 
@@ -90,7 +92,7 @@ run:
   -DisplayProfile venue_1080p `
   -DisplayMode panoramic_wrap `
   -GeometryProvider moge2 `
-  -Project .\projects\FlexShow-moge2-embody-local-5090.30.toe `
+  -Project .\projects\FlexShow-moge2-embody-podcast-local-5090.49.toe `
   -Output .\config\local-5090.json
 ```
 
