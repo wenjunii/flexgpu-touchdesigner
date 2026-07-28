@@ -255,10 +255,12 @@ defaults are neutral, and the grade is weighted by actual point coverage so
 disocclusion fog/background remains unchanged. Installing the tab therefore
 does not intentionally change an accepted visual.
 
-To verify all 55 public controls after installing an upgrade, run this inside
-TouchDesigner. It changes one control at a time, checks the corresponding
+To verify all 55 FlexGPU public controls after installing an upgrade, run this
+inside TouchDesigner. It changes one control at a time, checks the corresponding
 managed operator or shader, and restores every original value in a `finally`
-block:
+block. In a combined podcast TOE it also inventories all 18 public adapter
+controls and safely exercises the adapter value controls without reading
+private StreamDiffusionTD internals:
 
 ```python
 from pathlib import Path
@@ -274,12 +276,55 @@ result = vsc.validate(
 print(result['status'], result['summary'])
 ```
 
-The live validator covers every slider, menu, toggle, status field, and Apply
-button. Worker Start/Stop buttons are checked externally so TouchDesigner's
-main thread remains free to cook: start each provider once, verify the matching
-checkout-scoped worker, confirm a duplicate start is refused, stop it with its
-matching button, then repeat for the other provider. Never run the two
-generated-geometry workers together on the 3080.
+The live validator covers every FlexGPU slider, menu, toggle, status field, and
+Apply button, plus the safe combined-podcast adapter values. Timeline and scene
+pulses (`Play`, `New Random Seeds`, `Restart`, `Reload Scene JSON`, and adapter
+`Reset Color`) are checked through the visible panel; compare two
+`OUT_RGB` samples separated by at least one scene update. Worker Start/Stop
+buttons are checked externally so TouchDesigner's main thread remains free to
+cook: start each provider once, verify the matching checkout-scoped worker,
+confirm a duplicate start is refused, stop it with its matching button, then
+repeat for the other provider. Never run the two generated-geometry workers
+together on the 3080.
+
+Older combined TOEs can also retain a Window Placement reference to a deleted
+`/project1/flexgpu/INSTALLATION_OUT/window1`. Install the bounded,
+hardware-neutral Perform Mode target before pressing F1:
+
+```python
+import importlib, runtime_pipeline as rp
+importlib.reload(rp)
+rp.install_perform_window(op('/project1/flexgpu'))
+```
+
+The installer creates or repairs only `INSTALLATION_OUT/window1`, points its
+Window Operator at `WORKING_PIPELINE/OUT_DISPLAY_ACTIVE`, and does not open a
+window, choose a monitor, inspect a private component, or save the TOE. Keep
+monitor placement local to each machine.
+
+For a licensed live source, enable the stricter visual gate and retain the
+first digest. Run it again after the scene should have advanced, passing the
+first digest as `previous_live_source_digest`:
+
+```python
+import importlib, validate_project as vp
+importlib.reload(vp)
+first = vp.validate(
+    expected_experience='installation',
+    require_live_source=True)
+print(first['status'], first['live_source'])
+
+# Run this second call later, after a visible prompt/scene update.
+second = vp.validate(
+    expected_experience='installation',
+    require_live_source=True,
+    previous_live_source_digest=first['live_source']['digest'])
+print(second['status'], second['live_source'])
+```
+
+The strict gate rejects blank/constant, effectively near-black, non-finite, or
+unchanged adapter frames. It is opt-in so the public synthetic demo and
+unlicensed/offline development remain valid.
 
 Each worker button opens the existing public wrapper in a separate visible
 PowerShell console and selects its provider first. Use `Stop MoGe-2 Worker` or

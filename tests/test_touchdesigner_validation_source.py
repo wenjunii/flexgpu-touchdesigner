@@ -40,11 +40,17 @@ class TouchDesignerValidationSourceTests(unittest.TestCase):
             "/project1/flexgpu/WORKING_PIPELINE/TELEMETRY/LIVE_HEALTH",
             module.REQUIRED_OPERATORS,
         )
+        self.assertIn(
+            "/project1/flexgpu/INSTALLATION_OUT/window1",
+            module.REQUIRED_OPERATORS,
+        )
         source = MODULE_PATH.read_text(encoding="utf-8")
         self.assertIn('"managed_shader_compilation"', source)
         self.assertIn('"managed_shader_cook"', source)
         self.assertIn('"active_output_dimensions"', source)
         self.assertIn('"active_visual_signal"', source)
+        self.assertIn('"perform_window_contract"', source)
+        self.assertIn('"live_source_visual_and_change"', source)
         self.assertIn('"sensor_disabled_contract"', source)
         self.assertIn('mode.val = "disabled"', source)
         self.assertIn('mode.val = previous_mode', source)
@@ -53,6 +59,9 @@ class TouchDesignerValidationSourceTests(unittest.TestCase):
         self.assertIn('"OUT_INTERACTION_DEBUG"', source)
         self.assertIn('method(delayed=False)', source)
         self.assertIn('"has_signal": maximum > 1e-5 and span > 1e-6', source)
+        self.assertIn('"has_visible_content"', source)
+        self.assertIn('"sample_sha256"', source)
+        self.assertIn("previous_live_source_digest", source)
         self.assertIn("os.unlink(output)", source)
         self.assertIn("os.path.getsize(output)", source)
         self.assertIn("METRIC_RENDER_LEFT_EYE", source)
@@ -196,6 +205,30 @@ class TouchDesignerValidationSourceTests(unittest.TestCase):
             ],
             ("text",),
         )
+        self.assertEqual(
+            module.EXPECTED_OPERATOR_TYPES[
+                "/project1/flexgpu/INSTALLATION_OUT/window1"
+            ],
+            ("window",),
+        )
+
+    def test_visible_source_gate_rejects_near_black_samples(self) -> None:
+        module = load_module()
+
+        class FakeTop:
+            @staticmethod
+            def numpyArray(delayed=False):
+                import numpy
+
+                result = numpy.zeros((16, 16, 4), dtype=numpy.float32)
+                result[..., 0] = 0.058
+                result[..., 3] = 1.0
+                return result
+
+        stats, _sample = module._signal_sample(FakeTop())
+        self.assertTrue(stats["has_signal"])
+        self.assertFalse(stats["has_visible_content"])
+        self.assertEqual(len(stats["sample_sha256"]), 64)
 
     def test_shader_error_recognition_requires_both_compile_and_error(self) -> None:
         module = load_module()

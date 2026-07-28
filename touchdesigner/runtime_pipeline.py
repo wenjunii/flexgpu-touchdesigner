@@ -1204,7 +1204,7 @@ def _launch_worker(provider):
     apply_parameter('Geometryprovider')
     # Keep the console visible while the foreground worker is alive, but let
     # PowerShell exit with the worker. ``-NoExit`` leaves an empty wrapper
-    # process behind after Ctrl+C or a worker failure, causing the duplicate
+    # process behind after a console interrupt or worker failure, causing the duplicate
     # launch guard above to report a worker that no longer exists.
     args = [
         'powershell.exe', '-NoProfile',
@@ -1220,7 +1220,7 @@ def _launch_worker(provider):
         _set(controls, 'Workspaceroot', root)
         _set(controls, 'Workerpid', int(process.pid))
         _set(controls, 'Workerstatus',
-             '%s worker console opened (PID %s); Ctrl+C stops it' %
+             '%s worker console opened (PID %s); use its Stop button' %
              (selected, process.pid))
         return True
     except Exception as exc:
@@ -4451,6 +4451,61 @@ def _build_show_control(pipeline, report):
         "every displayed value reapplied.",
         report)
     return control
+
+
+def install_perform_window(root=None):
+    """Create the public Perform Mode window for the active installation TOP.
+
+    The bounded upgrade owns only ``INSTALLATION_OUT/window1``.  It does not
+    change monitor placement, open a window, enter Perform Mode, inspect a
+    private adapter, or save the current TOE.  The exact ``window1`` name
+    repairs projects whose Window Placement setting already references the
+    canonical FlexGPU path.
+    """
+
+    global LAST_REPORT
+    report = BuildReport()
+    LAST_REPORT = report
+    if root is None:
+        root = _op(ROOT_PATH)
+    elif isinstance(root, str):
+        root = _op(root)
+    if root is None:
+        raise RuntimeError("FlexGPU root %s does not exist" % ROOT_PATH)
+
+    pipeline = root.op(PIPELINE_NAME)
+    if pipeline is None:
+        raise RuntimeError("WORKING_PIPELINE is missing; build it first")
+    output = pipeline.op("OUT_DISPLAY_ACTIVE")
+    if output is None:
+        raise RuntimeError("WORKING_PIPELINE/OUT_DISPLAY_ACTIVE is missing")
+
+    boundary = _ensure(root, "baseCOMP", "INSTALLATION_OUT", report)
+    window = _ensure(boundary, "windowCOMP", "window1", report)
+    if not _set(window, ("winop", "operator"), output.path):
+        raise RuntimeError(
+            "%s has no writable Window Operator parameter" % window.path)
+    _set(window, "title", "FlexGPU Installation Output")
+    _set(window, "interact", False)
+    _set(window, "includedialog", True)
+    _style(
+        window, 180, 20, (0.18, 0.50, 0.28),
+        "Perform Mode: WORKING_PIPELINE/OUT_DISPLAY_ACTIVE", 240, 100)
+    _text(
+        boundary, "README",
+        "Projection/LED output boundary. window1 displays "
+        "WORKING_PIPELINE/OUT_DISPLAY_ACTIVE and is the canonical Perform "
+        "Mode target. Monitor selection and venue placement stay local.",
+        report)
+    try:
+        boundary.store("perform_window_install_report", report.as_dict())
+    except Exception:
+        pass
+    print("[FlexGPU runtime] Perform window ready: %s "
+          "(%d created, %d reused, %d warnings)" %
+          (window.path, len(report.created), len(report.reused),
+           len(report.warnings)))
+    return window
 
 
 def _managed_color_grade_shader_dats(pipeline):

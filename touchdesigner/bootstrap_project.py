@@ -4193,10 +4193,20 @@ def _build_shell(flexgpu, config, config_path, report):
     _style(install, 570, 350, colors["output"], "Projection/LED render shell - 60 Hz target", 250, 115)
     _add_enabled(install, True)
     _custom(install, _page(install, "FlexGPU"), "Int", "Targetfps", int(defaults["installation_fps"]))
-    _text(install, "README", "Replace preview with projector/LED camera, render, mapping and Window COMP.\nConsumes the shared WorldBus; it does not own a second simulation.", report)
+    _text(install, "README", "Projection/LED output boundary. window1 displays WORKING_PIPELINE/OUT_DISPLAY_ACTIVE and is the canonical Perform Mode target.\nMonitor selection and venue placement stay local; this boundary does not own a second simulation.", report)
     iin = _ensure(install, "inTOP", "world_in", report, optional=True)
     ipreview = _ensure(install, "nullTOP", "OUT_INSTALLATION_PREVIEW", report, optional=True)
     _connect(iin, ipreview, report=report)
+    perform_window = _ensure(install, "windowCOMP", "window1", report)
+    _style(perform_window, 180, 20, colors["output"], "Perform Mode: WORKING_PIPELINE/OUT_DISPLAY_ACTIVE", 240, 100)
+    _set_par(
+        perform_window,
+        ("winop", "operator"),
+        "/project1/flexgpu/WORKING_PIPELINE/OUT_DISPLAY_ACTIVE",
+    )
+    _set_par(perform_window, "title", "FlexGPU Installation Output")
+    _set_par(perform_window, "interact", False)
+    _set_par(perform_window, "includedialog", True)
 
     vr = _ensure(flexgpu, "baseCOMP", "VR_OUT", report)
     _style(vr, 570, 100, colors["output"], "PCVR stereo render shell - 72 Hz safe starting target", 250, 115)

@@ -163,18 +163,59 @@ weights, logs, and all `config/local-*.json` files remain intentionally
 untracked. This record is a short functional migration check, not the required
 sustained thermal, projector, interaction, or venue acceptance.
 
+The current combined 5090 working checkpoint is `.49`; it does not replace the
+3080 history. During the 2026-07-28 audit, all 55 FlexGPU Show Control values
+restored cleanly, but two issues were correctly treated as failures rather than
+accepted output: the stable adapter RGB was an unchanged near-black frame, and
+F1 referenced a missing
+`/project1/flexgpu/INSTALLATION_OUT/window1`. The public source now includes a
+bounded `install_perform_window()` repair plus opt-in live-source
+visibility/change checks. Apply the repair only to the opened 5090 checkpoint,
+then save a new 5090-numbered checkpoint after visual acceptance; do not save it
+over `.49` or into a 3080 filename.
+
+In the TouchDesigner Textport:
+
+```python
+from pathlib import Path
+import importlib, sys
+root = Path(r'C:\path\to\flexgpu-touchdesigner')
+sys.path.insert(0, str(root / 'touchdesigner'))
+
+import runtime_pipeline as rp
+importlib.reload(rp)
+rp.install_perform_window(op('/project1/flexgpu'))
+
+import validate_project as vp
+importlib.reload(vp)
+first = vp.validate(
+    expected_build='1.2.1',
+    expected_experience='installation',
+    require_live_source=True,
+    report_path=root / 'runtime' / 'validation' / '5090-live-first.json')
+print(first['status'], first['live_source'])
+```
+
+After the visible prompt/scene changes, run a second audit using
+`previous_live_source_digest=first['live_source']['digest']`. The second call
+must show a different digest and visible-range content. Stop StreamDiffusionTD
+and both generated-geometry workers after the check.
+
 ## Acceptance order
 
 1. Recursive TouchDesigner errors and warnings.
-2. Selected geometry bridge freshness and increasing source frame ID.
-3. RGB orientation and synchronized finite position/depth.
-4. `OUT_INSTALLATION` at 1920x1080.
-5. Panoramic left/center/right, each at 1920x1080.
-6. Artistic left/center/right, each at 1920x1080.
-7. Stereo development preview; this is not completed VR.
-8. Provider switch MoGe-2 -> Depth Anything -> MoGe-2 with one worker at a time.
-9. Performance and VRAM at the 5090 quality preset.
-10. A sustained thermal soak, followed by projector warp/blend and physical
+2. Canonical Perform Mode window exists and F1 opens
+   `WORKING_PIPELINE/OUT_DISPLAY_ACTIVE`.
+3. Licensed adapter RGB is visible and changes across two separated samples.
+4. Selected geometry bridge freshness and increasing source frame ID.
+5. RGB orientation and synchronized finite position/depth.
+6. `OUT_INSTALLATION` at 1920x1080.
+7. Panoramic left/center/right, each at 1920x1080.
+8. Artistic left/center/right, each at 1920x1080.
+9. Stereo development preview; this is not completed VR.
+10. Provider switch MoGe-2 -> Depth Anything -> MoGe-2 with one worker at a time.
+11. Performance and VRAM at the 5090 quality preset.
+12. A sustained thermal soak, followed by projector warp/blend and physical
     sensor calibration at the venue.
 
 Raise StreamDiffusion, generated-geometry resolution, and point budget in
