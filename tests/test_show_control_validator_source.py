@@ -31,7 +31,7 @@ class ShowControlValidatorSourceTests(unittest.TestCase):
 
     def test_validator_is_import_safe_and_covers_every_public_control(self) -> None:
         ast.parse(self.source)
-        self.assertEqual(len(self.module.VALUE_CONTROLS), 43)
+        self.assertEqual(len(self.module.VALUE_CONTROLS), 45)
         self.assertEqual(len(self.module.PULSE_CONTROLS), 6)
         self.assertEqual(len(self.module.STATUS_CONTROLS), 4)
         controls = (
@@ -39,8 +39,8 @@ class ShowControlValidatorSourceTests(unittest.TestCase):
             + self.module.PULSE_CONTROLS
             + self.module.STATUS_CONTROLS
         )
-        self.assertEqual(len(controls), 53)
-        self.assertEqual(len(set(controls)), 53)
+        self.assertEqual(len(controls), 55)
+        self.assertEqual(len(set(controls)), 55)
 
     def test_validator_restores_state_even_when_a_check_fails(self) -> None:
         self.assertIn("finally:", self.source)
@@ -54,6 +54,18 @@ class ShowControlValidatorSourceTests(unittest.TestCase):
         self.assertIn("FLEXGPU_COLOR_CONTRAST", self.source)
         self.assertIn("FLEXGPU_COLOR_SATURATION", self.source)
         self.assertIn("callbacks._reset_color_grade()", self.source)
+        self.assertIn('"Audioenabled_adapter"', self.source)
+        self.assertIn('"Audiosource_exclusive_switch_index"', self.source)
+        self.assertIn(
+            '_restore_parameter_state(\n'
+            '                audio_switch, "index"',
+            self.source,
+        )
+        self.assertIn(
+            '_restore_parameter_state(\n'
+            '                audio_out, "active"',
+            self.source,
+        )
 
     def test_envoy_repair_is_dry_run_first_and_never_kills_touchdesigner(self) -> None:
         source = REPAIR_PATH.read_text(encoding="utf-8-sig")

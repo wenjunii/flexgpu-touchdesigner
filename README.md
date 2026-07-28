@@ -222,7 +222,7 @@ cross-profile, or ambiguously named local files:
 # Run this pair only on the RTX 5090 workstation.
 .\scripts\Set-FlexShowLocalProject.ps1 `
   -Config .\config\local-5090.json `
-  -Project .\projects\FlexShow-moge2-embody-local-5090.30.toe `
+  -Project .\projects\FlexShow-moge2-embody-podcast-local-5090.49.toe `
   -ExpectedTier 5090 `
   -WhatIf
 
@@ -261,10 +261,11 @@ vice versa. Git intentionally ignores all of these local files.
 
 The currently identified private checkpoints are
 `FlexShow-moge2-embody-local-3080.28.toe` on the 3080 and
-`FlexShow-moge2-embody-local-5090.30.toe` on the 5090. They are independent
-working files, not Git artifacts or interchangeable release versions. The
-5090 checkpoint has the licensed private StreamDiffusionTD component connected;
-the component and its licence remain local and untracked.
+`FlexShow-moge2-embody-podcast-local-5090.49.toe` on the 5090. They are
+independent working files, not Git artifacts or interchangeable release
+versions. The 5090 checkpoint combines the FlexGPU and podcast networks and
+has the licensed private StreamDiffusionTD component connected; the component,
+audio media, and its licence remain local and untracked.
 
 The generated-geometry worker profile is mandatory and checked against the
 selected physical GPU before a real worker starts. The start wrappers also
@@ -863,7 +864,8 @@ For live tuning, open
 `/project1/flexgpu/WORKING_PIPELINE/SHOW_CONTROL`. It provides one public
 surface for geometry provider, display mode, completion/fog, interaction
 strength/smoothing, panoramic yaw/FOV/coverage/noise, artistic yaw/offset/FOV,
-final-view color adjustment, and the 3080/4090/5090 quality profiles.
+optional audio routing, final-view color adjustment, and the 3080/4090/5090
+quality profiles.
 `Wallwidth` and `Wallheight` set every individual installation feed;
 the wrap and artistic mosaics remain exactly three wall widths. Point-cloud
 framing has one creative scale plus separate MoGe-2 and Depth Anything
@@ -877,6 +879,15 @@ panoramic/artistic wall feeds, and both stereo preview eyes. It does not alter
 `OUT_SOURCE_COLOR`, `OUT_COLOR`, or private StreamDiffusionTD output. Defaults
 are neutral; disocclusion fog/background is left ungraded, and `Reset Color
 Adjustment` returns every color value to neutral.
+
+The optional `Audio` tab mirrors the public
+`STREAMDIFFUSION_ADAPTER` audio contract. `Audio Enabled` controls the one
+active audio output, while `Audio Source` selects either `Human Voices Only`
+or `Soundscape Only` through `audiosource_switch`; the two tracks are never
+mixed. The public builder and bounded installer contain no audio filenames,
+media, or machine paths. A combined local TOE must provide its own
+`voices_only_audio`, `soundscape_audio`, `audiosource_switch`, and `audio_out`
+operators at the documented adapter boundary.
 
 The artistic offset has a separate outward/inward direction menu. `outward`
 moves visible content away from the center wall (left farther left, right
@@ -1060,7 +1071,7 @@ cd C:\path\to\flexgpu-touchdesigner
   -DisplayProfile venue_1080p `
   -DisplayMode panoramic_wrap `
   -GeometryProvider moge2 `
-  -Project .\projects\FlexShow-moge2-embody-local-5090.30.toe `
+  -Project .\projects\FlexShow-moge2-embody-podcast-local-5090.49.toe `
   -Output .\config\local-5090.json
 ```
 
