@@ -221,6 +221,56 @@ class DepthAnythingWorkerTests(unittest.TestCase):
             camera.release()
         self.assertTrue(opened.released)
 
+    def test_named_camera_uses_ffmpeg_directshow_without_recording(self) -> None:
+        class FakeStdout:
+            def __init__(self, payload: bytes) -> None:
+                self.payload = payload
+                self.closed = False
+
+            def read(self, size: int) -> bytes:
+                chunk, self.payload = self.payload[:size], self.payload[size:]
+                return chunk
+
+            def close(self) -> None:
+                self.closed = True
+
+        class FakeProcess:
+            def __init__(self, payload: bytes) -> None:
+                self.stdout = FakeStdout(payload)
+                self.terminated = False
+
+            def poll(self):
+                return None if not self.terminated else 0
+
+            def terminate(self) -> None:
+                self.terminated = True
+
+            def wait(self, timeout=None):
+                return 0
+
+        process = FakeProcess(bytes(range(18)))
+        with (
+            mock.patch.object(worker_module.os, "name", "nt"),
+            mock.patch.object(worker_module.shutil, "which", return_value="ffmpeg.exe"),
+            mock.patch.object(worker_module.subprocess, "Popen", return_value=process) as popen,
+        ):
+            camera = worker_module.FFmpegDirectShowCamera(
+                name="webcam AC310", width=3, height=2
+            )
+            ok, frame = camera.read()
+            diagnostics = camera.diagnostics
+            camera.release()
+        self.assertTrue(ok)
+        self.assertEqual(frame.shape, (2, 3, 3))
+        self.assertEqual(diagnostics["camera_backend_selected"], "ffmpeg_dshow")
+        self.assertEqual(diagnostics["camera_name"], "webcam AC310")
+        command = popen.call_args.args[0]
+        self.assertIn("video=webcam AC310", command)
+        self.assertIn("pipe:1", command)
+        self.assertNotIn("-y", command)
+        self.assertTrue(process.terminated)
+        self.assertTrue(process.stdout.closed)
+
     def test_worker_rejects_output_dimensions_beyond_receiver_limits(self) -> None:
         mapper = worker_module.FrozenPercentileMapper(
             mode="fixed", raw_low=0.0, raw_high=1.0

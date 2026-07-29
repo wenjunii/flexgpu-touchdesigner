@@ -13,6 +13,7 @@ contract remains unchanged.
 
 from __future__ import print_function
 
+import math
 import os
 import re
 
@@ -144,6 +145,45 @@ void main()
     fragColor = TDOutputSwizzle(vec4(position, occupancy));
 }
 ''',
+    "femto_sensor_position": r'''// CONTRACT: ORBBEC POINTCLOUD -> SENSOR_POSITION
+out vec4 fragColor;
+
+void main()
+{
+    vec3 rawPosition = texture(sTD2DInputs[0], vUV.st).rgb;
+    // Femto Mega/Orbbec pointcloud data is camera-local XYZ in metres with
+    // forward-positive Z. Convert to the FlexGPU sensor convention used by the
+    // existing calibration stage: audience X/Y plus forward-negative Z.
+    const float femtoMirrorHorizontal = 0.0; // FLEXGPU_FEMTO_MIRROR_HORIZONTAL
+    bool finitePoint = all(lessThan(abs(rawPosition), vec3(1000.0)));
+    float valid = float(
+        finitePoint && rawPosition.z > 0.05 && rawPosition.z < 20.0);
+    float orientedX = mix(
+        rawPosition.x, -rawPosition.x,
+        step(0.5, femtoMirrorHorizontal));
+    vec3 sensorPosition = vec3(
+        orientedX, rawPosition.y, -rawPosition.z);
+    fragColor = TDOutputSwizzle(
+        vec4(sensorPosition * valid, valid));
+}
+''',
+    "femto_sensor_validity": r'''// CONTRACT: SENSOR_POSITION alpha -> MASK/CONFIDENCE; audience depth gate
+out vec4 fragColor;
+
+void main()
+{
+    vec4 sensor = texture(sTD2DInputs[0], vUV.st);
+    const float femtoNearMetres = 0.25; // FLEXGPU_FEMTO_NEAR_METRES
+    const float femtoFarMetres = 12.0; // FLEXGPU_FEMTO_FAR_METRES
+    float depthMetres = -sensor.z;
+    float validity = clamp(
+        sensor.a, 0.0, 1.0) *
+        step(femtoNearMetres, depthMetres) *
+        step(depthMetres, femtoFarMetres);
+    fragColor = TDOutputSwizzle(
+        vec4(validity, validity, validity, 1.0));
+}
+''',
     "sensor_to_world": r'''// CONTRACT: SENSOR_POSITION camera XYZ -> calibrated world XYZ
 out vec4 fragColor;
 
@@ -154,10 +194,43 @@ void main()
     const vec4 sensorToWorld1 = vec4(0.0, 1.0, 0.0, 0.0); // FLEXGPU_SENSOR_TO_WORLD_1
     const vec4 sensorToWorld2 = vec4(0.0, 0.0, 1.0, 0.0); // FLEXGPU_SENSOR_TO_WORLD_2
     const vec4 sensorToWorld3 = vec4(0.0, 0.0, 0.0, 1.0); // FLEXGPU_SENSOR_TO_WORLD_3
-    vec4 homogeneous = vec4(sensor.rgb, 1.0);
+    const float sensorPositionScale = 1.0; // FLEXGPU_SENSOR_POSITION_SCALE
+    const float sensorTrimXMetres = 0.0; // FLEXGPU_SENSOR_TRIM_X
+    const float sensorTrimYMetres = 0.0; // FLEXGPU_SENSOR_TRIM_Y
+    const float sensorTrimZMetres = 0.0; // FLEXGPU_SENSOR_TRIM_Z
+    const float sensorTrimYawDegrees = 0.0; // FLEXGPU_SENSOR_TRIM_YAW
+    const float sensorTrimPitchDegrees = 0.0; // FLEXGPU_SENSOR_TRIM_PITCH
+    const float sensorTrimRollDegrees = 0.0; // FLEXGPU_SENSOR_TRIM_ROLL
+
+    vec3 localPosition = sensor.rgb * sensorPositionScale;
+    float yaw = radians(sensorTrimYawDegrees);
+    float pitch = radians(sensorTrimPitchDegrees);
+    float roll = radians(sensorTrimRollDegrees);
+    float cy = cos(yaw);
+    float sy = sin(yaw);
+    localPosition = vec3(
+        cy * localPosition.x + sy * localPosition.z,
+        localPosition.y,
+        -sy * localPosition.x + cy * localPosition.z);
+    float cp = cos(pitch);
+    float sp = sin(pitch);
+    localPosition = vec3(
+        localPosition.x,
+        cp * localPosition.y - sp * localPosition.z,
+        sp * localPosition.y + cp * localPosition.z);
+    float cr = cos(roll);
+    float sr = sin(roll);
+    localPosition = vec3(
+        cr * localPosition.x - sr * localPosition.y,
+        sr * localPosition.x + cr * localPosition.y,
+        localPosition.z);
+
+    vec4 homogeneous = vec4(localPosition, 1.0);
     vec3 worldPosition = vec3(dot(sensorToWorld0, homogeneous),
                               dot(sensorToWorld1, homogeneous),
                               dot(sensorToWorld2, homogeneous));
+    worldPosition += vec3(
+        sensorTrimXMetres, sensorTrimYMetres, sensorTrimZMetres);
     // Mask and confidence are applied exactly once by SENSOR_VALIDITY after
     // the simulated/replay/hardware position routes have converged.
     fragColor = TDOutputSwizzle(vec4(worldPosition, sensor.a));
@@ -183,11 +256,17 @@ void main()
     vec2 uv = vUV.st;
     vec4 point = texture(sTD2DInputs[0], uv);
     const float interactionRadiusMetres = 0.55; // FLEXGPU_INTERACTION_RADIUS
+    const float interactionFalloff = 1.0; // FLEXGPU_INTERACTION_FALLOFF
     const float forceGain = 1.0; // FLEXGPU_FORCE_GAIN
-    // Bounded 8x8 occupancy primitives are sampled across the full sensor,
+    // Bounded 32x32 occupancy primitives are sampled across the full sensor,
     // not at the generated point's source UV. This is a practical stock-TD
     // approximation to a low-resolution world-space occupancy/SDF volume.
-    const int occupancyGridSize = 8; // FLEXGPU_OCCUPANCY_GRID_SIZE
+    // The native Femto gate can leave fewer than 2,000 valid pixels in a
+    // 640x576 point cloud. A 16x16 lattice then sees only one or two samples
+    // and can lose a moving audience member. The 32x32 lattice is still
+    // bounded at the 128x128 interaction resolution and is reliable on the
+    // 5090 live profile.
+    const int occupancyGridSize = 32; // FLEXGPU_OCCUPANCY_GRID_SIZE
     vec3 accumulatedForce = vec3(0.0);
     float combinedOccupancy = 0.0;
     for (int y = 0; y < occupancyGridSize; ++y) {
@@ -197,8 +276,12 @@ void main()
             vec4 sensor = texture(sTD2DInputs[1], sensorUV);
             vec3 delta = point.rgb - sensor.rgb;
             float distanceMetres = length(delta);
+            float radialInfluence =
+                1.0 - smoothstep(
+                    0.0, interactionRadiusMetres, distanceMetres);
             float influence = point.a * sensor.a *
-                (1.0 - smoothstep(0.0, interactionRadiusMetres, distanceMetres));
+                pow(clamp(radialInfluence, 0.0, 1.0),
+                    max(0.25, interactionFalloff));
             vec3 direction = distanceMetres > 1e-5
                 ? delta / distanceMetres : vec3(0.0, 0.0, 1.0);
             accumulatedForce += direction * influence;
@@ -216,15 +299,24 @@ out vec4 fragColor;
 void main()
 {
     const float interactionSmoothing = 0.35; // FLEXGPU_INTERACTION_SMOOTHING
+    const float interactionResponse = 0.65; // FLEXGPU_INTERACTION_RESPONSE
+    const float interactionDecay = 0.5; // FLEXGPU_INTERACTION_DECAY
     vec2 uv = vUV.st;
     vec4 current = texture(sTD2DInputs[0], uv);
     vec4 history = texture(sTD2DInputs[1], uv);
     float amount = clamp(interactionSmoothing, 0.0, 0.92);
-    // Keep attack responsive and release slightly faster than attack. This
-    // removes low-rate sensor judder without leaving a delayed interaction
-    // ghost after the audience moves away.
-    float attackBlend = mix(1.0, 0.20, amount);
-    float releaseBlend = mix(1.0, 0.55, amount);
+    // Smoothness sets the overall temporal filtering. Response independently
+    // controls how quickly new audience motion engages, while decay controls
+    // how long the interaction tail remains after the audience moves away.
+    // The defaults preserve the previously accepted attack/release behavior.
+    float attackBlend = clamp(
+        mix(1.0, 0.20, amount) *
+        mix(0.35, 1.35, clamp(interactionResponse, 0.0, 1.0)),
+        0.01, 1.0);
+    float releaseBlend = clamp(
+        mix(1.0, 0.55, amount) *
+        mix(1.70, 0.30, clamp(interactionDecay, 0.0, 1.0)),
+        0.01, 1.0);
     float blend = current.a >= history.a ? attackBlend : releaseBlend;
     vec3 force = mix(history.rgb, current.rgb, blend);
     float occupancy = mix(history.a, current.a, blend);
@@ -294,20 +386,19 @@ void main()
     fragColor = TDOutputSwizzle(vec4(confidence, age, hasCurrent, alive));
 }
 ''',
-    "temporal_advect": r'''// CONTRACT: HISTORY + INTERACTION + FRAME_CONTROL -> ADVECTED_HISTORY
+    "temporal_advect": r'''// CONTRACT: HISTORY + INTERACTION + FRAME_CONTROL -> BASE_HISTORY
 out vec4 fragColor;
 
 void main()
 {
     vec2 uv = vUV.st;
     vec4 history = texture(sTD2DInputs[0], uv);
-    vec4 interaction = texture(sTD2DInputs[1], uv);
     vec4 control = texture(sTD2DInputs[2], vec2(0.5));
-    // Force is metres/second. Clamp dt so a debugger pause cannot launch the
-    // world when cooking resumes.
+    // Interaction is applied later in per-output view branches. Keeping this
+    // history interaction-neutral lets disabled walls remain truly unchanged.
     float motionDt = min(max(control.g, 0.0), 1.0 / 15.0);
     float historyAlive = step(0.001, history.a);
-    vec3 carried = history.rgb + interaction.rgb * motionDt * historyAlive;
+    vec3 carried = history.rgb + vec3(0.0) * motionDt * historyAlive;
     fragColor = TDOutputSwizzle(vec4(carried, history.a));
 }
 ''',
@@ -407,7 +498,6 @@ void main()
 {
     vec2 uv = vUV.st;
     vec4 measured = texture(sTD2DInputs[0], uv);
-    vec4 interaction = texture(sTD2DInputs[1], uv);
     vec2 q = uv * 2.0 - 1.0;
     float radius2 = dot(q, q);
     float shell = sqrt(max(0.0, 1.0 - min(radius2, 1.0)));
@@ -421,7 +511,6 @@ void main()
                           (uv.y - 0.5) * generatedDepth / generatedFocal,
                           -generatedDepth);
     generated += (grain - 0.5) * vec3(0.035, 0.035, 0.12);
-    generated += interaction.rgb * 0.035;
     // Invalid depth can occur anywhere in the rectangular source image,
     // especially in sky and reflective areas. Keep the backfill rectangular;
     // a circular activation mask creates a visible coloured dome in OUT_COLOR.
@@ -430,6 +519,28 @@ void main()
     vec3 position = mix(generated, measured.rgb, useMeasured);
     float activity = max(measured.a, generatedActive * (1.0 - measured.a));
     fragColor = TDOutputSwizzle(vec4(position, activity));
+}
+''',
+    "view_interaction": r'''// CONTRACT: BASE_POSITION + INTERACTION -> VIEW_POSITION
+out vec4 fragColor;
+
+void main()
+{
+    const float viewInteractionGain = 0.0; // FLEXGPU_VIEW_INTERACTION_GAIN
+    // A unit setting gives a noticeable but bounded displacement. The public
+    // per-output intensity multiplies this 0.18-metre view-space response.
+    const float viewInteractionMetres = 0.18;
+    vec2 uv = vUV.st;
+    // Avoid generic identifiers such as `interaction` and `active` here. They
+    // collide with names emitted by TouchDesigner's generated GLSL wrapper and
+    // can silently substitute a normalized color result for signed positions.
+    vec4 positionSample = texture(sTD2DInputs[0], uv);
+    vec4 interactionSample = texture(sTD2DInputs[1], uv);
+    float positionMask = step(0.001, positionSample.a);
+    vec3 displacedPosition = positionSample.rgb +
+        interactionSample.rgb * viewInteractionGain * viewInteractionMetres *
+        positionMask;
+    fragColor = TDOutputSwizzle(vec4(displacedPosition, positionSample.a));
 }
 ''',
     "procedural_color": r'''// CONTRACT: POSITION + PROCEDURAL_POSITION + COLOR -> PROCEDURAL_COLOR
@@ -959,6 +1070,7 @@ def onExit():
 
 
 SHOW_CONTROL_CALLBACKS = r'''# Parameter Execute DAT callbacks for public show controls.
+import math
 import os
 import re
 import subprocess
@@ -1017,6 +1129,29 @@ def _patch_float(dat, symbol, marker, value):
         return True
     return False
 
+def _patch_vec4(dat, symbol, marker, values):
+    if dat is None:
+        return False
+    try:
+        numbers = [float(value) for value in values]
+    except Exception:
+        return False
+    if len(numbers) != 4 or not all(math.isfinite(value) for value in numbers):
+        return False
+    pattern = (
+        r'(const\s+vec4\s+' + re.escape(symbol) +
+        r'\s*=\s*vec4\()[^)]*(\)\s*;\s*//\s*' +
+        re.escape(marker) + r')')
+    replacement = (
+        r'\g<1>' +
+        ', '.join('%.9g' % value for value in numbers) +
+        r'\g<2>')
+    updated, count = re.subn(pattern, replacement, str(dat.text), count=1)
+    if count == 1:
+        dat.text = updated
+        return True
+    return False
+
 def _set_resolution(node, width, height):
     if node is None:
         return
@@ -1025,6 +1160,59 @@ def _set_resolution(node, width, height):
     _set(node, 'resolutionw', int(width))
     _set(node, 'resolutionh', int(height))
     _set(node, 'outputaspect', 'resolution')
+
+def _geometry_contract_dimensions():
+    pipeline = _pipeline()
+    reconstruction = pipeline.op('RECONSTRUCTION')
+    geometry = max(
+        64, min(2048, int(_value('Geometryresolution', 384))))
+    preserve = bool(_value('Preservegeometryaspect', True))
+    aspect = 16.0 / 9.0
+    rgb = (
+        reconstruction.op('RGB_IN')
+        if reconstruction is not None else None)
+    try:
+        if rgb is not None and rgb.width > 0 and rgb.height > 0:
+            aspect = max(1.0 / 16.0, min(
+                16.0, float(rgb.width) / float(rgb.height)))
+    except Exception:
+        pass
+    if not preserve:
+        return geometry, geometry
+    width = max(
+        64, min(
+            2048,
+            2 * int(round((geometry * aspect ** 0.5) / 2.0))))
+    height = max(
+        64, min(
+            2048,
+            2 * int(round((geometry / aspect ** 0.5) / 2.0))))
+    return width, height
+
+def _apply_geometry_contract_resolution():
+    pipeline = _pipeline()
+    geometry = max(
+        64, min(2048, int(_value('Geometryresolution', 384))))
+    preserve = bool(_value('Preservegeometryaspect', True))
+    _set(pipeline.op('RECONSTRUCTION'), 'Geometryresolution', geometry)
+    _set(pipeline.op('RECONSTRUCTION'), 'Preservegeometryaspect', preserve)
+    _set(pipeline.parent().op('AI_PIPELINE'), 'Geometryresolution', geometry)
+    width, height = _geometry_contract_dimensions()
+    # The interaction field intentionally stays at its small sensor budget.
+    # Force only the shaders that combine it with the generated position
+    # texture back to the dense geometry contract. Otherwise TouchDesigner's
+    # common-input resolution can collapse a 682x384 position field to the
+    # 128x128 interaction texture and leave only 16,384 source points.
+    for path in (
+        'COMPLETION/INTERACTION_RENDER_RESIZE',
+        'COMPLETION/procedural_backfill',
+        'POINT_RENDER/INTERACTION_RENDER_RESIZE',
+        'POINT_RENDER/VIEW_POSITION_INSTALLATION',
+        'POINT_RENDER/VIEW_POSITION_LEFT',
+        'POINT_RENDER/VIEW_POSITION_CENTER',
+        'POINT_RENDER/VIEW_POSITION_RIGHT',
+    ):
+        _set_resolution(pipeline.op(path), width, height)
 
 def _set_horizontal_layout(node):
     if node is None:
@@ -1150,6 +1338,192 @@ def _apply_audio_controls():
             audio_out.par.active.mode = ParMode.EXPRESSION
         except Exception:
             _set(audio_out, 'active', enabled)
+
+def _select_femto_device(femto, requested_serial):
+    primary = femto.op('FEMTO_PRIMARY') if femto is not None else None
+    if primary is None:
+        return False, '', 'Femto Mega unavailable: Orbbec TOP is missing'
+    try:
+        choices = [str(item) for item in primary.par.device.menuNames]
+    except Exception:
+        choices = []
+    serial = str(requested_serial or '').strip()
+    selected = ''
+    if serial:
+        selected = next(
+            (item for item in choices if serial.lower() in item.lower()), '')
+        if not selected:
+            return (
+                False, serial,
+                'Femto Mega unavailable: serial %s not found' % serial)
+    elif choices:
+        selected = choices[0]
+    if not selected:
+        return False, serial, 'Femto Mega unavailable: no USB device detected'
+    try:
+        primary.par.device.val = selected
+    except Exception as exc:
+        return False, serial, 'Femto Mega device selection failed: %s' % exc
+    resolved = serial
+    if not resolved:
+        parts = selected.split('|||')
+        resolved = parts[-2].strip() if len(parts) >= 2 else selected
+    _set(femto, 'Deviceserial', serial)
+    return True, resolved, ''
+
+def _apply_camera_interaction():
+    controls = _controls()
+    pipeline = _pipeline()
+    sensor = pipeline.op('SENSOR_INTERACTION')
+    adapter = sensor.op('DEPTH_SENSOR_ADAPTER') if sensor is not None else None
+    bridge = (
+        adapter.op('DEPTH_ANYTHING_BRIDGE')
+        if adapter is not None else None)
+    femto = pipeline.op('SOURCES/FEMTO_MEGA_ADAPTER')
+    enabled = bool(_value('Camerainteractionenabled', False))
+    mirrored = bool(_value('Cameramirrorhorizontal', True))
+    source = str(
+        _value('Camerasensorsource', 'depth_anything')).strip().lower()
+    if source not in ('depth_anything', 'femto_mega'):
+        source = 'depth_anything'
+    femto_serial = str(_value('Femtodeviceserial', '') or '').strip()
+    _set(controls, 'Camerainteractionenabled', enabled)
+    _set(controls, 'Cameramirrorhorizontal', mirrored)
+    _set(controls, 'Camerasensorsource', source)
+    _set(sensor, 'Mode', 'depth_sensor' if enabled else 'disabled')
+    _set(adapter, 'Sensorsource', source)
+    _set(adapter, 'Enabled', enabled)
+    _set(bridge, 'Mirrorhorizontal', mirrored)
+    femto_enabled = False
+    status = 'inactive; webcam + Depth Anything settings are preserved'
+    if source == 'femto_mega':
+        device_ready, resolved_serial, detail = _select_femto_device(
+            femto, femto_serial)
+        femto_enabled = bool(enabled and device_ready)
+        if detail:
+            status = detail
+        elif not enabled:
+            status = 'Femto Mega selected but camera interaction is disabled'
+        else:
+            try:
+                result_valid = bool(femto.par.Resultvalid.eval())
+            except Exception:
+                result_valid = False
+            status = (
+                ('ready: ' if result_valid else 'starting: ') +
+                (resolved_serial or 'auto-selected USB device'))
+    _set(femto, 'Enabled', femto_enabled)
+    _set(controls, 'Femtostatus', status)
+    if enabled and source == 'depth_anything' and bridge is not None:
+        runtime_dat = bridge.op('sensor_runtime')
+        if runtime_dat is not None:
+            try:
+                runtime_dat.module.tick(bridge)
+            except Exception:
+                pass
+
+def _apply_sensor_calibration_trim():
+    controls = _controls()
+    sensor = _pipeline().op('SENSOR_INTERACTION')
+    shader = (
+        sensor.op('CALIBRATE_SENSOR_POSITION_PIXEL')
+        if sensor is not None else None)
+    if sensor is None or shader is None:
+        return
+    identity = (
+        (1.0, 0.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0, 0.0),
+        (0.0, 0.0, 1.0, 0.0),
+        (0.0, 0.0, 0.0, 1.0),
+    )
+    for index, fallback in enumerate(identity):
+        try:
+            raw = getattr(
+                sensor.par, 'Sensortoworld%d' % index).eval()
+            values = [
+                float(value)
+                for value in str(raw).replace(',', ' ').split()]
+        except Exception:
+            values = list(fallback)
+        if (len(values) != 4 or
+                not all(math.isfinite(value) for value in values)):
+            values = list(fallback)
+        _patch_vec4(
+            shader, 'sensorToWorld%d' % index,
+            'FLEXGPU_SENSOR_TO_WORLD_%d' % index, values)
+    source = str(
+        _value('Camerasensorsource', 'depth_anything')).strip().lower()
+    prefix = 'Femto' if source == 'femto_mega' else 'Sensor'
+    settings = (
+        (prefix + 'positionscale', 'sensorPositionScale',
+         'FLEXGPU_SENSOR_POSITION_SCALE', 1.0, 0.25, 4.0),
+        (prefix + 'trimxmetres', 'sensorTrimXMetres',
+         'FLEXGPU_SENSOR_TRIM_X', 0.0, -5.0, 5.0),
+        (prefix + 'trimymetres', 'sensorTrimYMetres',
+         'FLEXGPU_SENSOR_TRIM_Y', 0.0, -5.0, 5.0),
+        (prefix + 'trimzmetres', 'sensorTrimZMetres',
+         'FLEXGPU_SENSOR_TRIM_Z', 0.0, -5.0, 5.0),
+        (prefix + 'trimyawdegrees', 'sensorTrimYawDegrees',
+         'FLEXGPU_SENSOR_TRIM_YAW', 0.0, -180.0, 180.0),
+        (prefix + 'trimpitchdegrees', 'sensorTrimPitchDegrees',
+         'FLEXGPU_SENSOR_TRIM_PITCH', 0.0, -90.0, 90.0),
+        (prefix + 'trimrolldegrees', 'sensorTrimRollDegrees',
+         'FLEXGPU_SENSOR_TRIM_ROLL', 0.0, -180.0, 180.0),
+    )
+    for parameter, symbol, marker, fallback, lower, upper in settings:
+        value = max(
+            lower, min(upper, float(_value(parameter, fallback))))
+        _set(controls, parameter, value)
+        _patch_float(shader, symbol, marker, value)
+
+def _reset_sensor_calibration_trim(requested_prefix=None):
+    controls = _controls()
+    source = str(
+        _value('Camerasensorsource', 'depth_anything')).strip().lower()
+    prefix = (
+        requested_prefix
+        if requested_prefix in ('Sensor', 'Femto')
+        else ('Femto' if source == 'femto_mega' else 'Sensor'))
+    for parameter, value in (
+            ('positionscale', 1.0),
+            ('trimxmetres', 0.0),
+            ('trimymetres', 0.0),
+            ('trimzmetres', 0.0),
+            ('trimyawdegrees', 0.0),
+            ('trimpitchdegrees', 0.0),
+            ('trimrolldegrees', 0.0)):
+        _set(controls, prefix + parameter, value)
+    _apply_sensor_calibration_trim()
+
+def _apply_femto_depth_gate():
+    controls = _controls()
+    femto = _pipeline().op('SOURCES/FEMTO_MEGA_ADAPTER')
+    validity_shader = (
+        femto.op('DERIVE_SENSOR_VALIDITY_PIXEL')
+        if femto is not None else None)
+    position_shader = (
+        femto.op('CONVERT_SENSOR_POSITION_PIXEL')
+        if femto is not None else None)
+    if femto is None or validity_shader is None or position_shader is None:
+        return
+    mirrored = bool(_value('Femtomirrorhorizontal', False))
+    near_metres = max(
+        0.10, min(15.0, float(_value('Femtoaudiencenearmetres', 0.25))))
+    far_metres = max(
+        near_metres + 0.10,
+        min(20.0, float(_value('Femtoaudiencefarmetres', 12.0))))
+    _set(controls, 'Femtomirrorhorizontal', mirrored)
+    _set(controls, 'Femtoaudiencenearmetres', near_metres)
+    _set(controls, 'Femtoaudiencefarmetres', far_metres)
+    _patch_float(
+        position_shader, 'femtoMirrorHorizontal',
+        'FLEXGPU_FEMTO_MIRROR_HORIZONTAL', 1.0 if mirrored else 0.0)
+    _patch_float(
+        validity_shader, 'femtoNearMetres',
+        'FLEXGPU_FEMTO_NEAR_METRES', near_metres)
+    _patch_float(
+        validity_shader, 'femtoFarMetres',
+        'FLEXGPU_FEMTO_FAR_METRES', far_metres)
 
 def _workspace_root():
     configured = str(_value('Workspaceroot', '') or '').strip()
@@ -1297,6 +1671,134 @@ def _stop_worker(provider):
              '%s worker stopped; its console should close' % selected)
     return True
 
+def _launch_sensor_worker():
+    controls = _controls()
+    previous = _WORKER_PROCESSES.get('sensor')
+    if previous is not None and previous.poll() is None:
+        _set(controls, 'Sensorworkerstatus',
+             'camera depth worker is already running (PID %s)' %
+             previous.pid)
+        _set(controls, 'Sensorworkerpid', int(previous.pid))
+        return False
+    root = _workspace_root()
+    if not root:
+        _set(controls, 'Sensorworkerstatus',
+             'Camera start failed: set Workspace Root to this checkout')
+        return False
+    script = os.path.abspath(os.path.join(
+        root, 'scripts', 'Start-DepthAnythingWorker.ps1'))
+    scripts_root = os.path.abspath(os.path.join(root, 'scripts'))
+    try:
+        if (os.path.commonpath((script, scripts_root)) != scripts_root or
+                not os.path.isfile(script)):
+            raise ValueError('camera worker script is outside or missing')
+    except Exception as exc:
+        _set(controls, 'Sensorworkerstatus',
+             'Camera start refused: %s' % exc)
+        return False
+    profile = str(_value('Qualityprofile', '3080ti_16gb'))
+    if profile not in ('3080ti_16gb', '4090', '5090'):
+        profile = '3080ti_16gb'
+    gpu_index = max(0, min(31, int(_value('Gpuindex', 0))))
+    camera_index = max(0, min(31, int(_value('Cameraindex', 0))))
+    camera_name = str(_value('Cameraname', '') or '').strip()
+    if (len(camera_name.encode('utf-8')) > 255 or
+            any(ord(character) < 32 for character in camera_name)):
+        _set(controls, 'Sensorworkerstatus',
+             'Camera start refused: invalid camera name')
+        return False
+    _set(controls, 'Camerasensorsource', 'depth_anything')
+    _set(controls, 'Camerainteractionenabled', True)
+    _apply_camera_interaction()
+    args = [
+        'powershell.exe', '-NoProfile',
+        '-ExecutionPolicy', 'Bypass', '-File', script,
+        '-Profile', profile, '-GpuIndex', str(gpu_index),
+        '-CameraIndex', str(camera_index),
+    ]
+    if camera_name:
+        args.extend(('-CameraName', camera_name))
+    args.append('-Start')
+    try:
+        process = subprocess.Popen(
+            args, cwd=root, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        _WORKER_PROCESSES['sensor'] = process
+        _set(controls, 'Workspaceroot', root)
+        _set(controls, 'Sensorworkerpid', int(process.pid))
+        _set(controls, 'Sensorworkerstatus',
+             'camera depth worker started hidden (PID %s)' % process.pid)
+        return True
+    except Exception as exc:
+        _set(controls, 'Sensorworkerpid', 0)
+        _set(controls, 'Sensorworkerstatus',
+             'Camera start failed: %s' % str(exc)[:240])
+        return False
+
+def _stop_sensor_worker():
+    controls = _controls()
+    root = _workspace_root()
+    if not root:
+        _set(controls, 'Sensorworkerstatus',
+             'Camera stop failed: set Workspace Root to this checkout')
+        return False
+    script = os.path.abspath(os.path.join(
+        root, 'scripts', 'Stop-DepthAnythingSensorWorker.ps1'))
+    scripts_root = os.path.abspath(os.path.join(root, 'scripts'))
+    try:
+        if (os.path.commonpath((script, scripts_root)) != scripts_root or
+                not os.path.isfile(script)):
+            raise ValueError('camera stop script is outside or missing')
+    except Exception as exc:
+        _set(controls, 'Sensorworkerstatus',
+             'Camera stop refused: %s' % exc)
+        return False
+    _set(controls, 'Sensorworkerstatus', 'Stopping camera depth worker...')
+    args = [
+        'powershell.exe', '-NoProfile',
+        '-ExecutionPolicy', 'Bypass', '-File', script, '-Stop',
+    ]
+    try:
+        completed = subprocess.run(
+            args, cwd=root, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, timeout=20,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    except subprocess.TimeoutExpired:
+        _set(controls, 'Sensorworkerstatus',
+             'Camera depth worker stop timed out after 20 seconds')
+        return False
+    except Exception as exc:
+        _set(controls, 'Sensorworkerstatus',
+             'Camera stop failed: %s' % str(exc)[:240])
+        return False
+    if completed.returncode != 0:
+        detail = ' '.join(str(completed.stdout or '').split())
+        if not detail:
+            detail = 'PowerShell returned %s' % completed.returncode
+        _set(controls, 'Sensorworkerstatus',
+             'Camera stop failed: %s' % detail[-240:])
+        return False
+    previous = _WORKER_PROCESSES.pop('sensor', None)
+    if previous is not None and previous.poll() is None:
+        try:
+            previous.wait(timeout=5)
+        except Exception:
+            try:
+                previous.terminate()
+                previous.wait(timeout=2)
+            except Exception:
+                pass
+    output = str(completed.stdout or '')
+    _set(controls, 'Sensorworkerpid', 0)
+    if 'No matching audience-camera worker is running' in output:
+        _set(controls, 'Sensorworkerstatus',
+             'No camera depth worker is running')
+    else:
+        _set(controls, 'Sensorworkerstatus',
+             'Camera depth worker stopped; interaction will fail closed')
+    return True
+
 def _apply_fog():
     pipeline = _pipeline()
     density = max(0.0, min(1.5, float(_value('Fogdensity', 0.35))))
@@ -1373,6 +1875,79 @@ def _reset_color_grade():
         _set(controls, parameter, value)
     _apply_color_grade()
 
+def _apply_output_interaction():
+    controls = _controls()
+    render = _pipeline().op('POINT_RENDER')
+    if render is None:
+        return
+    for view, title, enabled_default in (
+            ('INSTALLATION', 'Installation', True),
+            ('LEFT', 'Leftwall', False),
+            ('CENTER', 'Centerwall', True),
+            ('RIGHT', 'Rightwall', False)):
+        enabled_name = title + 'interactionenabled'
+        intensity_name = title + 'interactionintensity'
+        enabled = bool(_value(enabled_name, enabled_default))
+        intensity = max(
+            0.0, min(10.0, float(_value(intensity_name, 1.0))))
+        _set(controls, enabled_name, enabled)
+        _set(controls, intensity_name, intensity)
+        _set(render, enabled_name, enabled)
+        _set(render, intensity_name, intensity)
+        _patch_float(
+            render.op('VIEW_POSITION_%s_PIXEL' % view),
+            'viewInteractionGain',
+            'FLEXGPU_VIEW_INTERACTION_GAIN',
+            intensity if enabled else 0.0)
+
+def _apply_interaction_shape():
+    controls = _controls()
+    sensor = _pipeline().op('SENSOR_INTERACTION')
+    if sensor is None:
+        return
+    radius = max(
+        0.05, min(3.0, float(_value('Interactionradius', 0.55))))
+    falloff = max(
+        0.25, min(4.0, float(_value('Interactionfalloff', 1.0))))
+    strength = max(
+        0.0, min(2.0, float(_value('Interactionstrength', 0.35))))
+    smoothing = max(
+        0.0, min(0.92, float(_value('Interactionsmoothing', 0.35))))
+    response = max(
+        0.0, min(1.0, float(_value('Interactionresponse', 0.65))))
+    decay = max(
+        0.0, min(1.0, float(_value('Interactiondecay', 0.5))))
+    for control_name, sensor_name, value in (
+            ('Interactionradius', 'Interactionradius', radius),
+            ('Interactionfalloff', 'Interactionfalloff', falloff),
+            ('Interactionstrength', 'Forcegain', strength),
+            ('Interactionsmoothing', 'Interactionsmoothing', smoothing),
+            ('Interactionresponse', 'Interactionresponse', response),
+            ('Interactiondecay', 'Interactiondecay', decay)):
+        _set(controls, control_name, value)
+        _set(sensor, sensor_name, value)
+    _patch_float(
+        sensor.op('interaction_field_PIXEL'),
+        'interactionRadiusMetres', 'FLEXGPU_INTERACTION_RADIUS', radius)
+    _patch_float(
+        sensor.op('interaction_field_PIXEL'),
+        'interactionFalloff', 'FLEXGPU_INTERACTION_FALLOFF', falloff)
+    _patch_float(
+        sensor.op('interaction_field_PIXEL'),
+        'forceGain', 'FLEXGPU_FORCE_GAIN', strength)
+    _patch_float(
+        sensor.op('INTERACTION_SMOOTH_PIXEL'),
+        'interactionSmoothing',
+        'FLEXGPU_INTERACTION_SMOOTHING', smoothing)
+    _patch_float(
+        sensor.op('INTERACTION_SMOOTH_PIXEL'),
+        'interactionResponse',
+        'FLEXGPU_INTERACTION_RESPONSE', response)
+    _patch_float(
+        sensor.op('INTERACTION_SMOOTH_PIXEL'),
+        'interactionDecay',
+        'FLEXGPU_INTERACTION_DECAY', decay)
+
 def _apply_quality_profile():
     controls = _controls()
     profile = str(_value('Qualityprofile', '3080ti_16gb'))
@@ -1440,6 +2015,26 @@ def apply_parameter(name):
         _apply_point_cloud_scale()
     elif key in ('audioenabled', 'audiosource'):
         _apply_audio_controls()
+    elif key in (
+            'camerainteractionenabled', 'camerasensorsource',
+            'femtodeviceserial', 'cameramirrorhorizontal',
+            'femtomirrorhorizontal'):
+        _apply_camera_interaction()
+        _apply_sensor_calibration_trim()
+        _apply_femto_depth_gate()
+    elif key in (
+            'sensorpositionscale',
+            'sensortrimxmetres', 'sensortrimymetres', 'sensortrimzmetres',
+            'sensortrimyawdegrees', 'sensortrimpitchdegrees',
+            'sensortrimrolldegrees',
+            'femtopositionscale',
+            'femtotrimxmetres', 'femtotrimymetres', 'femtotrimzmetres',
+            'femtotrimyawdegrees', 'femtotrimpitchdegrees',
+            'femtotrimrolldegrees'):
+        _apply_sensor_calibration_trim()
+    elif key in (
+            'femtoaudiencenearmetres', 'femtoaudiencefarmetres'):
+        _apply_femto_depth_gate()
     elif key == 'displaymode':
         _set(pipeline, 'Displaymode', _value('Displaymode', 'single'))
     elif key == 'completionmode':
@@ -1451,17 +2046,21 @@ def apply_parameter(name):
             'brightness', 'contrast', 'saturation', 'gamma',
             'hueshiftdegrees', 'temperature', 'tint'):
         _apply_color_grade()
-    elif key == 'interactionstrength':
-        strength = max(0.0, min(2.0, float(_value('Interactionstrength', 0.35))))
-        _set(pipeline.op('SENSOR_INTERACTION'), 'Forcegain', strength)
-        _patch_float(pipeline.op('SENSOR_INTERACTION/interaction_field_PIXEL'),
-                     'forceGain', 'FLEXGPU_FORCE_GAIN', strength)
-    elif key == 'interactionsmoothing':
-        amount = max(0.0, min(0.92, float(_value('Interactionsmoothing', 0.35))))
-        _set(pipeline.op('SENSOR_INTERACTION'), 'Interactionsmoothing', amount)
-        _patch_float(pipeline.op('SENSOR_INTERACTION/INTERACTION_SMOOTH_PIXEL'),
-                     'interactionSmoothing',
-                     'FLEXGPU_INTERACTION_SMOOTHING', amount)
+    elif key in (
+            'interactionradius', 'interactionfalloff',
+            'interactionstrength', 'interactionsmoothing',
+            'interactionresponse', 'interactiondecay'):
+        _apply_interaction_shape()
+    elif key in (
+            'installationinteractionenabled',
+            'installationinteractionintensity',
+            'leftwallinteractionenabled',
+            'leftwallinteractionintensity',
+            'centerwallinteractionenabled',
+            'centerwallinteractionintensity',
+            'rightwallinteractionenabled',
+            'rightwallinteractionintensity'):
+        _apply_output_interaction()
     elif key in (
             'wrapyawdegrees', 'wrapfovdegrees',
             'surfacefovdegrees', 'artisticyawdegrees',
@@ -1503,12 +2102,9 @@ def apply_parameter(name):
     elif key == 'qualityprofile':
         _apply_quality_profile()
     elif key == 'geometryresolution':
-        geometry = max(64, min(2048, int(_value('Geometryresolution', 384))))
-        _set(pipeline.op('RECONSTRUCTION'), 'Geometryresolution', geometry)
-        _set(_pipeline().parent().op('AI_PIPELINE'), 'Geometryresolution', geometry)
+        _apply_geometry_contract_resolution()
     elif key == 'preservegeometryaspect':
-        _set(pipeline.op('RECONSTRUCTION'), 'Preservegeometryaspect',
-             bool(_value('Preservegeometryaspect', True)))
+        _apply_geometry_contract_resolution()
     elif key == 'pointbudget':
         points = max(1000, min(10000000, int(_value('Pointbudget', 120000))))
         _set(pipeline.op('POINT_RENDER'), 'Maxpoints', points)
@@ -1527,10 +2123,30 @@ def apply_parameter(name):
 def apply_all():
     for name in (
         'Geometryprovider', 'Audioenabled', 'Audiosource',
+        'Camerainteractionenabled', 'Camerasensorsource',
+        'Femtodeviceserial', 'Cameramirrorhorizontal',
+        'Femtomirrorhorizontal',
+        'Sensorpositionscale',
+        'Sensortrimxmetres', 'Sensortrimymetres', 'Sensortrimzmetres',
+        'Sensortrimyawdegrees', 'Sensortrimpitchdegrees',
+        'Sensortrimrolldegrees',
+        'Femtopositionscale',
+        'Femtotrimxmetres', 'Femtotrimymetres', 'Femtotrimzmetres',
+        'Femtotrimyawdegrees', 'Femtotrimpitchdegrees',
+        'Femtotrimrolldegrees',
+        'Femtoaudiencenearmetres', 'Femtoaudiencefarmetres',
         'Displaymode', 'Completionmode', 'Fogdensity',
         'Brightness', 'Contrast', 'Saturation', 'Gamma',
         'Hueshiftdegrees', 'Temperature', 'Tint',
-        'Interactionstrength', 'Interactionsmoothing', 'Wrapyawdegrees',
+        'Interactionradius', 'Interactionfalloff',
+        'Interactionstrength', 'Interactionsmoothing',
+        'Interactionresponse', 'Interactiondecay',
+        'Installationinteractionenabled',
+        'Installationinteractionintensity',
+        'Leftwallinteractionenabled', 'Leftwallinteractionintensity',
+        'Centerwallinteractionenabled', 'Centerwallinteractionintensity',
+        'Rightwallinteractionenabled', 'Rightwallinteractionintensity',
+        'Wrapyawdegrees',
         'Wrapfovdegrees', 'Wrapcoverage', 'Wrapnoise',
         'Surfacefovdegrees', 'Artisticyawdegrees',
         'Artisticoffsetdirection', 'Artisticoffsetmetres',
@@ -1554,6 +2170,10 @@ def onPulse(par):
         apply_all()
     elif key == 'resetcolor':
         _reset_color_grade()
+    elif key == 'resetsensorcalibrationtrim':
+        _reset_sensor_calibration_trim('Sensor')
+    elif key == 'resetfemtocalibrationtrim':
+        _reset_sensor_calibration_trim('Femto')
     elif key == 'startmogeworker':
         _launch_worker('moge2')
     elif key == 'stopmogeworker':
@@ -1562,6 +2182,10 @@ def onPulse(par):
         _launch_worker('depth_anything')
     elif key == 'stopdepthanythingworker':
         _stop_worker('depth_anything')
+    elif key == 'startcameradepthworker':
+        _launch_sensor_worker()
+    elif key == 'stopcameradepthworker':
+        _stop_sensor_worker()
     return
 '''
 
@@ -1767,6 +2391,36 @@ def _patch_shader_float(dat, symbol, marker, value):
     return False
 
 
+def _patch_shader_vec4(dat, symbol, marker, values):
+    """Patch one marked GLSL vec4 constant without changing other source."""
+
+    if dat is None:
+        return False
+    try:
+        numbers = [float(value) for value in values]
+    except Exception:
+        return False
+    if len(numbers) != 4 or not all(math.isfinite(value) for value in numbers):
+        return False
+    pattern = (
+        r"(const\s+vec4\s+" + re.escape(str(symbol)) +
+        r"\s*=\s*vec4\()[^)]*(\)\s*;\s*//\s*" +
+        re.escape(str(marker)) + r")")
+    replacement = (
+        r"\g<1>" +
+        ", ".join("%.9g" % value for value in numbers) +
+        r"\g<2>")
+    try:
+        updated, count = re.subn(
+            pattern, replacement, str(dat.text), count=1)
+        if count == 1:
+            dat.text = updated
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _expr(node, names, expression):
     if isinstance(names, str):
         names = (names,)
@@ -1820,7 +2474,10 @@ def _connect(src, dst, dst_index=0, src_index=0, report=None, replace=False):
     except Exception:
         pass
     try:
-        dst.inputConnectors[dst_index].connect(src.outputConnectors[src_index])
+        if replace:
+            dst.inputConnectors[dst_index].disconnect()
+        src.outputConnectors[src_index].connect(
+            dst.inputConnectors[dst_index])
         return True
     except Exception as exc:
         if report is not None:
@@ -2034,6 +2691,58 @@ def _set_resolution(node, width, height):
     # 5760x3240.  Resolution aspect is also the deterministic choice for the
     # other explicit geometry and output textures created by this helper.
     _set(node, "outputaspect", "resolution")
+
+
+def _geometry_contract_dimensions(pipeline):
+    """Return the numeric position-texture contract for mixed-resolution GLSL."""
+
+    reconstruction = (
+        pipeline.op("RECONSTRUCTION") if pipeline is not None else None)
+    geometry = max(
+        64, min(
+            2048,
+            int(_value(reconstruction, "Geometryresolution", 384))))
+    preserve = bool(
+        _value(reconstruction, "Preservegeometryaspect", True))
+    aspect = 16.0 / 9.0
+    rgb = (
+        reconstruction.op("RGB_IN")
+        if reconstruction is not None else None)
+    try:
+        if rgb is not None and rgb.width > 0 and rgb.height > 0:
+            aspect = max(1.0 / 16.0, min(
+                16.0, float(rgb.width) / float(rgb.height)))
+    except Exception:
+        pass
+    if not preserve:
+        return geometry, geometry
+    width = max(
+        64, min(
+            2048,
+            2 * int(round((geometry * aspect ** 0.5) / 2.0))))
+    height = max(
+        64, min(
+            2048,
+            2 * int(round((geometry / aspect ** 0.5) / 2.0))))
+    return width, height
+
+
+def _align_interaction_position_resolutions(pipeline):
+    """Keep low-res interaction inputs from reducing the position contract."""
+
+    width, height = _geometry_contract_dimensions(pipeline)
+    for path in (
+            "COMPLETION/INTERACTION_RENDER_RESIZE",
+            "COMPLETION/procedural_backfill",
+            "POINT_RENDER/INTERACTION_RENDER_RESIZE",
+            "POINT_RENDER/VIEW_POSITION_INSTALLATION",
+            "POINT_RENDER/VIEW_POSITION_LEFT",
+            "POINT_RENDER/VIEW_POSITION_CENTER",
+            "POINT_RENDER/VIEW_POSITION_RIGHT"):
+        node = pipeline.op(path)
+        if node is not None:
+            _set_resolution(node, width, height)
+    return width, height
 
 
 def _set_horizontal_layout(node):
@@ -2420,6 +3129,90 @@ def _depth_anything_runtime_source(report):
     )
 
 
+def _build_femto_mega_adapter(sources, report):
+    """Build a default-off native Orbbec/Femto sensor contract.
+
+    The Orbbec TOP remains isolated from the existing webcam/Depth Anything
+    bridge. No serial is embedded in tracked code; an empty serial auto-selects
+    the first locally detected Orbbec device when this source is enabled.
+    """
+
+    comp = _ensure(sources, "baseCOMP", "FEMTO_MEGA_ADAPTER", report)
+    _style(
+        comp, 720, -260, (0.19, 0.44, 0.52),
+        "Native Femto Mega pointcloud; separate default-off sensor source",
+        310, 135)
+    page = _page(comp, "Femto Mega Sensor")
+    _custom(comp, page, "Toggle", "Enabled", False, label="Femto Mega Enabled")
+    _custom(
+        comp, page, "Str", "Deviceserial", "",
+        label="Femto Mega Device Serial (optional)")
+    result_valid = _custom(
+        comp, page, "Toggle", "Resultvalid", False,
+        label="Live Native Pointcloud")
+    if result_valid is not None:
+        try:
+            result_valid.readOnly = True
+        except Exception:
+            pass
+
+    primary = _ensure(
+        comp, "orbbecTOP", "FEMTO_PRIMARY", report, optional=True)
+    if primary is None:
+        primary = _ensure(comp, "constantTOP", "FEMTO_UNAVAILABLE_ZERO", report)
+        _set_resolution(primary, 640, 576)
+        _set(primary, "format", "rgba32float")
+        for names in (
+                ("colorr", "color1r"), ("colorg", "color1g"),
+                ("colorb", "color1b"), ("colora", "color1a", "alpha")):
+            _set(primary, names, 0.0)
+        _set(comp, "Resultvalid", False)
+    else:
+        _set(primary, "devicesource", "auto")
+        _set(primary, "image", "pointcloud")
+        _set(primary, "format", "rgba32float")
+        try:
+            current_device = str(primary.par.device.eval() or "")
+            choices = [str(item) for item in primary.par.device.menuNames]
+            if not current_device and choices:
+                primary.par.device.val = choices[0]
+        except Exception:
+            pass
+        _expr(primary, "active", "parent().par.Enabled")
+        _expr(
+            comp, "Resultvalid",
+            "bool(parent().op('FEMTO_MEGA_ADAPTER').par.Enabled and "
+            "parent().op('FEMTO_MEGA_ADAPTER/FEMTO_PRIMARY').valid and "
+            "not parent().op('FEMTO_MEGA_ADAPTER/FEMTO_PRIMARY').errors() and "
+            "parent().op('FEMTO_MEGA_ADAPTER/FEMTO_PRIMARY').width > 1 and "
+            "parent().op('FEMTO_MEGA_ADAPTER/FEMTO_PRIMARY').height > 1)")
+
+    position = _glsl(
+        comp, "CONVERT_SENSOR_POSITION", "femto_sensor_position",
+        [primary], report, True)
+    validity = _glsl(
+        comp, "DERIVE_SENSOR_VALIDITY", "femto_sensor_validity",
+        [position], report)
+    _set(validity, "format", "mono8fixed")
+    _out_top(comp, "OUT_POSITION", position, 0, report)
+    _out_top(comp, "OUT_MASK", validity, 1, report)
+    _out_top(comp, "OUT_CONFIDENCE", validity, 2, report)
+    _text(
+        comp, "README_FIRST",
+        "FEMTO MEGA SENSOR ADAPTER (DEFAULT OFF)\n\n"
+        "This public adapter uses TouchDesigner's native Orbbec TOP in "
+        "pointcloud mode. It converts native camera-local XYZ to the same "
+        "sensor-local POSITION/MASK/CONFIDENCE contract used by the existing "
+        "webcam + Depth Anything bridge. Raw pointcloud alpha is ignored; "
+        "validity is derived from finite positive native depth. Device Serial "
+        "is local and optional. The Show Control source selector enables only "
+        "one sensor path at a time. Venue alignment remains in the shared "
+        "Camera Calibration tab, so selecting Femto never changes or erases "
+        "the saved webcam settings.",
+        report)
+    return comp
+
+
 def _build_depth_anything_sensor_bridge(adapter, report):
     """Build a backend-replaceable, result-only audience sensor receiver."""
 
@@ -2430,9 +3223,13 @@ def _build_depth_anything_sensor_bridge(adapter, report):
     page = _page(comp, "Depth Anything Sensor")
     _custom(comp, page, "Toggle", "Enabled", False,
             label="Follow Adapter Enabled")
-    # DEPTH_SENSOR_ADAPTER.Enabled is the existing stable control surface used
-    # by runtime_helpers. The nested bridge remains default-off and follows it.
-    _expr(comp, "Enabled", "parent().par.Enabled")
+    # DEPTH_SENSOR_ADAPTER.Enabled remains the stable control surface used by
+    # runtime_helpers, while Sensorsource prevents the webcam receiver from
+    # cooking when the independent Femto Mega source is selected.
+    _expr(
+        comp, "Enabled",
+        "parent().par.Enabled and "
+        "parent().par.Sensorsource.eval() == 'depth_anything'")
     _custom(comp, page, "Str", "Resultbindhost", "127.0.0.1",
             label="Result Bind Host")
     _custom(comp, page, "Int", "Resulttcp", 9241, label="Result TCP")
@@ -2552,32 +3349,59 @@ def _build_depth_anything_sensor_bridge(adapter, report):
     return comp
 
 
-def _wire_depth_anything_sensor_routes(adapter, bridge, fallbacks, report):
-    """Preserve disabled fallbacks but fail closed while the bridge is enabled."""
+def _wire_depth_anything_sensor_routes(
+        adapter, bridge, fallbacks, report, femto=None):
+    """Route one selected sensor and fail closed while it is unavailable."""
 
     if len(fallbacks) != 3 or any(node is None for node in fallbacks):
         raise RuntimeError("Depth Anything routes require three adapter fallbacks")
+    adapter_page = _page(adapter, "Adapter")
+    _custom(
+        adapter, adapter_page, "Menu", "Sensorsource", "depth_anything",
+        ("depth_anything", "femto_mega"), label="Audience Sensor Source")
     zero = _ensure(adapter, "constantTOP", "DEPTH_ANYTHING_FAIL_CLOSED_ZERO", report)
     _set_resolution(zero, 256, 144)
     _set(zero, "format", "rgba32float")
     for names in (("colorr", "color1r"), ("colorg", "color1g"),
                   ("colorb", "color1b"), ("colora", "color1a", "alpha")):
         _set(zero, names, 0.0)
+    if femto is None:
+        try:
+            femto = adapter.parent().parent().op("SOURCES/FEMTO_MEGA_ADAPTER")
+        except Exception:
+            femto = None
+    femto_path = (
+        femto.path if femto is not None
+        else "/project1/flexgpu/WORKING_PIPELINE/SOURCES/FEMTO_MEGA_ADAPTER")
+    femto_specs = (
+        ("FEMTO_POSITION_SELECT", "OUT_POSITION"),
+        ("FEMTO_MASK_SELECT", "OUT_MASK"),
+        ("FEMTO_CONFIDENCE_SELECT", "OUT_CONFIDENCE"),
+    )
+    femto_selects = []
+    for name, output_name in femto_specs:
+        select = _ensure(adapter, "selectTOP", name, report)
+        _set(select, ("top", "topop"), femto_path + "/" + output_name)
+        femto_selects.append(select)
     route_specs = (
-        ("DEPTH_ANYTHING_POSITION_ROUTE", fallbacks[0], 0),
-        ("DEPTH_ANYTHING_MASK_ROUTE", fallbacks[1], 1),
-        ("DEPTH_ANYTHING_CONFIDENCE_ROUTE", fallbacks[2], 2),
+        ("DEPTH_ANYTHING_POSITION_ROUTE", fallbacks[0], 0, femto_selects[0]),
+        ("DEPTH_ANYTHING_MASK_ROUTE", fallbacks[1], 1, femto_selects[1]),
+        ("DEPTH_ANYTHING_CONFIDENCE_ROUTE", fallbacks[2], 2, femto_selects[2]),
     )
     routes = []
-    for name, fallback, output_index in route_specs:
+    for name, fallback, output_index, femto_select in route_specs:
         route = _ensure(adapter, "switchTOP", name, report)
         _connect(fallback, route, 0, 0, report, replace=True)
         _connect(zero, route, 1, 0, report, replace=True)
         _connect(bridge, route, 2, output_index, report, replace=True)
+        _connect(femto_select, route, 3, 0, report, replace=True)
         _expr(route, "index",
-              "2 if (op('DEPTH_ANYTHING_BRIDGE').par.Enabled and "
-              "op('DEPTH_ANYTHING_BRIDGE').par.Resultvalid) else "
-              "(1 if op('DEPTH_ANYTHING_BRIDGE').par.Enabled else 0)")
+              "0 if not parent().par.Enabled else "
+              "(3 if (parent().par.Sensorsource.eval() == 'femto_mega' "
+              "and op('%s').par.Resultvalid) else "
+              "(2 if (parent().par.Sensorsource.eval() == 'depth_anything' "
+              "and op('DEPTH_ANYTHING_BRIDGE').par.Resultvalid) else 1))" %
+              femto_path)
         routes.append(route)
     for index, (name, route) in enumerate(zip(
         ("OUT_POSITION", "OUT_MASK", "OUT_CONFIDENCE"), routes)):
@@ -3064,10 +3888,22 @@ def _build_sensor(parent, report):
     _custom(comp, page, "Menu", "Mode", "simulated",
             ("simulated", "replay", "depth_sensor", "disabled"))
     _custom(comp, page, "Float", "Interactionradius", 0.55,
-            label="Interaction Radius (metres)")
-    _custom(comp, page, "Float", "Forcegain", 0.35, label="Force Gain")
+            label="Interaction Radius (metres)",
+            minimum=0.05, maximum=3.0)
+    _custom(comp, page, "Float", "Interactionfalloff", 1.0,
+            label="Interaction Falloff",
+            minimum=0.25, maximum=4.0)
+    _custom(comp, page, "Float", "Forcegain", 0.35, label="Force Gain",
+            minimum=0.0, maximum=2.0)
     _custom(comp, page, "Float", "Interactionsmoothing", 0.35,
-            label="Interaction Smoothing")
+            label="Interaction Smoothing",
+            minimum=0.0, maximum=0.92)
+    _custom(comp, page, "Float", "Interactionresponse", 0.65,
+            label="Interaction Response",
+            minimum=0.0, maximum=1.0)
+    _custom(comp, page, "Float", "Interactiondecay", 0.5,
+            label="Interaction Decay",
+            minimum=0.0, maximum=1.0)
     _custom(comp, page, "Float", "Sensoragems", -1.0,
             label="Sensor Age (ms; -1 unknown)")
     _custom(comp, page, "Int", "Sensorframeid", -1, label="Sensor Frame ID")
@@ -3113,6 +3949,10 @@ def _build_sensor(parent, report):
            "Local hardware adapter: output sensor-local metric-position RGBA", 270, 105)
     adapter_page = _page(sensor_adapter, "Adapter")
     _custom(sensor_adapter, adapter_page, "Toggle", "Enabled", False)
+    _custom(
+        sensor_adapter, adapter_page, "Menu", "Sensorsource",
+        "depth_anything", ("depth_anything", "femto_mega"),
+        label="Audience Sensor Source")
     _custom(sensor_adapter, adapter_page, "Str", "Positioncontract",
             TOP_CONTRACTS["SENSOR_POSITION"])
     adapter_position = _ensure(sensor_adapter, "constantTOP",
@@ -3132,6 +3972,8 @@ def _build_sensor(parent, report):
     _set(adapter_confidence, ("colorg", "color1g"), 1.0)
     _set(adapter_confidence, ("colorb", "color1b"), 1.0)
     _out_top(sensor_adapter, "OUT_CONFIDENCE", adapter_confidence, 2, report)
+    femto_adapter = _build_femto_mega_adapter(
+        parent.op("SOURCES"), report)
     depth_anything_bridge = _build_depth_anything_sensor_bridge(
         sensor_adapter, report)
     _wire_depth_anything_sensor_routes(
@@ -3139,6 +3981,7 @@ def _build_sensor(parent, report):
         depth_anything_bridge,
         (adapter_position, adapter_mask, adapter_confidence),
         report,
+        femto=femto_adapter,
     )
     calibrated_adapter_position = _glsl(
         comp, "CALIBRATE_SENSOR_POSITION", "sensor_to_world",
@@ -3191,7 +4034,7 @@ def _build_sensor(parent, report):
           "DEPTH_SENSOR_ADAPTER/OUT_POSITION must contain sensor-local XYZ "
           "metres in RGB and occupancy in A. OUT_MASK and OUT_CONFIDENCE are "
           "multiplied exactly once after SENSOR_TO_WORLD calibration. Interaction "
-          "uses a bounded 8x8 world-space occupancy-primitive search (64 samples "
+          "uses a bounded 32x32 world-space occupancy-primitive search (1024 samples "
           "per generated point), an explicit low-resolution SDF approximation. "
           "OUT_INTERACTION remains signed machine-readable force/occupancy; "
           "OUT_INTERACTION_DEBUG is a display-only color visualization.", report)
@@ -3311,6 +4154,8 @@ def _build_completion(parent, report):
 
     procedural_position = _glsl(comp, "procedural_backfill", "procedural_backfill",
                                 [position, interaction], report, True)
+    geometry_width, geometry_height = _geometry_contract_dimensions(parent)
+    _set_resolution(procedural_position, geometry_width, geometry_height)
     fog_color = _glsl(comp, "fog_completion", "fog_completion",
                       [position, color], report, False)
     procedural_color = _glsl(comp, "procedural_color", "procedural_color",
@@ -3355,6 +4200,7 @@ def _build_point_render(parent, report):
            "Metric point cloud with single, triple-surface and stereo views", 270, 120)
     position = _in_top(comp, "POSITION_IN", 0, report)
     color = _in_top(comp, "COLOR_IN", 1, report)
+    interaction = _in_top(comp, "INTERACTION_IN", 2, report)
     page = _page(comp, "Render")
     _custom(comp, page, "Int", "Maxpoints", 120000, label="Maximum Points")
     _custom(comp, page, "Float", "Pointsize", 3.0, label="Point Thickness")
@@ -3380,6 +4226,41 @@ def _build_point_render(parent, report):
         label="Artistic Side Offset Direction")
     _custom(comp, page, "Float", "Artisticoffsetmetres", 0.45,
             label="Artistic Side Offset (metres)")
+    for view, title, enabled_default in (
+            ("INSTALLATION", "Installation", True),
+            ("LEFT", "Leftwall", False),
+            ("CENTER", "Centerwall", True),
+            ("RIGHT", "Rightwall", False)):
+        _custom(
+            comp, page, "Toggle", title + "interactionenabled",
+            enabled_default,
+            label=title.replace("wall", " Wall") + " Interaction Enabled")
+        _custom(
+            comp, page, "Float", title + "interactionintensity", 1.0,
+            label=title.replace("wall", " Wall") + " Interaction Intensity",
+            minimum=0.0, maximum=10.0)
+
+    view_positions = {}
+    for view, title, enabled_default in (
+            ("INSTALLATION", "Installation", True),
+            ("LEFT", "Leftwall", False),
+            ("CENTER", "Centerwall", True),
+            ("RIGHT", "Rightwall", False)):
+        view_position = _glsl(
+            comp, "VIEW_POSITION_" + view, "view_interaction",
+            [position, interaction], report, True)
+        enabled = bool(_value(
+            comp, title + "interactionenabled", enabled_default))
+        intensity = max(0.0, min(
+            10.0, float(_value(
+                comp, title + "interactionintensity", 1.0))))
+        _patch_shader_float(
+            comp.op("VIEW_POSITION_%s_PIXEL" % view),
+            "viewInteractionGain", "FLEXGPU_VIEW_INTERACTION_GAIN",
+            intensity if enabled else 0.0)
+        geometry_width, geometry_height = _geometry_contract_dimensions(parent)
+        _set_resolution(view_position, geometry_width, geometry_height)
+        view_positions[view] = view_position
 
     points = _ensure(comp, "toptoPOP", "POSITION_TO_POINTS", report, optional=True)
     point_glyph = _glsl(comp, "POINT_GLYPH", "point_glyph", [], report, False)
@@ -3403,7 +4284,7 @@ def _build_point_render(parent, report):
     triple_renders = {}
     if points is not None:
         _set(points, "rgba", "pactive")
-        _set(points, "input0top", position.path)
+        _set(points, "input0top", view_positions["INSTALLATION"].path)
         _set(points, "input0chanscope", "r g b a")
         # TOP to POP maps one attribute component per sampled channel. Repeating
         # a vector attribute name asks every channel to provide the whole
@@ -3447,6 +4328,51 @@ def _build_point_render(parent, report):
             _set(point_thin, "thinrandomseed", 19)
             point_source = point_thin
 
+        point_sources = {"INSTALLATION": point_source}
+        for view in ("LEFT", "CENTER", "RIGHT"):
+            branch_points = _ensure(
+                comp, "toptoPOP", "POSITION_TO_POINTS_" + view,
+                report, optional=True)
+            if branch_points is None:
+                continue
+            _set(branch_points, "rgba", "pactive")
+            _set(branch_points, "input0top", view_positions[view].path)
+            _set(branch_points, "input0chanscope", "r g b a")
+            _set(
+                branch_points, "input0attrscope",
+                "P(0) P(1) P(2) active")
+            _set(branch_points, "input0filter", "nearest")
+            if _set_sequence_blocks(branch_points, "input", 2):
+                _set(branch_points, "input1top", color.path)
+                _set(branch_points, "input1chanscope", "r g b a")
+                _set(
+                    branch_points, "input1attrscope",
+                    "Color(0) Color(1) Color(2) Color(3)")
+                _set(branch_points, "input1filter", "nearest")
+            _set(branch_points, "surftype", "points")
+            _set(branch_points, "texture", "point")
+            _set(branch_points, "maxpointsenable", True)
+            _expr(branch_points, "maxpoints", "parent().par.Maxpoints")
+            branch_source = branch_points
+            branch_thin = _ensure(
+                comp, "deletePOP", "VISIBLE_POINT_THIN_" + view,
+                report, optional=True)
+            if branch_thin is not None:
+                _connect(
+                    branch_points, branch_thin,
+                    report=report, replace=True)
+                _set(branch_thin, "entity", "point")
+                _set(branch_thin, "thinenabled", True)
+                _set(branch_thin, "thininvert", False)
+                _expr(
+                    branch_thin,
+                    "thinrandom",
+                    "1.0 - pow(max(0.0, 1.0 - "
+                    "parent().par.Pointkeep.eval()), 1.0 / 3.0)")
+                _set(branch_thin, "thinrandomseed", 19)
+                branch_source = branch_thin
+            point_sources[view] = branch_source
+
         # Render Simple cannot translate a camera on X; its old eye path moved
         # and toe-in rotated the geometry, and Normalize Geo destroyed metres.
         # A managed Geometry/Camera/Render path preserves world scale and uses
@@ -3476,6 +4402,37 @@ def _build_point_render(parent, report):
             if point_material is not None:
                 _set(geo, "material", point_material.path)
 
+        geometry_by_view = {"INSTALLATION": (geo, selected)}
+        for view in ("LEFT", "CENTER", "RIGHT"):
+            branch_source = point_sources.get(view)
+            if branch_source is None:
+                continue
+            branch_geo = _ensure(
+                comp, "geometryCOMP", "POINT_WORLD_GEO_" + view,
+                report, optional=True)
+            branch_selected = None
+            if branch_geo is not None:
+                branch_selected = _ensure(
+                    branch_geo, "selectPOP", "SELECT_POINT_WORLD",
+                    report, optional=True)
+                if branch_selected is not None:
+                    _set(branch_selected, "pop", branch_source.path)
+                    try:
+                        branch_selected.render = True
+                        branch_selected.display = True
+                    except Exception:
+                        pass
+                default_primitive = _child(branch_geo, "torus1")
+                if default_primitive is not None:
+                    try:
+                        default_primitive.render = False
+                        default_primitive.display = False
+                    except Exception:
+                        pass
+                if point_material is not None:
+                    _set(branch_geo, "material", point_material.path)
+            geometry_by_view[view] = (branch_geo, branch_selected)
+
         cameras = {}
         for camera_name, shift_expression in (
             ("CAMERA_CENTER_METRIC", "0.0"),
@@ -3500,13 +4457,16 @@ def _build_point_render(parent, report):
                 _set(camera, "ipdshift", 0.0)
             cameras[camera_name] = camera
 
-        def make_metric_render(name, camera):
-            if geo is None or selected is None or camera is None:
+        def make_metric_render(name, camera, view="INSTALLATION"):
+            branch_geo, branch_selected = geometry_by_view.get(
+                view, (None, None))
+            if (branch_geo is None or branch_selected is None or
+                    camera is None):
                 return None
             node = _ensure(comp, "renderTOP", name, report, optional=True)
             if node is None:
                 return None
-            _set(node, "geometry", geo.path)
+            _set(node, "geometry", branch_geo.path)
             _set(node, "camera", camera.path)
             _set(node, "lights", "")
             if point_material is not None:
@@ -3558,7 +4518,7 @@ def _build_point_render(parent, report):
                 _set(camera, "far", 100.0)
                 _set(camera, "ipdshift", 0.0)
             triple_renders["WRAP_" + side] = make_metric_render(
-                "METRIC_RENDER_WRAP_" + side, camera)
+                "METRIC_RENDER_WRAP_" + side, camera, side)
 
         # Artistic views intentionally move as well as turn the side cameras.
         # Camera translation moves visible content in the opposite screen
@@ -3600,7 +4560,7 @@ def _build_point_render(parent, report):
                 _set(camera, "far", 100.0)
                 _set(camera, "ipdshift", 0.0)
             triple_renders["ARTISTIC_" + side] = make_metric_render(
-                "METRIC_RENDER_ARTISTIC_" + side, camera)
+                "METRIC_RENDER_ARTISTIC_" + side, camera, side)
 
         # A stock Render Simple center view remains a safe pre-2025 fallback.
         # It deliberately produces mono eyes: fake toe-in stereo is worse than
@@ -3824,6 +4784,58 @@ def _build_stereo(parent, report):
     _out_top(comp, "OUT_LEFT_EYE", left_grade, 0, report)
     _out_top(comp, "OUT_RIGHT_EYE", right_grade, 1, report)
     _out_top(comp, "OUT_STEREO_SBS", layout, 2, report)
+
+    # Some merged working TOEs retain a cooked 128x128 texture on their
+    # original In/GLSL/Out TOP chain even after the external component inputs
+    # and Common-page resolution parameters are repaired.  Keep those legacy
+    # operators as rollback evidence, but expose a fresh managed path that
+    # selects the stable point-render eyes directly.  The repair GLSL TOPs
+    # intentionally share the original pixel DATs so Show Control color/fog
+    # adjustments continue to affect the public stereo outputs.
+    left_source = _ensure(
+        comp, "selectTOP", "LEFT_SOURCE_REPAIR", report)
+    right_source = _ensure(
+        comp, "selectTOP", "RIGHT_SOURCE_REPAIR", report)
+    _set(left_source, ("top", "topselect"),
+         "../POINT_RENDER/OUT_LEFT_EYE")
+    _set(right_source, ("top", "topselect"),
+         "../POINT_RENDER/OUT_RIGHT_EYE")
+    left_grade_repair = _ensure(
+        comp, "glslTOP", "GRADE_LEFT_EYE_REPAIR", report)
+    right_grade_repair = _ensure(
+        comp, "glslTOP", "GRADE_RIGHT_EYE_REPAIR", report)
+    for repair, source, pixel_dat in (
+            (left_grade_repair, left_source,
+             comp.op("GRADE_LEFT_EYE_PIXEL")),
+            (right_grade_repair, right_source,
+             comp.op("GRADE_RIGHT_EYE_PIXEL"))):
+        _set(repair, ("pixeldat", "pixelshader"), pixel_dat.path)
+        _set(repair, "outputresolution", "useinput")
+        _set(repair, "format", "rgba16float")
+        _connect(source, repair, report=report, replace=True)
+    layout_repair = _ensure(
+        comp, "layoutTOP", "STEREO_SIDE_BY_SIDE_REPAIR", report)
+    _connect(
+        left_grade_repair, layout_repair, 0, 0, report, replace=True)
+    _connect(
+        right_grade_repair, layout_repair, 1, 0, report, replace=True)
+    _set_horizontal_layout(layout_repair)
+    _set(layout_repair, "outputresolution", "useinput")
+
+    # Connect Order defines the Base COMP output slots in TouchDesigner 2025.
+    # Move the stale legacy outputs aside without destroying them and publish
+    # the fresh graded path at the established 0/1/2 contract.
+    for legacy, index in (
+            (comp.op("OUT_LEFT_EYE"), 3),
+            (comp.op("OUT_RIGHT_EYE"), 4),
+            (comp.op("OUT_STEREO_SBS"), 5)):
+        _set(legacy, ("connectorder", "outputindex", "index"), index)
+    _out_top(
+        comp, "OUT_LEFT_EYE_REPAIR", left_grade_repair, 0, report)
+    _out_top(
+        comp, "OUT_RIGHT_EYE_REPAIR", right_grade_repair, 1, report)
+    _out_top(
+        comp, "OUT_STEREO_SBS_REPAIR", layout_repair, 2, report)
     _text(comp, "README_FIRST", "This is a headset-independent stereo preview. "
           "The preview uses parallel metric Camera COMPs and does not consume a "
           "headset pose, per-eye projection matrices, hidden-area mesh, late-latch "
@@ -3920,6 +4932,21 @@ def _first_input(node):
         return None
 
 
+def _interaction_world_position_source(pipeline):
+    """Return the public live position contract used by the active renderer."""
+
+    if pipeline is None:
+        return None
+    source = pipeline.op("OUT_POSITION")
+    if source is not None:
+        return source
+    contract = pipeline.op("RENDER_CONTRACT")
+    if contract is not None:
+        return contract
+    # Compatibility fallback for older, unmerged project revisions.
+    return pipeline.op("RECONSTRUCTION")
+
+
 def _install_interaction_debug_output(sensor, pipeline, report):
     """Add the display-only interaction view without rebuilding other stages."""
 
@@ -4004,6 +5031,80 @@ def install_depth_anything_sensor_bridge(root=None):
           (bridge.path, len(report.created), len(report.reused),
            len(report.warnings)))
     return bridge
+
+
+def install_femto_mega_sensor_bridge(root=None):
+    """Add a selectable native Femto Mega source to an existing local TOE.
+
+    This bounded installer reuses the current adapter fallbacks, keeps
+    ``depth_anything`` as the default source, creates only the public native
+    Orbbec adapter plus managed route selectors, and refreshes Show Control.
+    It never changes webcam name/index/mirror settings, starts a worker, embeds
+    a device serial, inspects private components, or saves the current TOE.
+    """
+
+    global LAST_REPORT
+    report = BuildReport()
+    LAST_REPORT = report
+    if root is None:
+        root = _op(ROOT_PATH)
+    elif isinstance(root, str):
+        root = _op(root)
+    if root is None:
+        raise RuntimeError("FlexGPU root %s does not exist" % ROOT_PATH)
+    pipeline = root.op(PIPELINE_NAME)
+    sources = pipeline.op("SOURCES") if pipeline is not None else None
+    sensor = (
+        pipeline.op("SENSOR_INTERACTION") if pipeline is not None else None)
+    adapter = (
+        sensor.op("DEPTH_SENSOR_ADAPTER") if sensor is not None else None)
+    if pipeline is None or sources is None or sensor is None or adapter is None:
+        raise RuntimeError(
+            "managed sensor pipeline is missing; build WORKING_PIPELINE first")
+
+    fallback_names = (
+        ("OUT_POSITION", "DEPTH_ANYTHING_POSITION_ROUTE",
+         "REPLACE_WITH_CALIBRATED_SENSOR_POSITION"),
+        ("OUT_MASK", "DEPTH_ANYTHING_MASK_ROUTE", "REPLACE_WITH_SENSOR_MASK"),
+        ("OUT_CONFIDENCE", "DEPTH_ANYTHING_CONFIDENCE_ROUTE",
+         "REPLACE_WITH_SENSOR_CONFIDENCE"),
+    )
+    fallbacks = []
+    for output_name, route_name, placeholder_name in fallback_names:
+        output = adapter.op(output_name)
+        source = _first_input(output)
+        if source is not None and str(getattr(source, "name", "")) == route_name:
+            source = _first_input(source)
+        if source is None:
+            source = adapter.op(placeholder_name)
+        if source is None:
+            raise RuntimeError(
+                "could not preserve sensor fallback source for " + output_name)
+        fallbacks.append(source)
+
+    femto = _build_femto_mega_adapter(sources, report)
+    bridge = _build_depth_anything_sensor_bridge(adapter, report)
+    _wire_depth_anything_sensor_routes(
+        adapter, bridge, tuple(fallbacks), report, femto=femto)
+    control = _build_show_control(pipeline, report)
+    world_position = _interaction_world_position_source(pipeline)
+    if world_position is None:
+        raise RuntimeError("managed live position contract is missing")
+    _connect(world_position, sensor, 0, 0, report, replace=True)
+    _apply_sensor_calibration_shader_values(pipeline, control)
+    _apply_femto_depth_gate_shader_values(pipeline, control)
+    _install_interaction_debug_output(sensor, pipeline, report)
+    try:
+        femto.store("femto_mega_install_report", report.as_dict())
+    except Exception:
+        pass
+    print(
+        "[FlexGPU runtime] Femto Mega source ready default-off: %s; "
+        "webcam + Depth Anything preserved; TOE remains unsaved "
+        "(%d created, %d reused, %d warnings)" %
+        (femto.path, len(report.created), len(report.reused),
+         len(report.warnings)))
+    return femto
 
 
 def install_depth_anything_geometry_bridge(root=None):
@@ -4189,11 +5290,13 @@ def _build_show_control(pipeline, report):
         _value(completion, "Fogdensity", 0.35), label="Fog Density")
     _custom(
         control, show_page, "Float", "Interactionstrength",
-        _value(sensor, "Forcegain", 0.35), label="Interaction Strength")
+        _value(sensor, "Forcegain", 0.35), label="Interaction Strength",
+        minimum=0.0, maximum=2.0)
     _custom(
         control, show_page, "Float", "Interactionsmoothing",
         _value(sensor, "Interactionsmoothing", 0.35),
-        label="Interaction Smoothing")
+        label="Interaction Smoothing",
+        minimum=0.0, maximum=0.92)
     _custom(
         control, show_page, "Float", "Wrapyawdegrees",
         _value(render, "Wrapyawdegrees", 30.0),
@@ -4276,6 +5379,47 @@ def _build_show_control(pipeline, report):
     _custom(control, show_page, "Pulse", "Applyall", False,
             label="Apply All Show Controls")
 
+    routing_page = _page(control, "Interaction Routing")
+    _custom(
+        control, routing_page, "Float", "Interactionradius",
+        _value(sensor, "Interactionradius", 0.55),
+        label="Interaction Radius (metres)",
+        minimum=0.05, maximum=3.0)
+    _custom(
+        control, routing_page, "Float", "Interactionfalloff",
+        _value(sensor, "Interactionfalloff", 1.0),
+        label="Interaction Edge Falloff",
+        minimum=0.25, maximum=4.0)
+    _custom(
+        control, routing_page, "Float", "Interactionresponse",
+        _value(sensor, "Interactionresponse", 0.65),
+        label="Interaction Response",
+        minimum=0.0, maximum=1.0)
+    _custom(
+        control, routing_page, "Float", "Interactiondecay",
+        _value(sensor, "Interactiondecay", 0.5),
+        label="Interaction Decay",
+        minimum=0.0, maximum=1.0)
+    for title, enabled_default in (
+            ("Installation", True),
+            ("Leftwall", False),
+            ("Centerwall", True),
+            ("Rightwall", False)):
+        readable = title.replace("wall", " Wall")
+        _custom(
+            control, routing_page, "Toggle",
+            title + "interactionenabled",
+            bool(_value(
+                render, title + "interactionenabled", enabled_default)),
+            label=readable + " Interaction Enabled")
+        _custom(
+            control, routing_page, "Float",
+            title + "interactionintensity",
+            float(_value(
+                render, title + "interactionintensity", 1.0)),
+            label=readable + " Interaction Intensity",
+            minimum=0.0, maximum=10.0)
+
     audio_page = _page(control, "Audio")
     _custom(
         control, audio_page, "Toggle", "Audioenabled",
@@ -4319,6 +5463,142 @@ def _build_show_control(pipeline, report):
     _custom(
         control, color_page, "Pulse", "Resetcolor", False,
         label="Reset Color Adjustment")
+
+    camera_page = _page(control, "Camera Depth")
+    sensor_adapter = (
+        sensor.op("DEPTH_SENSOR_ADAPTER") if sensor is not None else None)
+    sensor_bridge = (
+        sensor_adapter.op("DEPTH_ANYTHING_BRIDGE")
+        if sensor_adapter is not None else None)
+    femto_adapter = pipeline.op("SOURCES/FEMTO_MEGA_ADAPTER")
+    sensor_enabled = (
+        str(_value(sensor, "Mode", "disabled")) == "depth_sensor" and
+        bool(_value(sensor_adapter, "Enabled", False)))
+    sensor_source = _custom(
+        control, camera_page, "Menu", "Camerasensorsource",
+        str(_value(sensor_adapter, "Sensorsource", "depth_anything")),
+        ("depth_anything", "femto_mega"), label="Camera Depth Source")
+    if sensor_source is not None:
+        try:
+            sensor_source.menuLabels = [
+                "Webcam + Depth Anything",
+                "Femto Mega (USB)",
+            ]
+        except Exception:
+            pass
+    _custom(
+        control, camera_page, "Toggle", "Camerainteractionenabled",
+        sensor_enabled, label="Camera Interaction Enabled")
+    _custom(
+        control, camera_page, "Str", "Cameraname", "",
+        label="Camera Device Name (optional)")
+    _custom(
+        control, camera_page, "Int", "Cameraindex", 0,
+        label="Camera Index (fallback)", minimum=0, maximum=31)
+    _custom(
+        control, camera_page, "Toggle", "Cameramirrorhorizontal",
+        bool(_value(sensor_bridge, "Mirrorhorizontal", True)),
+        label="Webcam Mirror Horizontal")
+    _custom(
+        control, camera_page, "Str", "Femtodeviceserial",
+        str(_value(femto_adapter, "Deviceserial", "")),
+        label="Femto Mega Serial (optional)")
+    _custom(
+        control, camera_page, "Pulse", "Startcameradepthworker", False,
+        label="Start Webcam Depth Worker")
+    _custom(
+        control, camera_page, "Pulse", "Stopcameradepthworker", False,
+        label="Stop Webcam Depth Worker")
+    sensor_worker_pid = _custom(
+        control, camera_page, "Int", "Sensorworkerpid", 0,
+        label="Camera Worker PID")
+    sensor_worker_status = _custom(
+        control, camera_page, "Str", "Sensorworkerstatus",
+        "idle; camera RGB remains inside the local worker",
+        label="Camera Worker Status")
+    femto_status = _custom(
+        control, camera_page, "Str", "Femtostatus",
+        "inactive; webcam + Depth Anything settings are preserved",
+        label="Femto Mega Status")
+    for parameter in (
+            sensor_worker_pid, sensor_worker_status, femto_status):
+        try:
+            parameter.readOnly = True
+        except Exception:
+            pass
+
+    calibration_page = _page(control, "Camera Calibration")
+    _custom(
+        control, calibration_page, "Float", "Sensorpositionscale", 1.0,
+        label="Webcam Depth Position Scale",
+        minimum=0.25, maximum=4.0)
+    for axis in ("X", "Y", "Z"):
+        _custom(
+            control, calibration_page, "Float",
+            "Sensortrim%smetres" % axis.lower(), 0.0,
+            label="Webcam World %s Trim (metres)" % axis,
+            minimum=-5.0, maximum=5.0)
+    _custom(
+        control, calibration_page, "Float",
+        "Sensortrimyawdegrees", 0.0,
+        label="Webcam Sensor Yaw Trim (degrees)",
+        minimum=-180.0, maximum=180.0)
+    _custom(
+        control, calibration_page, "Float",
+        "Sensortrimpitchdegrees", 0.0,
+        label="Webcam Sensor Pitch Trim (degrees)",
+        minimum=-90.0, maximum=90.0)
+    _custom(
+        control, calibration_page, "Float",
+        "Sensortrimrolldegrees", 0.0,
+        label="Webcam Sensor Roll Trim (degrees)",
+        minimum=-180.0, maximum=180.0)
+    _custom(
+        control, calibration_page, "Pulse",
+        "Resetsensorcalibrationtrim", False,
+        label="Reset Webcam Calibration Trim")
+    _custom(
+        control, calibration_page, "Float", "Femtopositionscale", 1.0,
+        label="Femto Depth Position Scale",
+        minimum=0.25, maximum=4.0)
+    _custom(
+        control, calibration_page, "Toggle", "Femtomirrorhorizontal", False,
+        label="Femto Mirror Horizontal")
+    for axis in ("X", "Y", "Z"):
+        _custom(
+            control, calibration_page, "Float",
+            "Femtotrim%smetres" % axis.lower(), 0.0,
+            label="Femto World %s Trim (metres)" % axis,
+            minimum=-5.0, maximum=5.0)
+    _custom(
+        control, calibration_page, "Float",
+        "Femtotrimyawdegrees", 0.0,
+        label="Femto Sensor Yaw Trim (degrees)",
+        minimum=-180.0, maximum=180.0)
+    _custom(
+        control, calibration_page, "Float",
+        "Femtotrimpitchdegrees", 0.0,
+        label="Femto Sensor Pitch Trim (degrees)",
+        minimum=-90.0, maximum=90.0)
+    _custom(
+        control, calibration_page, "Float",
+        "Femtotrimrolldegrees", 0.0,
+        label="Femto Sensor Roll Trim (degrees)",
+        minimum=-180.0, maximum=180.0)
+    _custom(
+        control, calibration_page, "Float",
+        "Femtoaudiencenearmetres", 0.25,
+        label="Femto Audience Near (metres)",
+        minimum=0.10, maximum=15.0)
+    _custom(
+        control, calibration_page, "Float",
+        "Femtoaudiencefarmetres", 12.0,
+        label="Femto Audience Far (metres)",
+        minimum=0.20, maximum=20.0)
+    _custom(
+        control, calibration_page, "Pulse",
+        "Resetfemtocalibrationtrim", False,
+        label="Reset Femto Calibration Trim")
 
     quality_page = _page(control, "Quality")
     bridge = adapter.op("MOGE2_BRIDGE") if adapter is not None else None
@@ -4416,7 +5696,9 @@ def _build_show_control(pipeline, report):
         ["Display Mode", "WORKING_PIPELINE/Displaymode"],
         ["Completion / Fog", "COMPLETION + view-grade shader constants"],
         ["Color Adjustment", "single, six wall views + stereo grade shaders"],
-        ["Interaction", "SENSOR_INTERACTION force + low-latency smoothing"],
+        ["Interaction", "radius/falloff/timing + per-output enable/intensity"],
+        ["Camera Depth", "selectable webcam Depth Anything or native Femto Mega sensor"],
+        ["Camera Calibration", "independent webcam/Femto trims + Femto audience depth gate"],
         ["Panoramic", "wrap camera yaw/FOV + procedural atmosphere"],
         ["Artistic", "side camera yaw/offset + artistic surface FOV"],
         ["Wall Resolution", "single + six feeds; mosaics are 3x wall width"],
@@ -4436,7 +5718,16 @@ def _build_show_control(pipeline, report):
         "grades the rendered point-cloud views only: single wall, all six "
         "triple-wall feeds, and both stereo preview eyes. Neutral defaults "
         "leave the accepted image unchanged, and Reset Color Adjustment "
-        "restores them. Worker buttons open a "
+        "restores them. The Camera Depth tab selects either the existing "
+        "webcam + Depth Anything path or the native Femto Mega pointcloud; "
+        "only the selected source is enabled. The webcam device name, index, "
+        "and mirror values stay intact while Femto is selected. The webcam "
+        "worker buttons always switch back to webcam + Depth Anything before "
+        "starting that separate no-RGB audience worker. "
+        "Use an exact Camera Device Name when Windows virtual cameras occupy "
+        "numeric indexes; an empty name keeps the index-based fallback for "
+        "other machines. Camera workers start hidden and fail closed when "
+        "stopped or stale. Generated-geometry worker buttons open a "
         "visible PowerShell console. Use the matching Stop button before "
         "starting the other provider; Ctrl+C is not required. "
         "The Audio tab mirrors only the optional public adapter contract. "
@@ -4571,6 +5862,179 @@ def _apply_color_grade_shader_values(pipeline, control):
                     (dat.path, marker))
 
 
+def _apply_sensor_calibration_shader_values(pipeline, control):
+    """Patch the saved baseline matrix and public neutral trims into GLSL."""
+
+    sensor = pipeline.op("SENSOR_INTERACTION")
+    shader = (
+        sensor.op("CALIBRATE_SENSOR_POSITION_PIXEL")
+        if sensor is not None else None)
+    if sensor is None or shader is None:
+        raise RuntimeError("managed sensor calibration shader is missing")
+    identity = (
+        (1.0, 0.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0, 0.0),
+        (0.0, 0.0, 1.0, 0.0),
+        (0.0, 0.0, 0.0, 1.0),
+    )
+    for index, fallback in enumerate(identity):
+        raw = _value(
+            sensor, "Sensortoworld%d" % index,
+            " ".join(str(value) for value in fallback))
+        try:
+            values = [
+                float(value)
+                for value in str(raw).replace(",", " ").split()]
+        except Exception:
+            values = list(fallback)
+        if (len(values) != 4 or
+                not all(math.isfinite(value) for value in values)):
+            values = list(fallback)
+        if not _patch_shader_vec4(
+                shader, "sensorToWorld%d" % index,
+                "FLEXGPU_SENSOR_TO_WORLD_%d" % index, values):
+            raise RuntimeError(
+                "%s is missing sensor-to-world row %d" %
+                (shader.path, index))
+    source = str(
+        _value(control, "Camerasensorsource", "depth_anything")
+        ).strip().lower()
+    prefix = "Femto" if source == "femto_mega" else "Sensor"
+    settings = (
+        (prefix + "positionscale", "sensorPositionScale",
+         "FLEXGPU_SENSOR_POSITION_SCALE", 1.0, 0.25, 4.0),
+        (prefix + "trimxmetres", "sensorTrimXMetres",
+         "FLEXGPU_SENSOR_TRIM_X", 0.0, -5.0, 5.0),
+        (prefix + "trimymetres", "sensorTrimYMetres",
+         "FLEXGPU_SENSOR_TRIM_Y", 0.0, -5.0, 5.0),
+        (prefix + "trimzmetres", "sensorTrimZMetres",
+         "FLEXGPU_SENSOR_TRIM_Z", 0.0, -5.0, 5.0),
+        (prefix + "trimyawdegrees", "sensorTrimYawDegrees",
+         "FLEXGPU_SENSOR_TRIM_YAW", 0.0, -180.0, 180.0),
+        (prefix + "trimpitchdegrees", "sensorTrimPitchDegrees",
+         "FLEXGPU_SENSOR_TRIM_PITCH", 0.0, -90.0, 90.0),
+        (prefix + "trimrolldegrees", "sensorTrimRollDegrees",
+         "FLEXGPU_SENSOR_TRIM_ROLL", 0.0, -180.0, 180.0),
+    )
+    for parameter, symbol, marker, fallback, lower, upper in settings:
+        value = max(
+            lower, min(upper, float(_value(control, parameter, fallback))))
+        _set(control, parameter, value)
+        if not _patch_shader_float(shader, symbol, marker, value):
+            raise RuntimeError(
+                "%s is missing managed calibration marker %s" %
+                (shader.path, marker))
+
+
+def _apply_femto_depth_gate_shader_values(pipeline, control):
+    """Patch the native sensor's independent mirror and distance gate."""
+
+    femto = pipeline.op("SOURCES/FEMTO_MEGA_ADAPTER")
+    validity_shader = (
+        femto.op("DERIVE_SENSOR_VALIDITY_PIXEL")
+        if femto is not None else None)
+    position_shader = (
+        femto.op("CONVERT_SENSOR_POSITION_PIXEL")
+        if femto is not None else None)
+    if femto is None or validity_shader is None or position_shader is None:
+        raise RuntimeError("managed Femto position/gate shader is missing")
+    mirrored = bool(_value(control, "Femtomirrorhorizontal", False))
+    near_metres = max(
+        0.10, min(
+            15.0,
+            float(_value(control, "Femtoaudiencenearmetres", 0.25))))
+    far_metres = max(
+        near_metres + 0.10,
+        min(
+            20.0,
+            float(_value(control, "Femtoaudiencefarmetres", 12.0))))
+    _set(control, "Femtomirrorhorizontal", mirrored)
+    _set(control, "Femtoaudiencenearmetres", near_metres)
+    _set(control, "Femtoaudiencefarmetres", far_metres)
+    if not _patch_shader_float(
+            position_shader, "femtoMirrorHorizontal",
+            "FLEXGPU_FEMTO_MIRROR_HORIZONTAL",
+            1.0 if mirrored else 0.0):
+        raise RuntimeError(
+            "%s is missing managed Femto mirror marker" %
+            position_shader.path)
+    for symbol, marker, value in (
+            ("femtoNearMetres", "FLEXGPU_FEMTO_NEAR_METRES", near_metres),
+            ("femtoFarMetres", "FLEXGPU_FEMTO_FAR_METRES", far_metres)):
+        if not _patch_shader_float(
+                validity_shader, symbol, marker, value):
+            raise RuntimeError(
+                "%s is missing managed Femto gate marker %s" %
+                (validity_shader.path, marker))
+
+
+def install_camera_calibration_controls(root=None):
+    """Add non-destructive audience-camera calibration trims to Show Control.
+
+    The four local ``Sensortoworld`` rows remain the authoritative venue
+    baseline. This bounded upgrade replaces only the managed calibration,
+    Femto conversion/validity, and interaction-field shader sources, repairs
+    the managed live-position-to-sensor wire, and updates ``SHOW_CONTROL``.
+    Webcam and Femto trims are independent; neither reset pulse edits the saved
+    baseline. The installer does not inspect private adapters, start a worker,
+    or save the TOE.
+    """
+
+    global LAST_REPORT
+    report = BuildReport()
+    LAST_REPORT = report
+    if root is None:
+        root = _op(ROOT_PATH)
+    elif isinstance(root, str):
+        root = _op(root)
+    if root is None:
+        raise RuntimeError("FlexGPU root %s does not exist" % ROOT_PATH)
+    pipeline = root.op(PIPELINE_NAME)
+    if pipeline is None:
+        raise RuntimeError("WORKING_PIPELINE is missing; build it first")
+    sensor = pipeline.op("SENSOR_INTERACTION")
+    shader = (
+        sensor.op("CALIBRATE_SENSOR_POSITION_PIXEL")
+        if sensor is not None else None)
+    if sensor is None or shader is None:
+        raise RuntimeError("managed sensor calibration stage is missing")
+    interaction_shader = sensor.op("interaction_field_PIXEL")
+    if interaction_shader is None:
+        raise RuntimeError("managed interaction field shader is missing")
+
+    control = _build_show_control(pipeline, report)
+    shader.text = SHADERS["sensor_to_world"]
+    interaction_shader.text = SHADERS["interaction_field"]
+    femto = pipeline.op("SOURCES/FEMTO_MEGA_ADAPTER")
+    femto_position = (
+        femto.op("CONVERT_SENSOR_POSITION_PIXEL")
+        if femto is not None else None)
+    femto_validity = (
+        femto.op("DERIVE_SENSOR_VALIDITY_PIXEL")
+        if femto is not None else None)
+    if femto_position is None or femto_validity is None:
+        raise RuntimeError("managed Femto position/validity shader is missing")
+    femto_position.text = SHADERS["femto_sensor_position"]
+    femto_validity.text = SHADERS["femto_sensor_validity"]
+    world_position = _interaction_world_position_source(pipeline)
+    if world_position is None:
+        raise RuntimeError("managed live position contract is missing")
+    _connect(world_position, sensor, 0, 0, report, replace=True)
+    _apply_sensor_calibration_shader_values(pipeline, control)
+    _apply_femto_depth_gate_shader_values(pipeline, control)
+    try:
+        control.store(
+            "camera_calibration_controls_report", report.as_dict())
+    except Exception:
+        pass
+    print(
+        "[FlexGPU runtime] Camera Calibration trims ready: independent "
+        "webcam/Femto profiles, Femto audience gate, managed world input "
+        "connected, saved sensor-to-world baseline preserved; "
+        "TOE remains unsaved")
+    return control
+
+
 def install_color_adjustment_controls(root=None):
     """Add a neutral final-view Color Adjustment tab to an existing TOE.
 
@@ -4685,6 +6149,125 @@ def install_worker_stop_controls(root=None):
         pass
     print("[FlexGPU runtime] checkout-scoped MoGe-2 and Depth Anything "
           "worker stop buttons ready; TOE remains unsaved")
+    return control
+
+
+def install_camera_depth_controls(root=None):
+    """Add bounded audience-camera controls to an existing local TOE.
+
+    This upgrade refreshes only the public ``SHOW_CONTROL`` component. It
+    neither opens a camera nor starts a worker, and it does not change private
+    components, generated-image geometry routing, or save the current TOE.
+    """
+
+    global LAST_REPORT
+    report = BuildReport()
+    LAST_REPORT = report
+    if root is None:
+        root = _op(ROOT_PATH)
+    elif isinstance(root, str):
+        root = _op(root)
+    if root is None:
+        raise RuntimeError("FlexGPU root %s does not exist" % ROOT_PATH)
+    pipeline = root.op(PIPELINE_NAME)
+    if pipeline is None:
+        raise RuntimeError("WORKING_PIPELINE is missing; build it first")
+    sensor = pipeline.op("SENSOR_INTERACTION")
+    adapter = (
+        sensor.op("DEPTH_SENSOR_ADAPTER") if sensor is not None else None)
+    bridge = (
+        adapter.op("DEPTH_ANYTHING_BRIDGE")
+        if adapter is not None else None)
+    if sensor is None or adapter is None or bridge is None:
+        raise RuntimeError(
+            "camera Depth Anything sensor bridge is not installed")
+
+    control = _build_show_control(pipeline, report)
+    try:
+        control.store("camera_depth_controls_report", report.as_dict())
+    except Exception:
+        pass
+    print("[FlexGPU runtime] camera Depth Anything controls ready; "
+          "camera remains closed and TOE remains unsaved")
+    return control
+
+
+def install_interaction_routing_controls(root=None):
+    """Add per-output interaction routing to an existing local TOE.
+
+    The bounded upgrade keeps the persistent/completed world
+    interaction-neutral, creates four managed render-position branches, and
+    refreshes only ``POINT_RENDER`` plus the public ``SHOW_CONTROL``. Existing
+    private adapters, source routing, wall calibration and user-authored
+    operators remain untouched. The installer does not start a worker or save
+    the current TOE.
+    """
+
+    global LAST_REPORT
+    report = BuildReport()
+    LAST_REPORT = report
+    if root is None:
+        root = _op(ROOT_PATH)
+    elif isinstance(root, str):
+        root = _op(root)
+    if root is None:
+        raise RuntimeError("FlexGPU root %s does not exist" % ROOT_PATH)
+    pipeline = root.op(PIPELINE_NAME)
+    if pipeline is None:
+        raise RuntimeError("WORKING_PIPELINE is missing; build it first")
+    contract = pipeline.op("RENDER_CONTRACT")
+    if contract is None:
+        raise RuntimeError("RENDER_CONTRACT is missing")
+    sensor = pipeline.op("SENSOR_INTERACTION")
+    if sensor is None:
+        raise RuntimeError("SENSOR_INTERACTION is missing")
+    sensor_page = _page(sensor, "Sensor")
+    _custom(
+        sensor, sensor_page, "Float", "Interactionradius", 0.55,
+        label="Interaction Radius (metres)",
+        minimum=0.05, maximum=3.0)
+    _custom(
+        sensor, sensor_page, "Float", "Interactionfalloff", 1.0,
+        label="Interaction Falloff",
+        minimum=0.25, maximum=4.0)
+    _custom(
+        sensor, sensor_page, "Float", "Interactionsmoothing", 0.35,
+        label="Interaction Smoothing",
+        minimum=0.0, maximum=0.92)
+    _custom(
+        sensor, sensor_page, "Float", "Interactionresponse", 0.65,
+        label="Interaction Response",
+        minimum=0.0, maximum=1.0)
+    _custom(
+        sensor, sensor_page, "Float", "Interactiondecay", 0.5,
+        label="Interaction Decay",
+        minimum=0.0, maximum=1.0)
+    interaction_pixel = sensor.op("interaction_field_PIXEL")
+    smoothing_pixel = sensor.op("INTERACTION_SMOOTH_PIXEL")
+    if interaction_pixel is None or smoothing_pixel is None:
+        raise RuntimeError("managed interaction shaders are missing")
+    interaction_pixel.text = SHADERS["interaction_field"]
+    smoothing_pixel.text = SHADERS["interaction_smoothing"]
+    for path, shader_name in (
+            ("TEMPORAL_WORLD/ADVECT_HISTORY_PIXEL", "temporal_advect"),
+            ("COMPLETION/procedural_backfill_PIXEL", "procedural_backfill")):
+        dat = pipeline.op(path)
+        if dat is None:
+            raise RuntimeError("managed shader is missing: " + path)
+        dat.text = SHADERS[shader_name]
+
+    render = _build_point_render(pipeline, report)
+    _connect(contract, render, 2, 2, report, replace=True)
+    control = _build_show_control(pipeline, report)
+    try:
+        control.store(
+            "interaction_routing_controls_report", report.as_dict())
+    except Exception:
+        pass
+    print(
+        "[FlexGPU runtime] interaction routing ready: installation and center "
+        "enabled; left and right disabled; independent intensities available; "
+        "TOE remains unsaved")
     return control
 
 
@@ -5170,10 +6753,13 @@ def build(root=None):
     _connect(completion, contract, 1, 1, report, replace=True)
     _connect(sensor, contract, 2, 1, report, replace=True)
     _connect(temporal, contract, 3, 3, report, replace=True)
-    # POINT_RENDER input 0 is POSITION and input 1 is COLOR. Interaction stays
-    # on RENDER_CONTRACT output 2 and is not consumed by the renderer.
+    # POINT_RENDER receives POSITION, COLOR and INTERACTION. The renderer keeps
+    # an interaction-neutral base world and applies the field independently to
+    # installation, left, center and right view branches.
     _connect(contract, point_render, 0, 0, report, replace=True)
     _connect(contract, point_render, 1, 1, report, replace=True)
+    _connect(contract, point_render, 2, 2, report, replace=True)
+    _align_interaction_position_resolutions(pipeline)
     _connect(point_render, installation, 0, 0, report, replace=True)
     _connect(completion, installation, 1, 1, report, replace=True)
     for destination_index, source_index in enumerate(range(3, 9)):

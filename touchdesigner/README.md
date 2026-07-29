@@ -194,6 +194,24 @@ scale/pan controls, or worker Stop buttons, apply both bounded public upgrades:
 import importlib, runtime_pipeline as rp; importlib.reload(rp); flex = op('/project1/flexgpu'); rp.install_wall_view_controls(flex); rp.install_worker_stop_controls(flex); rp.install_color_adjustment_controls(flex)
 ```
 
+For an older TOE that already has the audience-camera bridge, add the
+non-destructive calibration tab separately:
+
+```python
+import importlib, runtime_pipeline as rp; importlib.reload(rp); rp.install_camera_calibration_controls(op('/project1/flexgpu'))
+```
+
+To add the separate native Femto Mega depth source without changing the saved
+webcam + Depth Anything path:
+
+```python
+import importlib, runtime_pipeline as rp; importlib.reload(rp); rp.install_femto_mega_sensor_bridge(op('/project1/flexgpu'))
+```
+
+The bounded installer defaults to `depth_anything`, does not start either
+source, does not embed a device serial, and does not save the TOE. Select
+`Femto Mega (USB)` from **Camera Depth** only after the installer completes.
+
 For a combined podcast TOE, install the optional hardware-neutral audio
 contract without importing any audio file or private component:
 
@@ -214,7 +232,7 @@ Keep `Qualityprofile` at `3080ti_16gb`, confirm `Gpuindex`, pulse `Applyall`,
 and save to a new 3080-tagged checkpoint after validation. Never use the
 5090-tagged TOE or `config/local-5090*.json` as the 3080 save/config target.
 
-Open `/project1/flexgpu/WORKING_PIPELINE/SHOW_CONTROL`. Its five parameter pages
+Open `/project1/flexgpu/WORKING_PIPELINE/SHOW_CONTROL`. Its parameter pages
 provide:
 
 - MoGe-2 or Depth Anything generated geometry selection;
@@ -238,7 +256,20 @@ provide:
 - 3080 Ti 16 GB, 4090, and 5090 geometry/point/capture presets;
 - visible PowerShell launch and checkout-scoped stop buttons for the two
   generated-geometry workers, using the selected quality profile and physical
-  GPU index.
+  GPU index;
+- a separate **Camera Depth** page for audience interaction: enable/disable,
+  exact physical-camera name or numeric fallback index, horizontal mirror, and
+  hidden start/checkout-scoped stop buttons for the RGB-private sensor worker;
+- a **Camera Calibration** page with audience depth-position scale, world
+  X/Y/Z trims, yaw/pitch/roll trims, and a neutral reset. The controls are
+  layered over the local `Sensortoworld0..3` baseline; neither adjustment nor
+  reset edits those four venue-calibration rows;
+- an **Interaction Routing** page with independent enable and `0.0`–`10.0`
+  intensity controls for the installation and each left/center/right wall
+  branch, plus world-space radius, edge falloff, response, and decay controls.
+  Interaction Strength and Interaction Smoothing remain on the main Show
+  Controls page. Installation and center default on at `1.0`; the side walls
+  default off.
 
 The controls update only public managed operators and never inspect or change
 private StreamDiffusionTD parameters. `Wall Width` and `Wall Height` default to
@@ -255,7 +286,7 @@ defaults are neutral, and the grade is weighted by actual point coverage so
 disocclusion fog/background remains unchanged. Installing the tab therefore
 does not intentionally change an accepted visual.
 
-To verify all 55 FlexGPU public controls after installing an upgrade, run this
+To verify all 83 FlexGPU public controls after installing an upgrade, run this
 inside TouchDesigner. It changes one control at a time, checks the corresponding
 managed operator or shader, and restores every original value in a `finally`
 block. In a combined podcast TOE it also inventories all 18 public adapter
@@ -284,7 +315,9 @@ pulses (`Play`, `New Random Seeds`, `Restart`, `Reload Scene JSON`, and adapter
 buttons are checked externally so TouchDesigner's main thread remains free to
 cook: start each provider once, verify the matching checkout-scoped worker,
 confirm a duplicate start is refused, stop it with its matching button, then
-repeat for the other provider. Never run the two generated-geometry workers
+repeat for the other provider. The separate Camera Depth Start/Stop pair is
+checked with the physical camera, then stopped while the bridge is observed to
+become stale and fail closed. Never run the two generated-geometry workers
 together on the 3080.
 
 Older combined TOEs can also retain a Window Placement reference to a deleted
@@ -525,6 +558,23 @@ depth, mask, confidence, principal point, and temporal session identity
 together. `OUT_INTERACTION_DEBUG` is the readable color view; raw
 `OUT_INTERACTION` remains signed force plus occupancy and may look dark.
 
+After installing the bridge, run
+`runtime_pipeline.install_camera_depth_controls(...)` in an older working TOE.
+On the **Camera Depth** Show Control page, set the exact Windows device name
+for the local workstation, leave index `0` as the fallback, set Mirror
+Horizontal for that camera's orientation, and press **Start Camera Depth
+Worker**. The launch remains hidden and local; press **Stop Camera Depth
+Worker** to stop only this checkout's audience-camera process. Do not copy the
+5090 device name or mirror choice into the 3080 working file.
+
+Use the separate **Camera Calibration** page while standing in the audience
+area. `Audience Depth Position Scale` expands or contracts sensor-local XYZ
+about the camera origin; the world X/Y/Z trims place that volume in the scene;
+yaw, pitch, and roll align its axes. **Reset Calibration Trim** returns all
+seven adjustments to neutral while preserving the saved local
+`Sensortoworld0..3` matrix exactly. Save accepted trims only in a new
+machine-tagged ignored TOE.
+
 The live-accepted 3080 Ti Laptop rehearsal settings are 640x480 webcam capture,
 384 model input, 256x144 sensor output, 5 Hz inference, 0.55 m interaction
 radius, and 0.35 force gain. These are adjustable starting values, not a
@@ -607,7 +657,7 @@ receiver-cook DAT/CHOP is not valid producer metadata.
 | `WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER/DEPTH_ANYTHING_GEOMETRY_BRIDGE` | Default-off selectable generated RGB/pseudo-metric-depth/mask/confidence path using isolated ports and strict provider/frame metadata |
 | `WORKING_PIPELINE/ROLE_BRIDGE` | Atomic RGBA32F RGB/raw-depth/mask/confidence path over local, Shared Mem, or Touch TCP routes |
 | `WORKING_PIPELINE/RECONSTRUCTION` | Aligned color and depth-to-position GLSL |
-| `WORKING_PIPELINE/SENSOR_INTERACTION` | Calibrated sensor validity plus bounded 8x8 world-space occupancy interaction |
+| `WORKING_PIPELINE/SENSOR_INTERACTION` | Calibrated sensor validity plus bounded 32x32 world-space occupancy interaction |
 | `WORKING_PIPELINE/SENSOR_INTERACTION/DEPTH_SENSOR_ADAPTER/DEPTH_ANYTHING_BRIDGE` | Default-off replaceable no-RGB depth/mask/confidence receiver for temporary webcam interaction rehearsal |
 | `WORKING_PIPELINE/TEMPORAL_WORLD` | One-cook frame-aware confidence/age lifecycle plus dt-integrated position/color feedback and automatic contract resets |
 | `WORKING_PIPELINE/COMPLETION` | Working fog, procedural and hybrid GLSL branches |
@@ -807,7 +857,7 @@ the `More attribute values than channels specified` warning. Rebuild the
 managed `POINT_RENDER` network if an older saved TOE still contains those
 repeated vector scopes.
 
-Sensor interaction samples a bounded 8x8 set of calibrated world-space
+Sensor interaction samples a bounded 32x32 set of calibrated world-space
 occupancy primitives for each generated point. Mask and confidence are applied
 once, and force in metres/second is integrated with a clamped render delta.
 This removes same-UV coupling and frame-rate-dependent acceleration, but it is

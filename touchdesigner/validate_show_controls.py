@@ -39,12 +39,47 @@ VALUE_CONTROLS = (
     "Hueshiftdegrees",
     "Temperature",
     "Tint",
+    "Interactionradius",
+    "Interactionfalloff",
     "Interactionstrength",
     "Interactionsmoothing",
+    "Interactionresponse",
+    "Interactiondecay",
+    "Installationinteractionenabled",
+    "Installationinteractionintensity",
+    "Leftwallinteractionenabled",
+    "Leftwallinteractionintensity",
+    "Centerwallinteractionenabled",
+    "Centerwallinteractionintensity",
+    "Rightwallinteractionenabled",
+    "Rightwallinteractionintensity",
     "Wrapyawdegrees",
     "Wrapfovdegrees",
     "Wrapcoverage",
     "Wrapnoise",
+    "Camerainteractionenabled",
+    "Camerasensorsource",
+    "Cameraname",
+    "Cameraindex",
+    "Cameramirrorhorizontal",
+    "Femtodeviceserial",
+    "Sensorpositionscale",
+    "Sensortrimxmetres",
+    "Sensortrimymetres",
+    "Sensortrimzmetres",
+    "Sensortrimyawdegrees",
+    "Sensortrimpitchdegrees",
+    "Sensortrimrolldegrees",
+    "Femtomirrorhorizontal",
+    "Femtopositionscale",
+    "Femtotrimxmetres",
+    "Femtotrimymetres",
+    "Femtotrimzmetres",
+    "Femtotrimyawdegrees",
+    "Femtotrimpitchdegrees",
+    "Femtotrimrolldegrees",
+    "Femtoaudiencenearmetres",
+    "Femtoaudiencefarmetres",
     "Wallwidth",
     "Wallheight",
     "Pointcloudscale",
@@ -80,6 +115,10 @@ PULSE_CONTROLS = (
     "Stopmogeworker",
     "Startdepthanythingworker",
     "Stopdepthanythingworker",
+    "Startcameradepthworker",
+    "Stopcameradepthworker",
+    "Resetsensorcalibrationtrim",
+    "Resetfemtocalibrationtrim",
 )
 
 STATUS_CONTROLS = (
@@ -87,6 +126,9 @@ STATUS_CONTROLS = (
     "Profilehint",
     "Workerpid",
     "Workerstatus",
+    "Sensorworkerpid",
+    "Sensorworkerstatus",
+    "Femtostatus",
 )
 
 ADAPTER_VALUE_CONTROLS = (
@@ -288,6 +330,15 @@ def validate(
     sensor = _assert_operator(
         pipeline.op("SENSOR_INTERACTION"),
         PIPELINE_PATH + "/SENSOR_INTERACTION")
+    sensor_adapter = _assert_operator(
+        sensor.op("DEPTH_SENSOR_ADAPTER"),
+        sensor.path + "/DEPTH_SENSOR_ADAPTER")
+    sensor_bridge = _assert_operator(
+        sensor_adapter.op("DEPTH_ANYTHING_BRIDGE"),
+        sensor_adapter.path + "/DEPTH_ANYTHING_BRIDGE")
+    femto_adapter = _assert_operator(
+        pipeline.op("SOURCES/FEMTO_MEGA_ADAPTER"),
+        pipeline.path + "/SOURCES/FEMTO_MEGA_ADAPTER")
     render = _assert_operator(
         pipeline.op("POINT_RENDER"), PIPELINE_PATH + "/POINT_RENDER")
     triple = _assert_operator(
@@ -314,6 +365,20 @@ def validate(
         "moge_enabled": _value(moge_bridge, "Enabled", False),
         "depth_enabled": _value(depth_bridge, "Enabled", False),
         "adapter_geometry": _value(adapter, "Geometrysource", "moge2"),
+    }
+    sensor_snapshot = {
+        "mode": _value(sensor, "Mode", "disabled"),
+        "adapter_enabled": _value(sensor_adapter, "Enabled", False),
+        "adapter_source": _value(
+            sensor_adapter, "Sensorsource", "depth_anything"),
+        "mirror_horizontal": _value(
+            sensor_bridge, "Mirrorhorizontal", True),
+        "femto_enabled": _value(femto_adapter, "Enabled", False),
+        "femto_serial": _value(femto_adapter, "Deviceserial", ""),
+        "sensor_to_world": [
+            _value(sensor, "Sensortoworld%d" % index, "")
+            for index in range(4)
+        ],
     }
     audio_snapshot = {
         "adapter_enabled": _value(adapter, "Audioenabled", False),
@@ -513,6 +578,24 @@ def validate(
                 _value(control, name), expected)
 
         _set_and_check(
+            checks, callbacks, control, "Interactionradius",
+            0.82, sensor, "Interactionradius")
+        _record(
+            checks, "Interactionradius_shader",
+            _shader_contains(
+                sensor.op("interaction_field_PIXEL"),
+                "FLEXGPU_INTERACTION_RADIUS", 0.82),
+            True)
+        _set_and_check(
+            checks, callbacks, control, "Interactionfalloff",
+            1.7, sensor, "Interactionfalloff")
+        _record(
+            checks, "Interactionfalloff_shader",
+            _shader_contains(
+                sensor.op("interaction_field_PIXEL"),
+                "FLEXGPU_INTERACTION_FALLOFF", 1.7),
+            True)
+        _set_and_check(
             checks, callbacks, control, "Interactionstrength",
             0.27, sensor, "Forcegain")
         _record(
@@ -530,6 +613,230 @@ def validate(
                 sensor.op("INTERACTION_SMOOTH_PIXEL"),
                 "FLEXGPU_INTERACTION_SMOOTHING", 0.41),
             True)
+        _set_and_check(
+            checks, callbacks, control, "Interactionresponse",
+            0.78, sensor, "Interactionresponse")
+        _record(
+            checks, "Interactionresponse_shader",
+            _shader_contains(
+                sensor.op("INTERACTION_SMOOTH_PIXEL"),
+                "FLEXGPU_INTERACTION_RESPONSE", 0.78),
+            True)
+        _set_and_check(
+            checks, callbacks, control, "Interactiondecay",
+            0.68, sensor, "Interactiondecay")
+        _record(
+            checks, "Interactiondecay_shader",
+            _shader_contains(
+                sensor.op("INTERACTION_SMOOTH_PIXEL"),
+                "FLEXGPU_INTERACTION_DECAY", 0.68),
+            True)
+
+        for (
+                enabled_name, intensity_name, view,
+                enabled_value, intensity_value) in (
+                    (
+                        "Installationinteractionenabled",
+                        "Installationinteractionintensity",
+                        "INSTALLATION", True, 6.3),
+                    (
+                        "Leftwallinteractionenabled",
+                        "Leftwallinteractionintensity",
+                        "LEFT", False, 7.4),
+                    (
+                        "Centerwallinteractionenabled",
+                        "Centerwallinteractionintensity",
+                        "CENTER", True, 8.5),
+                    (
+                        "Rightwallinteractionenabled",
+                        "Rightwallinteractionintensity",
+                        "RIGHT", False, 9.6)):
+            _apply(callbacks, control, intensity_name, intensity_value)
+            _apply(callbacks, control, enabled_name, enabled_value)
+            _record(
+                checks, intensity_name,
+                _value(render, intensity_name), intensity_value)
+            _record(
+                checks, enabled_name,
+                bool(_value(render, enabled_name)), enabled_value)
+            _record(
+                checks, enabled_name + "_shader",
+                _shader_contains(
+                    render.op("VIEW_POSITION_%s_PIXEL" % view),
+                    "FLEXGPU_VIEW_INTERACTION_GAIN",
+                    intensity_value if enabled_value else 0.0),
+                True)
+
+        _apply(callbacks, control, "Camerainteractionenabled", False)
+        _record(
+            checks, "Camerainteractionenabled_mode_disabled",
+            _value(sensor, "Mode"), "disabled")
+        _record(
+            checks, "Camerainteractionenabled_adapter_disabled",
+            bool(_value(sensor_adapter, "Enabled", True)), False)
+        _apply(callbacks, control, "Camerasensorsource", "depth_anything")
+        _apply(callbacks, control, "Camerainteractionenabled", True)
+        _record(
+            checks, "Camerainteractionenabled_mode_depth_sensor",
+            _value(sensor, "Mode"), "depth_sensor")
+        _record(
+            checks, "Camerainteractionenabled_adapter_enabled",
+            bool(_value(sensor_adapter, "Enabled", False)), True)
+        _record(
+            checks, "Camerasensorsource_depth_anything",
+            _value(sensor_adapter, "Sensorsource"), "depth_anything")
+        _record(
+            checks, "Camerasensorsource_depth_bridge_enabled",
+            bool(_value(sensor_bridge, "Enabled", False)), True)
+        _record(
+            checks, "Camerasensorsource_femto_disabled",
+            bool(_value(femto_adapter, "Enabled", True)), False)
+        _apply(callbacks, control, "Camerasensorsource", "femto_mega")
+        _record(
+            checks, "Camerasensorsource_femto_mega",
+            _value(sensor_adapter, "Sensorsource"), "femto_mega")
+        _record(
+            checks, "Camerasensorsource_depth_bridge_disabled",
+            bool(_value(sensor_bridge, "Enabled", True)), False)
+        _record(
+            checks, "Camerasensorsource_femto_enabled",
+            bool(_value(femto_adapter, "Enabled", False)), True)
+        _apply(callbacks, control, "Cameramirrorhorizontal", False)
+        _record(
+            checks, "Cameramirrorhorizontal",
+            bool(_value(sensor_bridge, "Mirrorhorizontal", True)), False)
+        for name, test_value in (
+                ("Cameraname", "validator camera"),
+                ("Cameraindex", 7)):
+            _apply(callbacks, control, name, test_value)
+            _record(
+                checks, name, _value(control, name), test_value)
+
+        calibration_shader = sensor.op(
+            "CALIBRATE_SENSOR_POSITION_PIXEL")
+        _apply(callbacks, control, "Camerasensorsource", "depth_anything")
+        for name, test_value, marker in (
+                ("Sensorpositionscale", 1.17,
+                 "FLEXGPU_SENSOR_POSITION_SCALE"),
+                ("Sensortrimxmetres", 0.12,
+                 "FLEXGPU_SENSOR_TRIM_X"),
+                ("Sensortrimymetres", -0.08,
+                 "FLEXGPU_SENSOR_TRIM_Y"),
+                ("Sensortrimzmetres", 0.21,
+                 "FLEXGPU_SENSOR_TRIM_Z"),
+                ("Sensortrimyawdegrees", 11.0,
+                 "FLEXGPU_SENSOR_TRIM_YAW"),
+                ("Sensortrimpitchdegrees", -7.0,
+                 "FLEXGPU_SENSOR_TRIM_PITCH"),
+                ("Sensortrimrolldegrees", 4.0,
+                 "FLEXGPU_SENSOR_TRIM_ROLL")):
+            _apply(callbacks, control, name, test_value)
+            _record(
+                checks, name, _value(control, name), test_value)
+            _record(
+                checks, name + "_shader",
+                _shader_contains(
+                    calibration_shader, marker, test_value), True)
+        _record(
+            checks, "Sensorcalibration_baseline_preserved",
+            [
+                _value(sensor, "Sensortoworld%d" % index, "")
+                for index in range(4)
+            ],
+            sensor_snapshot["sensor_to_world"])
+        callbacks._reset_sensor_calibration_trim("Sensor")
+        for name, expected in (
+                ("Sensorpositionscale", 1.0),
+                ("Sensortrimxmetres", 0.0),
+                ("Sensortrimymetres", 0.0),
+                ("Sensortrimzmetres", 0.0),
+                ("Sensortrimyawdegrees", 0.0),
+                ("Sensortrimpitchdegrees", 0.0),
+                ("Sensortrimrolldegrees", 0.0)):
+            _record(
+                checks, "Resetsensorcalibrationtrim_" + name,
+                _value(control, name), expected)
+        _record(
+            checks, "Resetsensorcalibrationtrim_baseline_preserved",
+            [
+                _value(sensor, "Sensortoworld%d" % index, "")
+                for index in range(4)
+            ],
+            sensor_snapshot["sensor_to_world"])
+
+        _apply(callbacks, control, "Camerasensorsource", "femto_mega")
+        _apply(callbacks, control, "Femtomirrorhorizontal", True)
+        _record(
+            checks, "Femtomirrorhorizontal",
+            bool(_value(control, "Femtomirrorhorizontal")), True)
+        _record(
+            checks, "Femtomirrorhorizontal_shader",
+            _shader_contains(
+                femto_adapter.op("CONVERT_SENSOR_POSITION_PIXEL"),
+                "FLEXGPU_FEMTO_MIRROR_HORIZONTAL", 1.0),
+            True)
+        for name, test_value, marker in (
+                ("Femtopositionscale", 1.09,
+                 "FLEXGPU_SENSOR_POSITION_SCALE"),
+                ("Femtotrimxmetres", -0.14,
+                 "FLEXGPU_SENSOR_TRIM_X"),
+                ("Femtotrimymetres", 0.11,
+                 "FLEXGPU_SENSOR_TRIM_Y"),
+                ("Femtotrimzmetres", 0.33,
+                 "FLEXGPU_SENSOR_TRIM_Z"),
+                ("Femtotrimyawdegrees", -9.0,
+                 "FLEXGPU_SENSOR_TRIM_YAW"),
+                ("Femtotrimpitchdegrees", 6.0,
+                 "FLEXGPU_SENSOR_TRIM_PITCH"),
+                ("Femtotrimrolldegrees", -3.0,
+                 "FLEXGPU_SENSOR_TRIM_ROLL")):
+            _apply(callbacks, control, name, test_value)
+            _record(
+                checks, name, _value(control, name), test_value)
+            _record(
+                checks, name + "_shader",
+                _shader_contains(
+                    calibration_shader, marker, test_value), True)
+        femto_validity_shader = femto_adapter.op(
+            "DERIVE_SENSOR_VALIDITY_PIXEL")
+        for name, test_value, marker in (
+                ("Femtoaudiencenearmetres", 2.4,
+                 "FLEXGPU_FEMTO_NEAR_METRES"),
+                ("Femtoaudiencefarmetres", 4.6,
+                 "FLEXGPU_FEMTO_FAR_METRES")):
+            _apply(callbacks, control, name, test_value)
+            _record(
+                checks, name, _value(control, name), test_value)
+            _record(
+                checks, name + "_shader",
+                _shader_contains(
+                    femto_validity_shader, marker, test_value), True)
+        _record(
+            checks, "Femtocalibration_baseline_preserved",
+            [
+                _value(sensor, "Sensortoworld%d" % index, "")
+                for index in range(4)
+            ],
+            sensor_snapshot["sensor_to_world"])
+        callbacks._reset_sensor_calibration_trim("Femto")
+        for name, expected in (
+                ("Femtopositionscale", 1.0),
+                ("Femtotrimxmetres", 0.0),
+                ("Femtotrimymetres", 0.0),
+                ("Femtotrimzmetres", 0.0),
+                ("Femtotrimyawdegrees", 0.0),
+                ("Femtotrimpitchdegrees", 0.0),
+                ("Femtotrimrolldegrees", 0.0)):
+            _record(
+                checks, "Resetfemtocalibrationtrim_" + name,
+                _value(control, name), expected)
+        _record(
+            checks, "Resetfemtocalibrationtrim_baseline_preserved",
+            [
+                _value(sensor, "Sensortoworld%d" % index, "")
+                for index in range(4)
+            ],
+            sensor_snapshot["sensor_to_world"])
 
         for name, test_value, target_name in (
                 ("Wrapyawdegrees", 22.0, "Wrapyawdegrees"),
@@ -700,6 +1007,22 @@ def validate(
             _set(
                 adapter, "Geometrysource",
                 bridge_snapshot["adapter_geometry"])
+            _set(sensor, "Mode", sensor_snapshot["mode"])
+            _set(
+                sensor_adapter, "Enabled",
+                sensor_snapshot["adapter_enabled"])
+            _set(
+                sensor_adapter, "Sensorsource",
+                sensor_snapshot["adapter_source"])
+            _set(
+                sensor_bridge, "Mirrorhorizontal",
+                sensor_snapshot["mirror_horizontal"])
+            _set(
+                femto_adapter, "Enabled",
+                sensor_snapshot["femto_enabled"])
+            _set(
+                femto_adapter, "Deviceserial",
+                sensor_snapshot["femto_serial"])
             _set(
                 adapter, "Audioenabled",
                 audio_snapshot["adapter_enabled"])

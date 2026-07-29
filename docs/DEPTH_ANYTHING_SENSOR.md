@@ -32,6 +32,41 @@ and triple-surface point views. It is a subjective rehearsal acceptance, not a
 physical depth, latency, venue, or multi-person calibration claim. Use 3 Hz as
 the first thermal fallback on the combined 16 GB workload.
 
+Show Control exposes output-local interaction intensity from `0.0` to `10.0`
+for the installation and each wall. The shaping controls keep distinct jobs:
+radius sets world-space reach, falloff shapes the edge, smoothing filters
+sensor jitter, response controls attack speed, and decay controls the release
+tail. Defaults preserve the accepted 5090 behavior until an operator changes
+them.
+
+## Femto Mega alternative source
+
+The native Femto Mega integration is a separate, default-off source. It does
+not replace or reconfigure webcam + Depth Anything. In **Camera Depth**, choose
+`Femto Mega (USB)` and enable Camera Interaction; TouchDesigner then enables
+only `SOURCES/FEMTO_MEGA_ADAPTER/FEMTO_PRIMARY` in native Orbbec point-cloud
+mode. Choosing `Webcam + Depth Anything` again disables Femto and resumes the
+existing result-only receiver with its saved camera name, index, mirror, and
+worker settings.
+
+The native adapter converts finite forward-positive Orbbec XYZ to the shared
+sensor-local FlexGPU convention and derives validity from positive depth
+instead of trusting native point-cloud alpha. It publishes the same
+`OUT_POSITION`, `OUT_MASK`, and `OUT_CONFIDENCE` boundary as the webcam bridge,
+so the shared `sensor_to_world` baseline and Show Control calibration trims
+remain downstream. Calibrate the Femto for its physical venue placement after
+selection; do not copy those ignored 5090 TOE values into a 3080 working file.
+Leave **Femto Mega Serial** empty to select the first detected local Orbbec
+device, or enter the exact local serial when more than one is attached.
+
+The public interaction shader searches a bounded 32x32 grid of sensor samples.
+This keeps a sparse native Femto mask spatially useful instead of reducing
+interaction to whichever few samples happen to cross one calibrated depth
+plane. On the ignored 5090 `.67` checkpoint, the live starting values were
+`2.0`/`5.0` metres for the Femto audience gate and `1.25` metres for interaction
+radius. Keep those values local and retune them for the physical audience
+volume; they are not 3080 defaults.
+
 ## Install the replaceable TouchDesigner receiver
 
 Run the bounded installer in the TouchDesigner Textport from an ignored local
@@ -219,12 +254,24 @@ Failure behavior is closed:
 5. Run `-Backend mock -Capture webcam` to validate camera access without loading
    the learned model. On Windows, `-CameraBackend auto` prefers MSMF; use the
    explicit `msmf`, `dshow`, or `any` value only while diagnosing a device.
+   If virtual cameras occupy the numeric indexes, pass the physical device's
+   exact DirectShow name with `-CameraName`; this uses a volatile ffmpeg
+   rawvideo pipe and preserves the same no-recording/no-RGB transport boundary.
+   In an upgraded TOE, the **Camera Depth** Show Control page exposes this
+   name/index choice plus enable, mirror, hidden start, and checkout-scoped
+   stop. The stop button targets only the audience-camera worker. The separate
+   **Camera Calibration** page exposes a depth-position scale, world X/Y/Z
+   trims, yaw/pitch/roll trims, and a neutral reset layered over the local
+   `Sensortoworld0..3` baseline.
 6. Install/download the pinned Small model as separate explicit actions.
 7. Run the real backend alone at the 3080 laptop defaults.
 8. Run it alongside StreamDiffusion and MoGe; watch GPU memory, temperature,
    inference age, dropped camera frames, and TouchDesigner frame time.
 9. Replace pseudo-metre placement with a measured physical sensor calibration
-   before using audience distance as a real-world quantity.
+   before using audience distance as a real-world quantity. Use Show Control
+   trims only for live alignment around that baseline; reset never edits the
+   baseline matrix. Store accepted values only in the ignored machine-tagged
+   TOE so 3080 and 5090 calibration cannot overwrite each other.
 
 Mock mode does not require the optional model environment: when that environment
 is absent, the wrapper uses `python` from `PATH` and requires only NumPy. It does

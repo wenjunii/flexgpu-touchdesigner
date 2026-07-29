@@ -110,6 +110,8 @@ assert normalized({src_path!r}) in {{
             "validity_combine",
             "depth_to_position",
             "sensor_position",
+            "femto_sensor_position",
+            "femto_sensor_validity",
             "sensor_to_world",
             "sensor_validity",
             "interaction_field",
@@ -122,6 +124,7 @@ assert normalized({src_path!r}) in {{
             "temporal_color",
             "fog_completion",
             "procedural_backfill",
+            "view_interaction",
             "procedural_color",
             "hybrid_completion",
             "installation_grade",
@@ -221,8 +224,13 @@ assert normalized({src_path!r}) in {{
         self.assertIn("float generatedActive = 1.0", backfill)
         self.assertIn("POSITION + ADVECTED_HISTORY + TEMPORAL_STATE", temporal)
         self.assertIn("state.r", temporal)
-        self.assertIn("interaction.rgb", advect)
+        self.assertNotIn("interaction.rgb", advect)
         self.assertIn("motionDt", advect)
+        view_interaction = self.module.SHADERS["view_interaction"]
+        self.assertIn("interactionSample.rgb", view_interaction)
+        self.assertIn("FLEXGPU_VIEW_INTERACTION_GAIN", view_interaction)
+        self.assertNotIn("vec4 interaction =", view_interaction)
+        self.assertNotIn("float active =", view_interaction)
         self.assertIn("float carriedActivity = min(history.a, state.r);", temporal)
         self.assertIn("max(currentActivity, carriedActivity)", temporal)
         self.assertNotIn("history.a * state.r", temporal)
@@ -410,7 +418,7 @@ assert normalized({src_path!r}) in {{
         self.assertIn("interactionRadiusMetres", interaction)
         self.assertIn('"Float", "Forcegain", 0.35', self.source)
         self.assertNotIn("vec2 radial", interaction)
-        self.assertIn("occupancyGridSize = 8", interaction)
+        self.assertIn("occupancyGridSize = 32", interaction)
         self.assertIn("sensorUV", interaction)
         self.assertNotIn("texture(sTD2DInputs[1], uv)", interaction)
         interaction_debug = self.module.SHADERS["interaction_debug"]
@@ -430,6 +438,8 @@ assert normalized({src_path!r}) in {{
     def test_interaction_smoothing_is_low_latency_and_feedback_bounded(self) -> None:
         smoothing = self.module.SHADERS["interaction_smoothing"]
         self.assertIn("FLEXGPU_INTERACTION_SMOOTHING", smoothing)
+        self.assertIn("FLEXGPU_INTERACTION_RESPONSE", smoothing)
+        self.assertIn("FLEXGPU_INTERACTION_DECAY", smoothing)
         self.assertIn("attackBlend", smoothing)
         self.assertIn("releaseBlend", smoothing)
         self.assertIn("current.a >= history.a", smoothing)
@@ -443,6 +453,12 @@ assert normalized({src_path!r}) in {{
             '_out_top(comp, "OUT_INTERACTION", interaction, 1, report)',
             self.source,
         )
+        interaction = self.module.SHADERS["interaction_field"]
+        self.assertIn("FLEXGPU_INTERACTION_RADIUS", interaction)
+        self.assertIn("FLEXGPU_INTERACTION_FALLOFF", interaction)
+        self.assertIn(
+            "const int occupancyGridSize = 32", interaction)
+        self.assertIn("pow(clamp(radialInfluence", interaction)
 
     def test_depth_anything_data_constants_are_unpremultiplied(self) -> None:
         shader = self.module.SHADERS["depth_anything_sensor_position"]
@@ -757,6 +773,15 @@ assert normalized({src_path!r}) in {{
             "Fogdensity",
             "Interactionstrength",
             "Interactionsmoothing",
+            "Interactionradius",
+            "Interactionfalloff",
+            "Interactionresponse",
+            "Interactiondecay",
+            "Installationinteractionenabled",
+            "Installationinteractionintensity",
+            "Leftwallinteractionenabled",
+            "Centerwallinteractionenabled",
+            "Rightwallinteractionenabled",
             "Qualityprofile",
             "Wrapcoverage",
             "Surfacefovdegrees",
@@ -765,6 +790,7 @@ assert normalized({src_path!r}) in {{
         ):
             self.assertIn(marker, self.source)
         self.assertIn('"parameterexecuteDAT"', self.source)
+        self.assertIn("minimum=0.0, maximum=10.0", self.source)
         self.assertIn("SHOW_CONTROL_CALLBACKS", self.source)
         signature = inspect.signature(self.module.install_show_control_upgrade)
         self.assertEqual(list(signature.parameters), ["root"])
@@ -897,6 +923,173 @@ assert normalized({src_path!r}) in {{
         self.assertNotIn("build(", installer)
         self.assertNotIn("project.save", installer)
 
+    def test_camera_depth_controls_are_bounded_and_use_separate_worker(self) -> None:
+        for marker in (
+            "Camerainteractionenabled",
+            "Cameraname",
+            "Cameraindex",
+            "Cameramirrorhorizontal",
+            "Startcameradepthworker",
+            "Stopcameradepthworker",
+            "Sensorworkerpid",
+            "Sensorworkerstatus",
+        ):
+            self.assertIn(marker, self.source)
+        callbacks = self.module.SHOW_CONTROL_CALLBACKS
+        for marker in (
+            "def _apply_camera_interaction():",
+            "def _launch_sensor_worker():",
+            "def _stop_sensor_worker():",
+            "'depth_sensor' if enabled else 'disabled'",
+            "'Start-DepthAnythingWorker.ps1'",
+            "'Stop-DepthAnythingSensorWorker.ps1'",
+            "stdout=subprocess.DEVNULL",
+            "stderr=subprocess.DEVNULL",
+        ):
+            self.assertIn(marker, callbacks)
+        compile(callbacks, "SHOW_CONTROL_CALLBACKS", "exec")
+        installer = inspect.getsource(
+            self.module.install_camera_depth_controls)
+        self.assertIn("_build_show_control(pipeline, report)", installer)
+        self.assertNotIn("destroy", installer)
+        self.assertNotIn("project.save", installer)
+        self.assertNotIn("subprocess", installer)
+
+    def test_femto_mega_is_a_separate_default_off_sensor_source(self) -> None:
+        position = self.module.SHADERS["femto_sensor_position"]
+        validity = self.module.SHADERS["femto_sensor_validity"]
+        self.assertIn("ORBBEC POINTCLOUD -> SENSOR_POSITION", position)
+        self.assertIn("FLEXGPU_FEMTO_MIRROR_HORIZONTAL", position)
+        self.assertIn("rawPosition.x, -rawPosition.x", position)
+        self.assertIn("-rawPosition.z", position)
+        self.assertIn("rawPosition.z > 0.05", position)
+        self.assertIn("rawPosition.z < 20.0", position)
+        self.assertIn("SENSOR_POSITION alpha -> MASK/CONFIDENCE", validity)
+        self.assertIn("FLEXGPU_FEMTO_NEAR_METRES", validity)
+        self.assertIn("FLEXGPU_FEMTO_FAR_METRES", validity)
+
+        builder = inspect.getsource(self.module._build_femto_mega_adapter)
+        for marker in (
+                '"FEMTO_MEGA_ADAPTER"',
+                '"orbbecTOP"',
+                '"FEMTO_PRIMARY"',
+                '"pointcloud"',
+                '"Deviceserial"',
+                '"Resultvalid"',
+                '"OUT_POSITION"',
+                '"OUT_MASK"',
+                '"OUT_CONFIDENCE"'):
+            self.assertIn(marker, builder)
+        self.assertNotIn("CL2T4410049", builder)
+
+        router = inspect.getsource(
+            self.module._wire_depth_anything_sensor_routes)
+        for marker in (
+                '"Sensorsource"',
+                '"depth_anything"',
+                '"femto_mega"',
+                '"FEMTO_POSITION_SELECT"',
+                '"FEMTO_MASK_SELECT"',
+                '"FEMTO_CONFIDENCE_SELECT"',
+                "_connect(femto_select, route, 3"):
+            self.assertIn(marker, router)
+        callbacks = self.module.SHOW_CONTROL_CALLBACKS
+        for marker in (
+                "Camerasensorsource",
+                "Femtodeviceserial",
+                "Femtostatus",
+                "def _select_femto_device",
+                "source == 'femto_mega'",
+                "source == 'depth_anything'",
+                "_set(controls, 'Camerasensorsource', 'depth_anything')"):
+            self.assertIn(marker, callbacks)
+        compile(callbacks, "SHOW_CONTROL_CALLBACKS", "exec")
+
+        installer = inspect.getsource(
+            self.module.install_femto_mega_sensor_bridge)
+        self.assertIn("_build_femto_mega_adapter", installer)
+        self.assertIn("_wire_depth_anything_sensor_routes", installer)
+        self.assertIn("_build_show_control", installer)
+        self.assertIn("webcam + Depth Anything preserved", installer)
+        self.assertNotIn("destroy", installer)
+        self.assertNotIn("project.save", installer)
+        self.assertNotIn("subprocess", installer)
+
+    def test_camera_calibration_controls_preserve_the_local_baseline(self) -> None:
+        shader = self.module.SHADERS["sensor_to_world"]
+        for marker in (
+                "FLEXGPU_SENSOR_POSITION_SCALE",
+                "FLEXGPU_SENSOR_TRIM_X",
+                "FLEXGPU_SENSOR_TRIM_Y",
+                "FLEXGPU_SENSOR_TRIM_Z",
+                "FLEXGPU_SENSOR_TRIM_YAW",
+                "FLEXGPU_SENSOR_TRIM_PITCH",
+                "FLEXGPU_SENSOR_TRIM_ROLL"):
+            self.assertIn(marker, shader)
+            self.assertIn(marker, self.module.SHOW_CONTROL_CALLBACKS)
+        for parameter in (
+                "Sensorpositionscale",
+                "Sensortrimyawdegrees",
+                "Sensortrimpitchdegrees",
+                "Sensortrimrolldegrees",
+                "Femtopositionscale",
+                "Femtotrimyawdegrees",
+                "Femtotrimpitchdegrees",
+                "Femtotrimrolldegrees"):
+            self.assertIn('"%s"' % parameter, self.source)
+        for expression in (
+                '"Sensortrim%smetres" % axis.lower()',
+                '"Femtotrim%smetres" % axis.lower()'):
+            self.assertIn(expression, self.source)
+        for parameter in (
+                "Femtomirrorhorizontal",
+                "Femtoaudiencenearmetres",
+                "Femtoaudiencefarmetres",
+                "Resetsensorcalibrationtrim",
+                "Resetfemtocalibrationtrim"):
+            self.assertIn('"%s"' % parameter, self.source)
+        self.assertIn('_page(control, "Camera Calibration")', self.source)
+        callbacks = self.module.SHOW_CONTROL_CALLBACKS
+        self.assertIn("def _apply_sensor_calibration_trim():", callbacks)
+        self.assertIn(
+            "def _reset_sensor_calibration_trim(requested_prefix=None):",
+            callbacks)
+        self.assertIn("def _apply_femto_depth_gate():", callbacks)
+        self.assertIn(
+            "'Sensortoworld%d' % index", callbacks)
+        compile(callbacks, "SHOW_CONTROL_CALLBACKS", "exec")
+
+        installer = inspect.getsource(
+            self.module.install_camera_calibration_controls)
+        self.assertIn(
+            '_apply_sensor_calibration_shader_values(pipeline, control)',
+            installer)
+        self.assertIn(
+            'shader.text = SHADERS["sensor_to_world"]', installer)
+        self.assertIn(
+            "_interaction_world_position_source(pipeline)", installer)
+        self.assertIn("sensor-to-world baseline preserved", installer)
+        self.assertNotIn("_set(sensor", installer)
+        self.assertNotIn("destroy", installer)
+        self.assertNotIn("project.save", installer)
+        self.assertNotIn("subprocess", installer)
+
+    def test_stereo_preview_has_non_destructive_stale_top_repair(self) -> None:
+        builder = inspect.getsource(self.module._build_stereo)
+        for marker in (
+            "LEFT_SOURCE_REPAIR",
+            "RIGHT_SOURCE_REPAIR",
+            "GRADE_LEFT_EYE_REPAIR",
+            "GRADE_RIGHT_EYE_REPAIR",
+            "STEREO_SIDE_BY_SIDE_REPAIR",
+            "OUT_STEREO_SBS_REPAIR",
+            "../POINT_RENDER/OUT_LEFT_EYE",
+            "../POINT_RENDER/OUT_RIGHT_EYE",
+        ):
+            self.assertIn(marker, builder)
+        self.assertIn('("connectorder", "outputindex", "index")', builder)
+        self.assertNotIn(".destroy(", builder)
+
     def test_perform_window_upgrade_is_bounded_and_hardware_neutral(self) -> None:
         signature = inspect.signature(self.module.install_perform_window)
         self.assertEqual(list(signature.parameters), ["root"])
@@ -1024,6 +1217,33 @@ assert normalized({src_path!r}) in {{
         self.assertNotIn("eye_offset * -35.0", self.source)
         self.assertIn("HEADSET_ADAPTER_CONTRACT", self.source)
 
+    def test_low_resolution_interaction_cannot_collapse_geometry(self) -> None:
+        completion = inspect.getsource(self.module._build_completion)
+        point_render = inspect.getsource(self.module._build_point_render)
+        alignment = inspect.getsource(
+            self.module._align_interaction_position_resolutions)
+        callbacks = self.module.SHOW_CONTROL_CALLBACKS
+        self.assertIn(
+            "_set_resolution(procedural_position, geometry_width, geometry_height)",
+            completion,
+        )
+        self.assertIn(
+            "_set_resolution(view_position, geometry_width, geometry_height)",
+            point_render,
+        )
+        for operator in (
+                "COMPLETION/procedural_backfill",
+                "POINT_RENDER/VIEW_POSITION_INSTALLATION",
+                "POINT_RENDER/VIEW_POSITION_LEFT",
+                "POINT_RENDER/VIEW_POSITION_CENTER",
+                "POINT_RENDER/VIEW_POSITION_RIGHT"):
+            self.assertIn(operator, alignment)
+            self.assertIn(operator, callbacks)
+        self.assertIn(
+            "_apply_geometry_contract_resolution()", callbacks)
+        self.assertIn(
+            "_align_interaction_position_resolutions(pipeline)", self.source)
+
     def test_wall_view_control_upgrade_is_bounded(self) -> None:
         installer = inspect.getsource(
             self.module.install_wall_view_controls
@@ -1086,6 +1306,10 @@ assert normalized({src_path!r}) in {{
             '_connect(contract, point_render, 1, 1, report, replace=True)',
             self.source,
         )
+        self.assertIn(
+            '_connect(contract, point_render, 2, 2, report, replace=True)',
+            self.source,
+        )
         self.assertNotIn(
             '_connect(contract, point_render, 0, 1, report, replace=True)',
             self.source,
@@ -1094,7 +1318,12 @@ assert normalized({src_path!r}) in {{
             '_connect(contract, point_render, 1, 2, report, replace=True)',
             self.source,
         )
-        self.assertIn("Interaction stays", self.source)
+        self.assertIn("interaction-neutral base world", self.source)
+        self.assertIn('"VIEW_POSITION_" + view', self.source)
+        self.assertIn('("INSTALLATION", "Installation", True)', self.source)
+        self.assertIn('("LEFT", "Leftwall", False)', self.source)
+        self.assertIn('("CENTER", "Centerwall", True)', self.source)
+        self.assertIn('("RIGHT", "Rightwall", False)', self.source)
 
     def test_managed_root_wiring_replaces_legacy_alphabetical_connections(self) -> None:
         self.assertIn("def _connect(src, dst, dst_index=0, src_index=0, report=None, replace=False)",

@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 INITIALIZE = ROOT / "scripts" / "Initialize-DepthAnything.ps1"
 START = ROOT / "scripts" / "Start-DepthAnythingWorker.ps1"
+STOP = ROOT / "scripts" / "Stop-DepthAnythingSensorWorker.ps1"
 GEOMETRY_START = ROOT / "scripts" / "Start-DepthAnythingGeometryWorker.ps1"
 REQUIREMENTS = ROOT / "integrations" / "depth_anything" / "requirements-runtime.txt"
 README = ROOT / "integrations" / "depth_anything" / "README.md"
@@ -55,7 +56,10 @@ class DepthAnythingIntegrationSourceTests(unittest.TestCase):
             "webcam_will_open",
             "[ValidateSet('auto', 'msmf', 'dshow', 'any')]",
             "'--camera-backend'",
+            "'--camera-name'",
+            "[string]$CameraName",
             "camera_backend = $CameraBackend",
+            "camera_name = if",
             "camera_resolution = @($CameraWidth, $CameraHeight)",
             "profile = $Profile",
             "[int]$CameraWidth = 640",
@@ -81,6 +85,22 @@ class DepthAnythingIntegrationSourceTests(unittest.TestCase):
         self.assertIn("Get-Command python -CommandType Application", source)
         self.assertIn("Mock mode is using PATH Python", source)
         self.assertIn("Mock mode needs Python with NumPy on PATH", source)
+
+    def test_sensor_stop_is_preview_first_and_checkout_scoped(self) -> None:
+        source = STOP.read_text(encoding="utf-8")
+        for marker in (
+            "[switch]$Stop",
+            "if (-not $Stop)",
+            "tools\\depth_anything_worker.py",
+            "Start-DepthAnythingWorker.ps1",
+            "--capture webcam",
+            "--capture auto",
+            "Stop-Process",
+            "No matching audience-camera worker is running",
+        ):
+            self.assertIn(marker, source)
+        self.assertNotIn("moge2_worker.py", source)
+        self.assertNotIn("Stop-GeneratedGeometryWorker.ps1", source)
 
     def test_docs_keep_worker_optional_private_and_replaceable(self) -> None:
         documentation = README.read_text(encoding="utf-8") + DOC.read_text(encoding="utf-8")

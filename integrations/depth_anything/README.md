@@ -79,6 +79,21 @@ requested/selected backend and camera-open milliseconds without including RGB.
 The worker verifies the receiver before camera open, refreshes the result
 connection after a slow backend open, and only then starts reading camera frames.
 
+Windows systems with virtual cameras can select a physical device by its exact
+DirectShow name. Named capture uses an ffmpeg rawvideo pipe in volatile memory;
+it does not save or transport camera RGB:
+
+```powershell
+.\scripts\Start-DepthAnythingWorker.ps1 `
+  -Profile 5090 `
+  -CameraName 'Physical Camera Name' `
+  -Start
+```
+
+Obtain the exact device name from a local DirectShow device listing. Keep the
+name in ignored machine-local launch configuration rather than hard-coding it
+as a cross-machine default.
+
 For the initial RTX 3080 Ti Laptop test:
 
 ```powershell

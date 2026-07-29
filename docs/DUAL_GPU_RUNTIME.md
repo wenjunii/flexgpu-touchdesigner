@@ -166,7 +166,7 @@ disabled instead of rendering a knowingly wrong reconstruction.
 Calibration identity includes a canonical `calibration_digest`, not only a
 human-readable ID. Camera/sensor transforms must have rigid orthonormal,
 right-handed bases; scale belongs in depth conversion. Sensor forces use a
-bounded 8x8 world-space occupancy sample and a clamped render delta. The
+bounded 32x32 world-space occupancy sample and a clamped render delta. The
 world-side renderer keeps XYZ in metres and uses parallel development cameras
 at plus/minus half-IPD; it neither normalizes/moves the world nor supplies a
 headset pose, runtime projection, or compositor.

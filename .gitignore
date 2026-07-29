@@ -70,6 +70,7 @@ vendor-private/
 .flexgpu/
 runtime/
 logs/
+projects/Log/
 calibration/
 captures/
 commissioning/

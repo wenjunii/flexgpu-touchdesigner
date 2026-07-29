@@ -147,7 +147,7 @@ procedural completion are composited afterward; they do not turn the generated
 image into the point-sprite texture.
 
 Sensor mask/confidence are applied once after rigid sensor-to-world calibration.
-Each generated point samples a bounded 8x8 set of sensor occupancy primitives
+Each generated point samples a bounded 32x32 set of sensor occupancy primitives
 in shared-world metres, and force in metres/second is integrated with a clamped
 render delta. This is a low-resolution occupancy/SDF approximation, not a full
 volume, skeleton tracker, controller collider, or general physics solver.
