@@ -20,7 +20,7 @@ Git is not a backup channel for the ignored working TOE or private assets. Keep
 at least two private copies of the accepted TOE and record its hash:
 
 ```powershell
-Get-FileHash .\projects\FlexShow-moge2-embody-podcast-local-5090.49.toe -Algorithm SHA256
+Get-FileHash .\projects\FlexShow-moge2-embody-podcast-local-5090.67.toe -Algorithm SHA256
 ```
 
 After copying it to the new PC, run the same command and compare the complete
@@ -42,10 +42,10 @@ UUIDs, absolute project paths, `.flexgpu` manifests, or a saved working TOE
 back into the other machine's filename. The worker launchers require an
 explicit profile and reject a real GPU/profile mismatch by default.
 
-The known local checkpoints are `.27` for the 3080 and `.49` for the 5090.
+The known local checkpoints are `.27` for the 3080 and `.67` for the 5090.
 These numbers are machine-local histories, not a cross-machine upgrade order.
 Never point `config/local-5090.json` at the 3080 `.27` file or use the 5090
-`.49` file as a 3080 save target. The `.49` name includes `podcast` because
+`.67` file as a 3080 save target. The `.67` name includes `podcast` because
 that local checkpoint combines the two networks; the audio tracks, private
 components, and TOE remain outside Git.
 
@@ -92,7 +92,7 @@ run:
   -DisplayProfile venue_1080p `
   -DisplayMode panoramic_wrap `
   -GeometryProvider moge2 `
-  -Project .\projects\FlexShow-moge2-embody-podcast-local-5090.49.toe `
+  -Project .\projects\FlexShow-moge2-embody-podcast-local-5090.67.toe `
   -Output .\config\local-5090.json
 ```
 
@@ -163,16 +163,18 @@ weights, logs, and all `config/local-*.json` files remain intentionally
 untracked. This record is a short functional migration check, not the required
 sustained thermal, projector, interaction, or venue acceptance.
 
-The current combined 5090 working checkpoint is `.49`; it does not replace the
-3080 history. During the 2026-07-28 audit, all 55 FlexGPU Show Control values
-restored cleanly, but two issues were correctly treated as failures rather than
-accepted output: the stable adapter RGB was an unchanged near-black frame, and
-F1 referenced a missing
-`/project1/flexgpu/INSTALLATION_OUT/window1`. The public source now includes a
-bounded `install_perform_window()` repair plus opt-in live-source
-visibility/change checks. Apply the repair only to the opened 5090 checkpoint,
-then save a new 5090-numbered checkpoint after visual acceptance; do not save it
-over `.49` or into a 3080 filename.
+The current combined 5090 working checkpoint is `.67`; it does not replace the
+3080 history. The earlier `.49` audit found and repaired a stale near-black
+adapter frame plus an invalid F1 window reference. Subsequent 5090-only
+checkpoints added output-local interaction routing, independent webcam/Femto
+calibration trims, a selectable native Femto Mega point-cloud source, and a
+bounded 32x32 interaction occupancy search. The `.67` live check used a Femto
+audience gate of `2.0` to `5.0` metres, a `1.25` metre interaction radius,
+neutral `1.0` point-cloud scale, and `1.5` metre artistic side offset. It
+reported zero recursive TouchDesigner errors, current generated frames, and
+valid 1920x1080 installation plus six wall surfaces. These are local 5090
+venue values stored only in the ignored TOE; do not copy them into the 3080
+working project or tracked defaults.
 
 In the TouchDesigner Textport:
 

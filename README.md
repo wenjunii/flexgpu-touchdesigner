@@ -222,7 +222,7 @@ cross-profile, or ambiguously named local files:
 # Run this pair only on the RTX 5090 workstation.
 .\scripts\Set-FlexShowLocalProject.ps1 `
   -Config .\config\local-5090.json `
-  -Project .\projects\FlexShow-moge2-embody-podcast-local-5090.49.toe `
+  -Project .\projects\FlexShow-moge2-embody-podcast-local-5090.67.toe `
   -ExpectedTier 5090 `
   -WhatIf
 
@@ -261,7 +261,7 @@ vice versa. Git intentionally ignores all of these local files.
 
 The currently identified private checkpoints are
 `FlexShow-moge2-embody-local-3080.28.toe` on the 3080 and
-`FlexShow-moge2-embody-podcast-local-5090.49.toe` on the 5090. They are
+`FlexShow-moge2-embody-podcast-local-5090.67.toe` on the 5090. They are
 independent working files, not Git artifacts or interchangeable release
 versions. The 5090 checkpoint combines the FlexGPU and podcast networks and
 has the licensed private StreamDiffusionTD component connected; the component,
@@ -424,6 +424,44 @@ acceptance sequence, and how a paid app or physical sensor later replaces the
 worker without changing downstream world contracts. The webcam wrapper exposes
 `-CameraBackend auto|msmf|dshow|any`; Windows `auto` prefers MSMF so a slow
 DirectShow open cannot consume the TouchDesigner result receiver's idle window.
+On Windows hosts where virtual cameras occupy numeric indexes, use
+`-CameraName '<exact DirectShow name>'`; named capture uses an ffmpeg rawvideo
+pipe in volatile memory and leaves index-based 3080 defaults unchanged.
+The public **Camera Depth** Show Control page exposes the same name/index,
+mirror, enable, hidden start, and checkout-scoped stop controls. The camera
+worker is separate from the MoGe-2 and generated-geometry Depth Anything
+workers.
+The same page now has a hardware-neutral **Camera Depth Source** selector.
+`Webcam + Depth Anything` remains the default and retains its saved camera
+name, index, mirror, worker, and calibration values. `Femto Mega (USB)` enables
+a separate native TouchDesigner Orbbec point-cloud adapter and disables the
+webcam receiver; switching back restores the existing webcam path without
+rewriting it. The optional Femto serial is machine-local and is never embedded
+in the tracked builder. Both sources converge only at
+`DEPTH_SENSOR_ADAPTER/OUT_POSITION`, `OUT_MASK`, and `OUT_CONFIDENCE`, then use
+the same non-destructive venue calibration and output interaction routing.
+The adjacent **Camera Calibration** page exposes a non-destructive audience
+depth-position scale, world X/Y/Z trims, sensor yaw/pitch/roll trims, and a
+neutral reset. These controls are layered over the four local
+`Sensortoworld0..3` rows; they never replace that venue baseline. Resetting the
+trim therefore returns exactly to the saved local calibration. Keep the
+baseline and tuned trims in the machine-tagged ignored TOE, not in Git or the
+other GPU's working file.
+The separate **Interaction Routing** page exposes an enable switch and bounded
+`0.0`–`10.0` intensity for the installation, left wall, center wall, and right
+wall. It also exposes interaction radius, edge falloff, response, and decay;
+the existing Interaction Strength and Interaction Smoothing controls remain on
+the main Show Controls page. The 5090 audience-camera default is installation
+plus center enabled at `1.0`, with both side walls disabled; these are
+output-local render branches, so disabling a wall leaves its completed point
+world unchanged. Radius controls world-space reach, falloff controls edge
+softness, response controls attack speed, and decay controls the release tail.
+The ignored 5090 `.67` live checkpoint was accepted with Femto audience near/far
+gates of `2.0`/`5.0` metres, a `1.25` metre interaction radius, neutral `1.0`
+point-cloud scale, and `1.5` metre artistic side offset. The public interaction
+shader uses a bounded 32x32 sensor search so a sparse native Femto mask does not
+collapse to one calibration plane. Those calibration and artistic values are
+5090-local starting points, not tracked defaults and not 3080 settings.
 The temporary bridge also defaults to audience-mirrored horizontal orientation
 and exposes `OUT_INTERACTION_DEBUG` as a readable view without changing the raw
 signed-force `OUT_INTERACTION` contract. The live-accepted 3080 rehearsal
@@ -651,7 +689,7 @@ the process boundary and resolves in both roles. Naming a local receiver-cook
 operator is not valid. Use explicit transported metadata or WorldBus for exact
 lifecycle semantics.
 
-Audience force is evaluated in shared-world metres using a bounded 8x8 sensor
+Audience force is evaluated in shared-world metres using a bounded 32x32 sensor
 occupancy sample, rather than matching generated and sensor pixels by UV.
 Motion integrates a clamped render delta, so force is frame-rate aware and a
 debugger pause cannot launch the cloud. This is a practical low-resolution
@@ -1089,7 +1127,7 @@ cd C:\path\to\flexgpu-touchdesigner
   -DisplayProfile venue_1080p `
   -DisplayMode panoramic_wrap `
   -GeometryProvider moge2 `
-  -Project .\projects\FlexShow-moge2-embody-podcast-local-5090.49.toe `
+  -Project .\projects\FlexShow-moge2-embody-podcast-local-5090.67.toe `
   -Output .\config\local-5090.json
 ```
 

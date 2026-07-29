@@ -15,6 +15,9 @@ param(
     [ValidateRange(0, 31)]
     [int]$CameraIndex = 0,
 
+    [ValidateLength(1, 255)]
+    [string]$CameraName,
+
     [ValidateSet('auto', 'msmf', 'dshow', 'any')]
     [string]$CameraBackend = 'auto',
 
@@ -108,6 +111,10 @@ if ($PercentileLow -ge $PercentileHigh) {
 if ($PseudoNearM -ge $PseudoFarM) {
     throw 'PseudoNearM must be lower than PseudoFarM.'
 }
+if ($PSBoundParameters.ContainsKey('CameraName') -and
+    ([string]::IsNullOrWhiteSpace($CameraName) -or $CameraName -match '[\x00-\x1f]')) {
+    throw 'CameraName must not be empty or contain control characters.'
+}
 if ($ForegroundFarM -lt $PseudoNearM -or $ForegroundFarM -gt $PseudoFarM) {
     throw 'ForegroundFarM must stay inside the pseudo-metre slab.'
 }
@@ -166,6 +173,9 @@ $arguments = @(
     '--output-tcp-port', [string]$OutputTcpPort,
     '--stale-after-ms', [string]$StaleAfterMs
 )
+if ($PSBoundParameters.ContainsKey('CameraName')) {
+    $arguments += @('--camera-name', $CameraName)
+}
 if ($hasRawLow) {
     $arguments += @('--raw-low', [string]$RawLow)
 }
@@ -192,6 +202,7 @@ $plan = [ordered]@{
     physical_gpu_index = $GpuIndex
     worker_device = 'cuda:0 (relative to CUDA_VISIBLE_DEVICES)'
     camera_index = $CameraIndex
+    camera_name = if ($PSBoundParameters.ContainsKey('CameraName')) { $CameraName } else { $null }
     camera_backend = $CameraBackend
     camera_resolution = @($CameraWidth, $CameraHeight)
     input_size = $InputSize

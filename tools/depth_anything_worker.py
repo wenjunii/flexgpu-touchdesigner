@@ -17,6 +17,8 @@ import json
 import math
 import os
 import re
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -702,6 +704,117 @@ class OpenCVCamera:
         self.capture.release()
 
 
+class FFmpegDirectShowCamera:
+    """Volatile named Windows camera source backed by an ffmpeg rawvideo pipe."""
+
+    source_name = "webcam"
+
+    def __init__(self, *, name: str, width: int, height: int) -> None:
+        if os.name != "nt":
+            raise CaptureError("named DirectShow capture is available only on Windows")
+        if (
+            not isinstance(name, str)
+            or not name.strip()
+            or len(name.encode("utf-8")) > 255
+            or any(ord(character) < 32 for character in name)
+        ):
+            raise CaptureError("camera name must be 1..255 UTF-8 bytes without controls")
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg is None:
+            raise DependencyError(
+                "ffmpeg is required for named DirectShow camera capture"
+            )
+        self.name = name
+        self.width = width
+        self.height = height
+        self.frame_bytes = width * height * 3
+        command = [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-f",
+            "dshow",
+            "-video_size",
+            f"{width}x{height}",
+            "-i",
+            "video=" + name,
+            "-an",
+            "-pix_fmt",
+            "bgr24",
+            "-f",
+            "rawvideo",
+            "pipe:1",
+        ]
+        creationflags = (
+            getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        )
+        opened_at = time.perf_counter()
+        try:
+            self.process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                bufsize=self.frame_bytes * 2,
+                creationflags=creationflags,
+            )
+        except OSError as exc:
+            raise CaptureError("unable to start named DirectShow camera") from exc
+        self.open_ms = round((time.perf_counter() - opened_at) * 1000.0, 3)
+
+    @property
+    def diagnostics(self) -> dict[str, Any]:
+        return {
+            "camera_backend_requested": "named",
+            "camera_backend_selected": "ffmpeg_dshow",
+            "camera_name": self.name,
+            "camera_open_ms": self.open_ms,
+            "camera_open_attempts": [
+                {
+                    "backend": "ffmpeg_dshow",
+                    "open_ms": self.open_ms,
+                    "opened": self.process.poll() is None,
+                }
+            ],
+        }
+
+    def read(self) -> tuple[bool, Any]:
+        stdout = self.process.stdout
+        if stdout is None:
+            raise CaptureError("named DirectShow camera stdout is unavailable")
+        payload = bytearray()
+        while len(payload) < self.frame_bytes:
+            chunk = stdout.read(self.frame_bytes - len(payload))
+            if not chunk:
+                return False, None
+            payload.extend(chunk)
+        try:
+            import numpy as np
+        except ImportError as exc:
+            raise DependencyError("NumPy is required for named camera capture") from exc
+        frame = np.frombuffer(payload, dtype=np.uint8).reshape(
+            (self.height, self.width, 3)
+        )
+        return True, frame
+
+    def release(self) -> None:
+        process = getattr(self, "process", None)
+        if process is None:
+            return
+        self.process = None
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2.0)
+        if process.stdout is not None:
+            process.stdout.close()
+
+
 class SyntheticCapture:
     """Bounded non-camera source used by CI; produces no persistent RGB."""
 
@@ -1154,6 +1267,12 @@ def _capture_factory(args: argparse.Namespace, capture_name: str) -> Callable[[]
         return lambda: SyntheticCapture(
             width=args.camera_width, height=args.camera_height
         )
+    if args.camera_name:
+        return lambda: FFmpegDirectShowCamera(
+            name=args.camera_name,
+            width=args.camera_width,
+            height=args.camera_height,
+        )
     return lambda: OpenCVCamera(
         index=args.camera_index,
         width=args.camera_width,
@@ -1186,6 +1305,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--device", default="cuda:0")
     serve.add_argument("--warmup", type=int, default=1)
     serve.add_argument("--camera-index", type=int, default=0)
+    serve.add_argument("--camera-name")
     serve.add_argument("--camera-backend", choices=CAMERA_BACKENDS, default="auto")
     serve.add_argument("--camera-width", type=int, default=1280)
     serve.add_argument("--camera-height", type=int, default=720)
@@ -1226,8 +1346,13 @@ def _serve_preview(args: argparse.Namespace, profile: WorkerProfile) -> dict[str
         "capture": capture_name,
         "webcam_will_open": bool(args.start and capture_name == "webcam"),
         "camera_index": args.camera_index,
+        "camera_name": args.camera_name,
         "camera_backend_requested": args.camera_backend,
-        "camera_backend_preferred": _preferred_camera_backend(args.camera_backend),
+        "camera_backend_preferred": (
+            "ffmpeg_dshow"
+            if args.camera_name
+            else _preferred_camera_backend(args.camera_backend)
+        ),
         "input_size": args.input_size or profile.input_size,
         "output_size": [
             profile.output_width if args.output_width is None else args.output_width,
