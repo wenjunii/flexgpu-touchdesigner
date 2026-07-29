@@ -74,6 +74,11 @@ class ShowControlValidatorSourceTests(unittest.TestCase):
         self.assertIn('"Camerasensorsource_femto_mega"', self.source)
         self.assertIn('"Camerasensorsource_depth_bridge_disabled"', self.source)
         self.assertIn('"Camerasensorsource_femto_enabled"', self.source)
+        self.assertIn("femto_fail_closed", self.source)
+        self.assertIn("femto_state_is_consistent", self.source)
+        self.assertIn(
+            '"disconnected_hardware_is_accepted_only_when_fail_closed"',
+            self.source)
         self.assertIn('"Cameramirrorhorizontal"', self.source)
         self.assertIn('"Sensorworkerstatus"', self.source)
         self.assertIn('"Femtostatus"', self.source)

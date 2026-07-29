@@ -20,7 +20,7 @@ Git is not a backup channel for the ignored working TOE or private assets. Keep
 at least two private copies of the accepted TOE and record its hash:
 
 ```powershell
-Get-FileHash .\projects\FlexShow-moge2-embody-podcast-local-5090.67.toe -Algorithm SHA256
+Get-FileHash .\projects\FlexShow-moge2-embody-podcast-local-5090.71.toe -Algorithm SHA256
 ```
 
 After copying it to the new PC, run the same command and compare the complete
@@ -42,10 +42,10 @@ UUIDs, absolute project paths, `.flexgpu` manifests, or a saved working TOE
 back into the other machine's filename. The worker launchers require an
 explicit profile and reject a real GPU/profile mismatch by default.
 
-The known local checkpoints are `.27` for the 3080 and `.67` for the 5090.
+The known local checkpoints are `.27` for the 3080 and `.71` for the 5090.
 These numbers are machine-local histories, not a cross-machine upgrade order.
 Never point `config/local-5090.json` at the 3080 `.27` file or use the 5090
-`.67` file as a 3080 save target. The `.67` name includes `podcast` because
+`.71` file as a 3080 save target. The `.71` name includes `podcast` because
 that local checkpoint combines the two networks; the audio tracks, private
 components, and TOE remain outside Git.
 
@@ -92,7 +92,7 @@ run:
   -DisplayProfile venue_1080p `
   -DisplayMode panoramic_wrap `
   -GeometryProvider moge2 `
-  -Project .\projects\FlexShow-moge2-embody-podcast-local-5090.67.toe `
+  -Project .\projects\FlexShow-moge2-embody-podcast-local-5090.71.toe `
   -Output .\config\local-5090.json
 ```
 
@@ -163,7 +163,7 @@ weights, logs, and all `config/local-*.json` files remain intentionally
 untracked. This record is a short functional migration check, not the required
 sustained thermal, projector, interaction, or venue acceptance.
 
-The current combined 5090 working checkpoint is `.67`; it does not replace the
+The current combined 5090 working checkpoint is `.71`; it does not replace the
 3080 history. The earlier `.49` audit found and repaired a stale near-black
 adapter frame plus an invalid F1 window reference. Subsequent 5090-only
 checkpoints added output-local interaction routing, independent webcam/Femto
@@ -175,6 +175,16 @@ reported zero recursive TouchDesigner errors, current generated frames, and
 valid 1920x1080 installation plus six wall surfaces. These are local 5090
 venue values stored only in the ignored TOE; do not copy them into the 3080
 working project or tracked defaults.
+
+The `.71` checkpoint was saved on 2026-07-29 after a disconnected-device
+control audit. The public validator passed 252 of 252 checks with zero
+restoration failures. The Show Control start and stop pairs for MoGe-2,
+generated-geometry Depth Anything, and Camera Depth all changed to a real
+checkout-scoped PID and returned to PID zero. The managed pipeline and all
+seven 1920x1080 output TOPs reported zero errors. Because the webcam and Femto
+Mega were physically disconnected and StreamDiffusionTD was intentionally left
+stopped, this record does not replace the `.67` live sensor/image acceptance or
+the remaining StreamDiffusionTD scene-advance and visual-content check.
 
 In the TouchDesigner Textport:
 
