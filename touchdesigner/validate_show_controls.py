@@ -698,9 +698,29 @@ def validate(
         _record(
             checks, "Camerasensorsource_depth_bridge_disabled",
             bool(_value(sensor_bridge, "Enabled", True)), False)
+        femto_enabled = bool(_value(femto_adapter, "Enabled", False))
+        femto_status = str(
+            _value(control, "Femtostatus", "") or "").strip()
+        femto_fail_closed = any(
+            marker in femto_status.lower()
+            for marker in (
+                "unavailable",
+                "failed",
+                "missing",
+                "not found",
+                "no usb",
+            ))
+        femto_state_is_consistent = (
+            femto_enabled != femto_fail_closed)
         _record(
             checks, "Camerasensorsource_femto_enabled",
-            bool(_value(femto_adapter, "Enabled", False)), True)
+            femto_state_is_consistent, True,
+            details={
+                "enabled": femto_enabled,
+                "status": femto_status,
+                "disconnected_hardware_is_accepted_only_when_fail_closed":
+                    femto_fail_closed,
+            })
         _apply(callbacks, control, "Cameramirrorhorizontal", False)
         _record(
             checks, "Cameramirrorhorizontal",

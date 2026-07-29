@@ -222,7 +222,7 @@ cross-profile, or ambiguously named local files:
 # Run this pair only on the RTX 5090 workstation.
 .\scripts\Set-FlexShowLocalProject.ps1 `
   -Config .\config\local-5090.json `
-  -Project .\projects\FlexShow-moge2-embody-podcast-local-5090.67.toe `
+  -Project .\projects\FlexShow-moge2-embody-podcast-local-5090.71.toe `
   -ExpectedTier 5090 `
   -WhatIf
 
@@ -261,7 +261,7 @@ vice versa. Git intentionally ignores all of these local files.
 
 The currently identified private checkpoints are
 `FlexShow-moge2-embody-local-3080.28.toe` on the 3080 and
-`FlexShow-moge2-embody-podcast-local-5090.67.toe` on the 5090. They are
+`FlexShow-moge2-embody-podcast-local-5090.71.toe` on the 5090. They are
 independent working files, not Git artifacts or interchangeable release
 versions. The 5090 checkpoint combines the FlexGPU and podcast networks and
 has the licensed private StreamDiffusionTD component connected; the component,
@@ -462,6 +462,17 @@ point-cloud scale, and `1.5` metre artistic side offset. The public interaction
 shader uses a bounded 32x32 sensor search so a sparse native Femto mask does not
 collapse to one calibration plane. Those calibration and artistic values are
 5090-local starting points, not tracked defaults and not 3080 settings.
+The ignored `.71` checkpoint is the later 2026-07-29 control-audit save. Its
+public Show Control audit passed all 252 checks with zero restoration failures;
+MoGe-2, generated-geometry Depth Anything, and Camera Depth each started with a
+real checkout-scoped PID and stopped through their matching Show Control
+buttons. All seven installation and wall TOPs remained 1920x1080 with zero TOP
+or recursive pipeline errors. The webcam and Femto Mega were disconnected, so
+their live images and calibration were deliberately not accepted in that
+audit; Femto instead reported its missing local serial and stayed fail-closed.
+StreamDiffusionTD scene advance and visual-content checks also remain deferred
+until the operator runs that private component. `.69`, `.67`, and `.64` remain
+independent local rollback checkpoints.
 The temporary bridge also defaults to audience-mirrored horizontal orientation
 and exposes `OUT_INTERACTION_DEBUG` as a readable view without changing the raw
 signed-force `OUT_INTERACTION` contract. The live-accepted 3080 rehearsal
@@ -1127,7 +1138,7 @@ cd C:\path\to\flexgpu-touchdesigner
   -DisplayProfile venue_1080p `
   -DisplayMode panoramic_wrap `
   -GeometryProvider moge2 `
-  -Project .\projects\FlexShow-moge2-embody-podcast-local-5090.67.toe `
+  -Project .\projects\FlexShow-moge2-embody-podcast-local-5090.71.toe `
   -Output .\config\local-5090.json
 ```
 

@@ -320,6 +320,13 @@ checked with the physical camera, then stopped while the bridge is observed to
 become stale and fail closed. Never run the two generated-geometry workers
 together on the 3080.
 
+When a selected Femto Mega is physically disconnected, the validator accepts
+that hardware state only when the public status explicitly reports the device
+as unavailable and the adapter remains disabled. A missing device is therefore
+not mistaken for a control failure, while an enabled adapter paired with a
+missing-device status still fails the audit. This structural check does not
+replace a connected-sensor image, calibration, freshness, or interaction test.
+
 Older combined TOEs can also retain a Window Placement reference to a deleted
 `/project1/flexgpu/INSTALLATION_OUT/window1`. Install the bounded,
 hardware-neutral Perform Mode target before pressing F1:
