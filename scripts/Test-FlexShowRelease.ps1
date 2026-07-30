@@ -10,7 +10,9 @@ wrapper's accepted rehearsal defaults, validates the public TD Knowledge
 bridge wiring, and checks the exact public surface. The Python source tests
 also require the canonical Perform Mode Window COMP contract, strict optional
 live-source visibility/change gates, and both the FlexGPU and combined-podcast
-public Show Control inventories.
+public Show Control inventories. A separate read-only live-report checker
+rejects cooked wall dimensions that were silently clamped by the active
+TouchDesigner license tier.
 The unit stage includes cold-reopen bridge imports, component-qualified
 TOP-to-POP attribute mappings, and native/fallback Windows process-identity
 regressions.

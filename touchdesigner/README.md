@@ -320,6 +320,20 @@ checked with the physical camera, then stopped while the bridge is observed to
 become stale and fail closed. Never run the two generated-geometry workers
 together on the 3080.
 
+The report also checks cooked TOP dimensions after restoring the original wall
+profile. It reads actual `width` and `height` from the single wall, all six
+individual triple-wall feeds, and the panoramic/artistic mosaics. This catches
+license-tier clamping that can leave the resolution parameters at 1920x1080
+while the real TOPs are 1280x720 (and the three-wide mosaics 1280x240). After
+activating a Commercial or Pro license, restart TouchDesigner and rerun the
+validator, then verify the ignored report from PowerShell:
+
+```powershell
+.\scripts\Test-FlexShowControlReport.ps1 `
+  -Report .\runtime\validation\show-controls-3080.json `
+  -ExpectedProfile 3080ti_16gb
+```
+
 When a selected Femto Mega is physically disconnected, the validator accepts
 that hardware state only when the public status explicitly reports the device
 as unavailable and the adapter remains disabled. A missing device is therefore

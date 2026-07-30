@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 VALIDATOR_PATH = ROOT / "touchdesigner" / "validate_show_controls.py"
 REPAIR_PATH = ROOT / "scripts" / "Repair-FlexShowEnvoyRegistry.ps1"
 BRIDGE_CHECKER_PATH = ROOT / "scripts" / "Test-TDKnowledgeBridge.ps1"
+REPORT_CHECKER_PATH = ROOT / "scripts" / "Test-FlexShowControlReport.ps1"
 
 
 def load_validator():
@@ -58,6 +59,24 @@ class ShowControlValidatorSourceTests(unittest.TestCase):
         self.assertIn('"adapter_control_inventory"', self.source)
         self.assertIn('"adapter_ui_buttons"', self.source)
         self.assertIn('"adapter_restored"', self.source)
+        self.assertIn(
+            'REPORT_VERSION = "flexgpu-show-controls-validation/v2"',
+            self.source,
+        )
+        self.assertIn("OUTPUT_DIMENSION_TARGETS", self.source)
+        self.assertIn("int(node.width)", self.source)
+        self.assertIn("int(node.height)", self.source)
+        self.assertIn('"output_dimensions": output_dimensions', self.source)
+        self.assertIn(
+            '"actual_top_dimensions_are_authoritative": True',
+            self.source,
+        )
+        self.assertGreater(
+            self.source.index(
+                'failures = [item for item in checks '
+                'if item["status"] != "pass"]'),
+            self.source.index('"restored_output_dimensions_" + name'),
+        )
         self.assertIn('"Crossfadesec"', self.source)
         self.assertIn('"Colorenabled"', self.source)
         self.assertIn('"Resetcolor"', self.source)
@@ -141,6 +160,19 @@ class ShowControlValidatorSourceTests(unittest.TestCase):
         self.assertNotIn("Stop-Process", source)
         self.assertNotIn("taskkill", source.lower())
         self.assertIn("Repair-FlexShowEnvoyRegistry.ps1", checker)
+
+    def test_report_checker_rejects_license_clamped_top_dimensions(self) -> None:
+        source = REPORT_CHECKER_PATH.read_text(encoding="utf-8-sig")
+        for marker in (
+            "flexgpu-show-controls-validation/v2",
+            "ExpectedProfile = '3080ti_16gb'",
+            "$result.output_dimensions.status -ne 'pass'",
+            "Cooked wall output dimensions",
+            "actual=$($_.Value.actual -join 'x')",
+        ):
+            self.assertIn(marker, source)
+        for forbidden in ("Stop-Process", "Start-Process", "git "):
+            self.assertNotIn(forbidden, source)
 
 
 if __name__ == "__main__":
