@@ -3577,12 +3577,55 @@ class FlexGpuRuntimeExt(object):
 
 
 STARTUP_CALLBACKS = r'''# Execute DAT callbacks
+_venue_restore_pending = True
+
+def _restore_saved_venue_output(root_comp):
+    pipeline = root_comp.op('WORKING_PIPELINE')
+    if pipeline is None:
+        return True
+    try:
+        profile = str(
+            pipeline.fetch('venue_output_profile', '') or '').strip().lower()
+    except Exception:
+        profile = ''
+    if profile == 'venue_1080p':
+        width, height = 1920, 1080
+    elif profile.startswith('custom_'):
+        try:
+            width_text, height_text = profile[len('custom_'):].split('x', 1)
+            width = max(320, min(3840, int(width_text)))
+            height = max(180, min(2160, int(height_text)))
+        except Exception:
+            return True
+    else:
+        return True
+    controls = pipeline.op('SHOW_CONTROL')
+    callbacks = (
+        controls.op('show_control_callbacks')
+        if controls is not None else None)
+    if callbacks is None:
+        return False
+    try:
+        controls.par.Wallwidth = width
+        controls.par.Wallheight = height
+        callbacks.module.apply_parameter('Wallwidth')
+        callbacks.module.apply_parameter('Wallheight')
+    except Exception:
+        # Saved projects may still be compiling embedded DAT modules during
+        # onStart. onFrameStart retries until the public callback is ready.
+        return False
+    return True
+
 def _apply():
+    global _venue_restore_pending
     root_comp = me.parent().parent()
     module_dat = root_comp.op('STARTUP/runtime_helpers')
     if module_dat is not None:
-        return module_dat.module.apply(root_comp)
-    return {}
+        state = module_dat.module.apply(root_comp)
+    else:
+        state = {}
+    _venue_restore_pending = not _restore_saved_venue_output(root_comp)
+    return state
 
 def onStart():
     _apply()
@@ -3593,7 +3636,10 @@ def onCreate():
     return
 
 def onFrameStart(frame):
+    global _venue_restore_pending
     root_comp = me.parent().parent()
+    if _venue_restore_pending:
+        _venue_restore_pending = not _restore_saved_venue_output(root_comp)
     module_dat = root_comp.op('STARTUP/runtime_helpers')
     if module_dat is not None:
         module_dat.module.tick(root_comp)

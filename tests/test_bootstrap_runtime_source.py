@@ -79,6 +79,26 @@ class BootstrapRuntimeSourceTests(unittest.TestCase):
         self.assertIn("module_dat.module.tick(root_comp)", self.callbacks)
         self.assertIn("def onFrameStart(frame)", self.callbacks)
 
+    def test_saved_venue_output_profile_is_restored_after_runtime_defaults(self) -> None:
+        for marker in (
+            "def _restore_saved_venue_output(root_comp)",
+            "pipeline.fetch('venue_output_profile', '')",
+            "profile == 'venue_1080p'",
+            "profile.startswith('custom_')",
+            "controls.par.Wallwidth = width",
+            "controls.par.Wallheight = height",
+            "callbacks.module.apply_parameter('Wallwidth')",
+            "callbacks.module.apply_parameter('Wallheight')",
+            "_venue_restore_pending = not _restore_saved_venue_output(root_comp)",
+        ):
+            self.assertIn(marker, self.callbacks)
+        self.assertLess(
+            self.callbacks.index("module_dat.module.apply(root_comp)"),
+            self.callbacks.index(
+                "_venue_restore_pending = not "
+                "_restore_saved_venue_output(root_comp)"),
+        )
+
     def test_transport_cadence_uses_global_cook_rate_and_send_step(self) -> None:
         self.assertIn("project.cookRate", self.runtime)
         self.assertIn("transport_send_step", self.runtime)

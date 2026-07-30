@@ -996,6 +996,30 @@ The mosaics explicitly use square-pixel resolution aspect and TouchDesigner's
 `Left to Right` Layout TOP mode, so mapper and floating-viewer consumers see a
 true 16:3 left-center-right canvas rather than an inherited 16:9 aspect.
 
+Do not accept the resolution parameter fields by themselves. A TouchDesigner
+license tier can leave `resolutionw` and `resolutionh` at the requested values
+while clamping the cooked TOP to a lower size. The live Show Control validator
+now reads the actual `width` and `height` of the single wall, all six individual
+triple-wall feeds, and both three-wide mosaics after restoring the venue
+settings. For a commissioned 1920x1080 setup it therefore requires seven
+1920x1080 wall TOPs and two 5760x1080 mosaic TOPs. If those checks report
+1280x720 or 1280x240, activate a Commercial or Pro license, restart
+TouchDesigner so the process picks it up, and rerun the validation.
+
+Verify the ignored live report from PowerShell after the in-TouchDesigner
+control sweep:
+
+```powershell
+.\scripts\Test-FlexShowControlReport.ps1 `
+  -Report .\runtime\validation\show-controls-3080.json `
+  -ExpectedProfile 3080ti_16gb
+```
+
+The checker is read-only. Worker and combined-podcast timeline/scene buttons
+remain explicit live checks and are reported as
+`external_validation_required`, rather than being silently counted as
+automated passes.
+
 MoGe-2 uses CUDA for model inference but also performs significant CPU work for
 image resizing, tensor-to-array transfer, atlas packing, and transport. On the
 accepted RTX 3080 Ti Laptop profile, keep `Geometry Capture FPS` at `5` unless

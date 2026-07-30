@@ -22,7 +22,19 @@ from pathlib import Path
 ROOT_PATH = "/project1/flexgpu"
 PIPELINE_PATH = ROOT_PATH + "/WORKING_PIPELINE"
 CONTROL_PATH = PIPELINE_PATH + "/SHOW_CONTROL"
-REPORT_VERSION = "flexgpu-show-controls-validation/v1"
+REPORT_VERSION = "flexgpu-show-controls-validation/v2"
+
+OUTPUT_DIMENSION_TARGETS = (
+    ("OUT_INSTALLATION", 1),
+    ("OUT_TRIPLE_WRAP_LEFT", 1),
+    ("OUT_TRIPLE_WRAP_CENTER", 1),
+    ("OUT_TRIPLE_WRAP_RIGHT", 1),
+    ("OUT_TRIPLE_ARTISTIC_LEFT", 1),
+    ("OUT_TRIPLE_ARTISTIC_CENTER", 1),
+    ("OUT_TRIPLE_ARTISTIC_RIGHT", 1),
+    ("OUT_TRIPLE_WRAP", 3),
+    ("OUT_TRIPLE_ARTISTIC", 3),
+)
 
 
 VALUE_CONTROLS = (
@@ -306,6 +318,52 @@ def _status_read_only(parameter):
         return bool(parameter.readOnly)
     except Exception:
         return False
+
+
+def _top_dimensions(node):
+    if node is None:
+        return None
+    try:
+        node.cook(force=True)
+    except Exception:
+        try:
+            node.cook()
+        except Exception:
+            pass
+    try:
+        return [int(node.width), int(node.height)]
+    except Exception:
+        return None
+
+
+def _output_dimension_report(pipeline, wall_width, wall_height):
+    outputs = {}
+    mismatches = {}
+    for name, width_multiplier in OUTPUT_DIMENSION_TARGETS:
+        expected = [
+            int(wall_width) * int(width_multiplier),
+            int(wall_height),
+        ]
+        actual = _top_dimensions(pipeline.op(name))
+        item = {
+            "actual": actual,
+            "expected": expected,
+            "status": "pass" if actual == expected else "fail",
+        }
+        outputs[name] = item
+        if item["status"] != "pass":
+            mismatches[name] = item
+    return {
+        "status": "pass" if not mismatches else "fail",
+        "wall_width": int(wall_width),
+        "wall_height": int(wall_height),
+        "outputs": outputs,
+        "mismatches": mismatches,
+        "note": (
+            "Actual TOP width/height are authoritative. Resolution parameters "
+            "alone can remain at the requested values when the active "
+            "TouchDesigner license clamps the cooked TOP."),
+    }
 
 
 def validate(
@@ -1065,7 +1123,6 @@ def validate(
         except Exception:
             pass
 
-    failures = [item for item in checks if item["status"] != "pass"]
     restored = {}
     for name, expected in snapshot.items():
         actual = _value(control, name)
@@ -1088,6 +1145,23 @@ def validate(
     adapter_restoration_failures = [
         name for name, item in adapter_restored.items()
         if item["status"] != "pass"]
+    output_dimensions = _output_dimension_report(
+        pipeline,
+        int(snapshot["Wallwidth"]),
+        int(snapshot["Wallheight"]),
+    )
+    for name, item in output_dimensions["outputs"].items():
+        _record(
+            checks,
+            "restored_output_dimensions_" + name,
+            item["actual"],
+            item["expected"],
+            details={
+                "target": PIPELINE_PATH + "/" + name,
+                "actual_top_dimensions_are_authoritative": True,
+            },
+        )
+    failures = [item for item in checks if item["status"] != "pass"]
     all_restoration_failures = (
         list(restoration_failures)
         + ["adapter." + name for name in adapter_restoration_failures]
@@ -1115,6 +1189,7 @@ def validate(
         "restored": restored,
         "adapter_restored": adapter_restored,
         "restoration_failures": all_restoration_failures,
+        "output_dimensions": output_dimensions,
         "worker_buttons": {
             "status": "external_validation_required",
             "reason": (
