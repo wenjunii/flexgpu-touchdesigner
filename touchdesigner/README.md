@@ -253,6 +253,11 @@ provide:
   provider scales;
 - brightness, contrast, saturation, gamma, hue shift, temperature, and tint
   for every final rendered point-cloud view, with a neutral reset button;
+- a default-off **VR Simulation** page with installation/VR/combined mode,
+  desktop-mock versus future OpenVR provider selection, eye size/IPD/FOV,
+  mock head translation/rotation, target-Hz metadata, and a neutral reset;
+- a **VR Mock Hands** page with two sparse world-space hand positions,
+  independent hand-force gain, enable/disable, and reset controls;
 - 3080 Ti 16 GB, 4090, and 5090 geometry/point/capture presets;
 - visible PowerShell launch and checkout-scoped stop buttons for the two
   generated-geometry workers, using the selected quality profile and physical
@@ -286,7 +291,30 @@ defaults are neutral, and the grade is weighted by actual point coverage so
 disocclusion fog/background remains unchanged. Installing the tab therefore
 does not intentionally change an accepted visual.
 
-To verify all 83 FlexGPU public controls after installing an upgrade, run this
+### Rehearse VR without a headset
+
+`runtime_pipeline.install_vr_foundation(op('/project1/flexgpu'))` is a bounded
+upgrade for an ignored working TOE. It rebuilds only the managed `VR_OUTPUT`,
+sensor interaction, point-render stereo, desktop stereo preview, and public
+Show Control scopes. It does not save the project, start a worker, create an
+OpenVR TOP, or touch private StreamDiffusionTD internals. Save a separate
+rollback TOE before running it, then save the accepted result to a new local
+checkpoint after inspection.
+
+With `Experience Mode = VR` or `Combined` and
+`VR Pose / Hand Provider = Desktop Mock`, the mock head controls drive the two
+parallel metric cameras, while the two mock hand samples enter the same bounded
+world-space interaction field as the audience sensor. The eye TOPs cook at the
+configured mock eye resolution only while the VR branch is enabled; the
+disabled branch uses a small deterministic black texture. Installation and all
+single/triple-wall cameras are independent of the mock head pose.
+
+Selecting `OpenVR` is intentionally fail-closed until a reviewed Quest adapter
+is installed at `VR_OUTPUT/HEADSET_ADAPTER_CONTRACT`. The desktop rehearsal is
+not evidence for Quest pose, hand joints, asymmetric per-eye projection,
+predicted display time, compositor submission, comfort, or headset cadence.
+
+To verify all 121 FlexGPU public controls after installing an upgrade, run this
 inside TouchDesigner. It changes one control at a time, checks the corresponding
 managed operator or shader, and restores every original value in a `finally`
 block. In a combined podcast TOE it also inventories all 18 public adapter
@@ -333,6 +361,13 @@ validator, then verify the ignored report from PowerShell:
   -Report .\runtime\validation\show-controls-3080.json `
   -ExpectedProfile 3080ti_16gb
 ```
+
+The PowerShell checker also requires the complete 121-control inventory and
+the desktop-mock VR head/hand checks. `vr_foundation=desktop_mock_pass` means
+only that the opt-in rehearsal controls, stereo dimensions, shader binding,
+resets, and installation-only fail-closed state passed. Its paired
+`headset_validation=not_performed` field deliberately prevents that result
+from being described as Quest/OpenVR acceptance.
 
 When a selected Femto Mega is physically disconnected, the validator accepts
 that hardware state only when the public status explicitly reports the device
@@ -952,8 +987,9 @@ sensor validation, projector/LED acceptance, or headset/compositor validation.
   Its local adapter accepts sensor-local XYZ in metres and applies a validated
   sensor-to-world transform, but it does not bundle a depth-camera SDK or body
   tracking. Physical calibration still has to be measured and verified onsite.
-- `OUT_LEFT_EYE`, `OUT_RIGHT_EYE`, and `OUT_STEREO_PREVIEW` are desktop
-  textures. There is no OpenXR/OpenVR TOP, headset pose, controller input, lens
+- `OUT_LEFT_EYE`, `OUT_RIGHT_EYE`, and `OUT_STEREO_PREVIEW` remain desktop
+  textures. The optional mock head/hands are deterministic rehearsal inputs;
+  there is no OpenXR/OpenVR TOP, Quest tracking, controller input, lens
   distortion, compositor submission, or headset timing validation.
 - `OUT_INSTALLATION` is a development image. Projector/LED mapping, Window
   COMPs, color calibration, genlock, failover, and venue output tests are not

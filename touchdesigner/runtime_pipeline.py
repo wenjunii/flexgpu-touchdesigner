@@ -34,6 +34,7 @@ TOP_CONTRACTS = {
     "COLOR": "RGBA16F or RGBA8 TOP aligned pixel-for-pixel with POSITION",
     "TEMPORAL_STATE": "RGBA16F TOP; R=confidence, G=normalized age, B=current-valid, A=alive",
     "SENSOR_POSITION": "RGBA32F TOP; RGB=sensor-local XYZ metres, A=occupancy/confidence",
+    "HAND_POSITION": "RGBA32F TOP; sparse RGB=world XYZ metres, A=tracking confidence",
     "INTERACTION": "RGBA16F TOP; RGB=force vector, A=occupancy",
     "INSTALLATION": "RGBA TOP; visually inspectable rendered point world",
     "TRIPLE_DISPLAY": "three RGBA surface TOPs plus a horizontal calibration mosaic",
@@ -145,6 +146,29 @@ void main()
     fragColor = TDOutputSwizzle(vec4(position, occupancy));
 }
 ''',
+    "mock_hand_positions": r'''// CONTRACT: MOCK HAND CONTROLS -> sparse HAND_POSITION
+out vec4 fragColor;
+
+void main()
+{
+    // Only the first two texels are occupied. The interaction shader samples
+    // these exact cells directly, so mock hands add two bounded lookups per
+    // generated point instead of another dense occupancy search.
+    const float mockHandsEnabled = 0.0; // FLEXGPU_VR_HANDS_ENABLED
+    const vec4 mockLeftHand = vec4(-0.28, 0.02, -1.15, 1.0); // FLEXGPU_VR_LEFT_HAND
+    const vec4 mockRightHand = vec4(0.28, 0.02, -1.15, 1.0); // FLEXGPU_VR_RIGHT_HAND
+    ivec2 cell = ivec2(floor(vUV.st * vec2(32.0)));
+    // Input 0 is the deterministic zero seed used by all stock GLSL TOPs.
+    vec4 hand = texture(sTD2DInputs[0], vUV.st) * 0.0;
+    if (cell.y == 0 && cell.x == 0) {
+        hand = mockLeftHand;
+    } else if (cell.y == 0 && cell.x == 1) {
+        hand = mockRightHand;
+    }
+    hand.a *= step(0.5, mockHandsEnabled);
+    fragColor = TDOutputSwizzle(hand);
+}
+''',
     "femto_sensor_position": r'''// CONTRACT: ORBBEC POINTCLOUD -> SENSOR_POSITION
 out vec4 fragColor;
 
@@ -248,7 +272,7 @@ void main()
     fragColor = TDOutputSwizzle(vec4(sensor.rgb, sensor.a * mask * confidence));
 }
 ''',
-    "interaction_field": r'''// CONTRACT: POSITION + calibrated SENSOR_POSITION -> INTERACTION force + occupancy
+    "interaction_field": r'''// CONTRACT: POSITION + calibrated SENSOR_POSITION + HAND_POSITION -> INTERACTION force + occupancy
 out vec4 fragColor;
 
 void main()
@@ -258,6 +282,7 @@ void main()
     const float interactionRadiusMetres = 0.55; // FLEXGPU_INTERACTION_RADIUS
     const float interactionFalloff = 1.0; // FLEXGPU_INTERACTION_FALLOFF
     const float forceGain = 1.0; // FLEXGPU_FORCE_GAIN
+    const float vrHandGain = 0.65; // FLEXGPU_VR_HAND_GAIN
     // Bounded 32x32 occupancy primitives are sampled across the full sensor,
     // not at the generated point's source UV. This is a practical stock-TD
     // approximation to a low-resolution world-space occupancy/SDF volume.
@@ -288,8 +313,28 @@ void main()
             combinedOccupancy = max(combinedOccupancy, influence);
         }
     }
-    vec3 force = accumulatedForce * max(0.0, forceGain) /
-                 float(occupancyGridSize);
+    // Mock and future headset adapters publish exactly two sparse hand
+    // primitives in cells (0,0) and (1,0). This contract is intentionally
+    // independent from the audience depth sensor and remains bounded.
+    vec3 handForce = vec3(0.0);
+    for (int handIndex = 0; handIndex < 2; ++handIndex) {
+        vec2 handUV = (vec2(float(handIndex), 0.0) + 0.5) / 32.0;
+        vec4 hand = texture(sTD2DInputs[2], handUV);
+        vec3 delta = point.rgb - hand.rgb;
+        float distanceMetres = length(delta);
+        float radialInfluence =
+            1.0 - smoothstep(0.0, interactionRadiusMetres, distanceMetres);
+        float influence = point.a * hand.a *
+            pow(clamp(radialInfluence, 0.0, 1.0),
+                max(0.25, interactionFalloff));
+        vec3 direction = distanceMetres > 1e-5
+            ? delta / distanceMetres : vec3(0.0, 0.0, 1.0);
+        handForce += direction * influence;
+        combinedOccupancy = max(combinedOccupancy, influence);
+    }
+    vec3 force = max(0.0, forceGain) *
+        (accumulatedForce / float(occupancyGridSize) +
+         handForce * max(0.0, vrHandGain));
     fragColor = TDOutputSwizzle(vec4(force, combinedOccupancy));
 }
 ''',
@@ -1990,6 +2035,146 @@ def _activate_geometry_bridge(provider):
             pass
     return True
 
+def _apply_vr_controls():
+    controls = _controls()
+    pipeline = _pipeline()
+    vr = pipeline.op('VR_OUTPUT')
+    render = pipeline.op('POINT_RENDER')
+    experience = str(
+        _value('Experience', 'installation')).strip().lower()
+    if experience not in ('installation', 'vr', 'combined'):
+        experience = 'installation'
+    source = str(_value('Vrinputsource', 'mock')).strip().lower()
+    if source not in ('mock', 'openvr'):
+        source = 'mock'
+    enabled = experience in ('vr', 'combined')
+    target_hz = max(60, min(144, int(_value('Vrtargethz', 72))))
+    eye_width = max(320, min(4096, int(_value('Vreyewidth', 1280))))
+    eye_height = max(180, min(4096, int(_value('Vreyeheight', 720))))
+    ipd = max(0.05, min(0.08, float(_value('Vripdmetres', 0.064))))
+    fov = max(30.0, min(130.0, float(_value('Vrfovdegrees', 75.0))))
+    head_values = {}
+    for name, fallback, lower, upper in (
+            ('Vrheadxmetres', 0.0, -5.0, 5.0),
+            ('Vrheadymetres', 0.0, -5.0, 5.0),
+            ('Vrheadzmetres', 0.0, -5.0, 5.0),
+            ('Vrheadyawdegrees', 0.0, -180.0, 180.0),
+            ('Vrheadpitchdegrees', 0.0, -89.0, 89.0),
+            ('Vrheadrolldegrees', 0.0, -180.0, 180.0)):
+        head_values[name] = max(
+            lower, min(upper, float(_value(name, fallback))))
+    hands_enabled = bool(_value('Vrhandenabled', False))
+    hand_gain = max(
+        0.0, min(2.0, float(_value('Vrhandgain', 0.65))))
+    hand_values = {}
+    for side, sign in (('left', -1.0), ('right', 1.0)):
+        for axis, fallback, lower, upper in (
+                ('x', 0.28 * sign, -3.0, 3.0),
+                ('y', 0.02, -3.0, 3.0),
+                ('z', -1.15, -5.0, 0.0)):
+            name = 'Vr%shand%smetres' % (side, axis)
+            hand_values[name] = max(
+                lower, min(upper, float(_value(name, fallback))))
+
+    for name, value in (
+            ('Experience', experience), ('Vrinputsource', source),
+            ('Vrtargethz', target_hz), ('Vreyewidth', eye_width),
+            ('Vreyeheight', eye_height), ('Vripdmetres', ipd),
+            ('Vrfovdegrees', fov), ('Vrhandenabled', hands_enabled),
+            ('Vrhandgain', hand_gain)):
+        _set(controls, name, value)
+    for name, value in list(head_values.items()) + list(hand_values.items()):
+        _set(controls, name, value)
+
+    _set(vr, 'Enabled', enabled)
+    _set(vr, 'Inputsource', source)
+    _set(vr, 'Targethz', target_hz)
+    _set(vr, 'Eyewidth', eye_width)
+    _set(vr, 'Eyeheight', eye_height)
+    _set(vr, 'Ipdmetres', ipd)
+    _set(vr, 'Fovdegrees', fov)
+    _set(vr, 'Handsenabled', hands_enabled)
+    _set(vr, 'Handgain', hand_gain)
+    for source_name, target_name in (
+            ('Vrheadxmetres', 'Headxmetres'),
+            ('Vrheadymetres', 'Headymetres'),
+            ('Vrheadzmetres', 'Headzmetres'),
+            ('Vrheadyawdegrees', 'Headyawdegrees'),
+            ('Vrheadpitchdegrees', 'Headpitchdegrees'),
+            ('Vrheadrolldegrees', 'Headrolldegrees')):
+        _set(vr, target_name, head_values[source_name])
+        _set(render, source_name, head_values[source_name])
+    for side in ('left', 'right'):
+        title = side.title()
+        for axis in ('x', 'y', 'z'):
+            source_name = 'Vr%shand%smetres' % (side, axis)
+            _set(vr, title + 'hand' + axis + 'metres',
+                 hand_values[source_name])
+    _set(render, 'Vrenabled', enabled)
+    _set(render, 'Vrinputsource', source)
+    _set(render, 'Ipdmetres', ipd)
+    _set(render, 'Vrfovdegrees', fov)
+
+    for path in (
+            'POINT_RENDER/METRIC_RENDER_LEFT_EYE',
+            'POINT_RENDER/METRIC_RENDER_RIGHT_EYE'):
+        _set_resolution(pipeline.op(path), eye_width, eye_height)
+    hands_shader = pipeline.op('VR_OUTPUT/MOCK_HAND_POSITIONS_PIXEL')
+    _patch_float(
+        hands_shader, 'mockHandsEnabled', 'FLEXGPU_VR_HANDS_ENABLED',
+        1.0 if (enabled and source == 'mock' and hands_enabled) else 0.0)
+    _patch_vec4(
+        hands_shader, 'mockLeftHand', 'FLEXGPU_VR_LEFT_HAND',
+        (hand_values['Vrlefthandxmetres'],
+         hand_values['Vrlefthandymetres'],
+         hand_values['Vrlefthandzmetres'], 1.0))
+    _patch_vec4(
+        hands_shader, 'mockRightHand', 'FLEXGPU_VR_RIGHT_HAND',
+        (hand_values['Vrrighthandxmetres'],
+         hand_values['Vrrighthandymetres'],
+         hand_values['Vrrighthandzmetres'], 1.0))
+    _patch_float(
+        pipeline.op('SENSOR_INTERACTION/interaction_field_PIXEL'),
+        'vrHandGain', 'FLEXGPU_VR_HAND_GAIN', hand_gain)
+
+    if not enabled:
+        status = 'installation only; mock VR disabled'
+    elif source == 'mock':
+        status = (
+            'desktop simulation at %d Hz target; no headset compositor' %
+            target_hz)
+    else:
+        status = (
+            'Quest/OpenVR requested but no headset adapter is installed; '
+            'outputs remain fail-closed desktop previews')
+    _set(vr, 'Status', status)
+    _set(controls, 'Vrstatus', status)
+    try:
+        pipeline.store('vr_experience_mode', experience)
+        pipeline.store('vr_provider', source)
+        pipeline.store('vr_headset_validated', False)
+    except Exception:
+        pass
+
+def _reset_vr_head_pose():
+    for name in (
+            'Vrheadxmetres', 'Vrheadymetres', 'Vrheadzmetres',
+            'Vrheadyawdegrees', 'Vrheadpitchdegrees',
+            'Vrheadrolldegrees'):
+        _set(_controls(), name, 0.0)
+    _apply_vr_controls()
+
+def _reset_vr_hands():
+    for name, value in (
+            ('Vrlefthandxmetres', -0.28),
+            ('Vrlefthandymetres', 0.02),
+            ('Vrlefthandzmetres', -1.15),
+            ('Vrrighthandxmetres', 0.28),
+            ('Vrrighthandymetres', 0.02),
+            ('Vrrighthandzmetres', -1.15)):
+        _set(_controls(), name, value)
+    _apply_vr_controls()
+
 def _switch_runtime_geometry_contract(provider):
     root = _pipeline().parent()
     helpers = root.op('STARTUP/runtime_helpers') if root is not None else None
@@ -2006,7 +2191,18 @@ def _switch_runtime_geometry_contract(provider):
 def apply_parameter(name):
     pipeline = _pipeline()
     key = str(name).lower()
-    if key == 'geometryprovider':
+    if key in (
+            'experience', 'vrinputsource', 'vrtargethz',
+            'vreyewidth', 'vreyeheight', 'vripdmetres',
+            'vrfovdegrees', 'vrheadxmetres', 'vrheadymetres',
+            'vrheadzmetres', 'vrheadyawdegrees',
+            'vrheadpitchdegrees', 'vrheadrolldegrees',
+            'vrhandenabled', 'vrhandgain',
+            'vrlefthandxmetres', 'vrlefthandymetres',
+            'vrlefthandzmetres', 'vrrighthandxmetres',
+            'vrrighthandymetres', 'vrrighthandzmetres'):
+        _apply_vr_controls()
+    elif key == 'geometryprovider':
         provider = _value('Geometryprovider', 'moge2')
         _activate_geometry_bridge(provider)
         _set(pipeline.op('SOURCES/STREAMDIFFUSION_ADAPTER'),
@@ -2122,6 +2318,15 @@ def apply_parameter(name):
 
 def apply_all():
     for name in (
+        'Experience', 'Vrinputsource', 'Vrtargethz',
+        'Vreyewidth', 'Vreyeheight', 'Vripdmetres',
+        'Vrfovdegrees', 'Vrheadxmetres', 'Vrheadymetres',
+        'Vrheadzmetres', 'Vrheadyawdegrees',
+        'Vrheadpitchdegrees', 'Vrheadrolldegrees',
+        'Vrhandenabled', 'Vrhandgain',
+        'Vrlefthandxmetres', 'Vrlefthandymetres',
+        'Vrlefthandzmetres', 'Vrrighthandxmetres',
+        'Vrrighthandymetres', 'Vrrighthandzmetres',
         'Geometryprovider', 'Audioenabled', 'Audiosource',
         'Camerainteractionenabled', 'Camerasensorsource',
         'Femtodeviceserial', 'Cameramirrorhorizontal',
@@ -2168,6 +2373,10 @@ def onPulse(par):
     key = str(par.name).lower()
     if key == 'applyall':
         apply_all()
+    elif key == 'resetvrheadpose':
+        _reset_vr_head_pose()
+    elif key == 'resetvrhands':
+        _reset_vr_hands()
     elif key == 'resetcolor':
         _reset_color_grade()
     elif key == 'resetsensorcalibrationtrim':
@@ -3879,11 +4088,123 @@ def _build_interaction_smoothing(comp, interaction, report):
     return smoothed
 
 
+def _build_vr_output(parent, report):
+    """Build the headset-independent VR adapter and deterministic mock hands.
+
+    The component deliberately creates no OpenVR/OpenXR operator while a
+    headset is absent.  It publishes the same eye and sparse hand contracts a
+    later runtime adapter will use, so the renderer and interaction graph can
+    be accepted on a desktop without pretending compositor validation.
+    """
+
+    comp = _ensure(parent, "baseCOMP", "VR_OUTPUT", report)
+    _style(comp, -730, 515, (0.34, 0.25, 0.52),
+           "Opt-in desktop VR simulation; headset adapter deferred", 285, 125)
+    left_eye = _in_top(comp, "LEFT_EYE_IN", 0, report)
+    right_eye = _in_top(comp, "RIGHT_EYE_IN", 1, report)
+
+    page = _page(comp, "VR Foundation")
+    _custom(comp, page, "Toggle", "Enabled", False,
+            label="VR Branch Enabled")
+    source = _custom(
+        comp, page, "Menu", "Inputsource", "mock",
+        ("mock", "openvr"), label="Pose / Hand Provider")
+    if source is not None:
+        try:
+            source.menuLabels = ["Desktop Mock", "Quest / OpenVR (later)"]
+        except Exception:
+            pass
+    _custom(comp, page, "Int", "Targethz", 72,
+            label="Target Headset Hz", minimum=60, maximum=144)
+    _custom(comp, page, "Int", "Eyewidth", 1280,
+            label="Mock Eye Width", minimum=320, maximum=4096)
+    _custom(comp, page, "Int", "Eyeheight", 720,
+            label="Mock Eye Height", minimum=180, maximum=4096)
+    _custom(comp, page, "Float", "Ipdmetres", 0.064,
+            label="Mock IPD (metres)", minimum=0.05, maximum=0.08)
+    _custom(comp, page, "Float", "Fovdegrees", 75.0,
+            label="Mock Vertical FOV", minimum=30.0, maximum=130.0)
+    for name, label, default, lower, upper in (
+            ("Headxmetres", "Mock Head X (metres)", 0.0, -5.0, 5.0),
+            ("Headymetres", "Mock Head Y (metres)", 0.0, -5.0, 5.0),
+            ("Headzmetres", "Mock Head Z (metres)", 0.0, -5.0, 5.0),
+            ("Headyawdegrees", "Mock Head Yaw", 0.0, -180.0, 180.0),
+            ("Headpitchdegrees", "Mock Head Pitch", 0.0, -89.0, 89.0),
+            ("Headrolldegrees", "Mock Head Roll", 0.0, -180.0, 180.0)):
+        _custom(comp, page, "Float", name, default, label=label,
+                minimum=lower, maximum=upper)
+
+    hand_page = _page(comp, "Mock Hands")
+    _custom(comp, hand_page, "Toggle", "Handsenabled", False,
+            label="Mock Hands Enabled")
+    _custom(comp, hand_page, "Float", "Handgain", 0.65,
+            label="Hand Interaction Gain", minimum=0.0, maximum=2.0)
+    for side, sign in (("Left", -1.0), ("Right", 1.0)):
+        _custom(comp, hand_page, "Float", side + "handxmetres", 0.28 * sign,
+                label=side + " Hand X", minimum=-3.0, maximum=3.0)
+        _custom(comp, hand_page, "Float", side + "handymetres", 0.02,
+                label=side + " Hand Y", minimum=-3.0, maximum=3.0)
+        _custom(comp, hand_page, "Float", side + "handzmetres", -1.15,
+                label=side + " Hand Z", minimum=-5.0, maximum=0.0)
+    status = _custom(
+        comp, page, "Str", "Status",
+        "installation only; mock VR disabled",
+        label="VR Runtime Status")
+    try:
+        status.readOnly = True
+    except Exception:
+        pass
+
+    disabled_hands = _ensure(comp, "constantTOP", "DISABLED_HANDS", report)
+    _set_resolution(disabled_hands, 32, 32)
+    _set(disabled_hands, "format", "rgba32float")
+    for names in (("colorr", "color1r"), ("colorg", "color1g"),
+                  ("colorb", "color1b"), ("colora", "alpha")):
+        _set(disabled_hands, names, 0.0)
+    mock_hands = _glsl(
+        comp, "MOCK_HAND_POSITIONS", "mock_hand_positions",
+        [disabled_hands], report, True)
+    _set_resolution(mock_hands, 32, 32)
+    _set(mock_hands, "format", "rgba32float")
+    hands = _ensure(comp, "switchTOP", "HAND_POSITION_ROUTE", report)
+    _connect(mock_hands, hands, 0, 0, report, replace=True)
+    _connect(disabled_hands, hands, 1, 0, report, replace=True)
+    _expr(
+        hands, "index",
+        "0 if (parent().par.Enabled and parent().par.Inputsource == 'mock' "
+        "and parent().par.Handsenabled) else 1")
+
+    _out_top(comp, "OUT_LEFT_EYE", left_eye, 0, report)
+    _out_top(comp, "OUT_RIGHT_EYE", right_eye, 1, report)
+    _out_top(comp, "OUT_HAND_POSITIONS", hands, 2, report)
+    _table(comp, "HEADSET_ADAPTER_CONTRACT", [
+        ["field", "contract"],
+        ["head_pose", "runtime world_from_head; right-handed Y-up metres"],
+        ["eye_pose", "runtime world_from_eye_left/right matrices"],
+        ["projection", "runtime left/right projection matrices"],
+        ["hands", "two tracked joint sets normalized to world metres"],
+        ["submission", "left/right compositor textures plus predicted time"],
+        ["current state", "desktop mock only; not headset-validated"],
+    ], report)
+    _text(
+        comp, "README_FIRST",
+        "VR FOUNDATION\n\nThis component is intentionally safe without a "
+        "headset. Desktop Mock can move only the stereo cameras and publish "
+        "two sparse hand primitives into the existing GPU interaction field. "
+        "Installation and triple-wall cameras are unchanged. Quest/OpenVR is "
+        "a fail-closed future provider: real head pose, per-eye projection, "
+        "hand joints, predicted timing and compositor submission must replace "
+        "the mock contract and pass a physical Quest 3 acceptance test.",
+        report)
+    return comp
+
+
 def _build_sensor(parent, report):
     comp = _ensure(parent, "baseCOMP", "SENSOR_INTERACTION", report)
     _style(comp, -730, 300, (0.18, 0.46, 0.34),
            "Animated fallback sensor; later replace at the same TOP contracts", 245, 110)
     position = _in_top(comp, "WORLD_POSITION_IN", 0, report)
+    vr_hands = _in_top(comp, "VR_HAND_POSITION_IN", 1, report)
     page = _page(comp, "Sensor")
     _custom(comp, page, "Menu", "Mode", "simulated",
             ("simulated", "replay", "depth_sensor", "disabled"))
@@ -4021,7 +4342,7 @@ def _build_sensor(parent, report):
         [sensor_position, mask_switch, confidence_switch], report, True)
     raw_interaction = _glsl(
         comp, "interaction_field", "interaction_field",
-        [position, valid_sensor_position], report, False)
+        [position, valid_sensor_position, vr_hands], report, False)
     interaction = _build_interaction_smoothing(
         comp, raw_interaction, report)
     interaction_debug = _glsl(
@@ -4037,6 +4358,8 @@ def _build_sensor(parent, report):
           "uses a bounded 32x32 world-space occupancy-primitive search (1024 samples "
           "per generated point), an explicit low-resolution SDF approximation. "
           "OUT_INTERACTION remains signed machine-readable force/occupancy; "
+          "The optional VR_HAND_POSITION_IN contract adds exactly two sparse "
+          "hand primitives independently from the audience sensor. "
           "OUT_INTERACTION_DEBUG is a display-only color visualization.", report)
     return comp
 
@@ -4212,6 +4535,18 @@ def _build_point_render(parent, report):
             label="Point Opacity")
     _custom(comp, page, "Float", "Ipdmetres", 0.064,
             label="Preview Inter-Pupillary Distance (metres)")
+    _custom(comp, page, "Toggle", "Vrenabled", False,
+            label="Mock VR Camera Enabled")
+    _custom(comp, page, "Menu", "Vrinputsource", "mock",
+            menu=("mock", "openvr"), label="VR Pose Provider")
+    _custom(comp, page, "Float", "Vrfovdegrees", 75.0,
+            label="Mock VR Vertical FOV")
+    for name in (
+            "Vrheadxmetres", "Vrheadymetres", "Vrheadzmetres",
+            "Vrheadyawdegrees", "Vrheadpitchdegrees",
+            "Vrheadrolldegrees"):
+        _custom(comp, page, "Float", name, 0.0,
+                label=name.replace("Vrhead", "VR Head "))
     _custom(comp, page, "Float", "Surfacefovdegrees", 60.0,
             label="Artistic Surface Camera FOV (degrees)")
     _custom(comp, page, "Float", "Wrapfovdegrees", 78.0,
@@ -4442,16 +4777,54 @@ def _build_point_render(parent, report):
             camera = _ensure(comp, "cameraCOMP", camera_name, report,
                              optional=True)
             if camera is not None:
-                _expr(camera, "tx", shift_expression)
-                _set(camera, "ty", 0.0)
-                _set(camera, "tz", 0.0)
-                _set(camera, "rx", 0.0)
-                _set(camera, "ry", 0.0)
-                _set(camera, "rz", 0.0)
+                is_eye = camera_name != "CAMERA_CENTER_METRIC"
+                mock_condition = (
+                    "parent().par.Vrenabled and "
+                    "parent().par.Vrinputsource == 'mock'")
+                head_x = (
+                    "parent().par.Vrheadxmetres.eval() if (%s) else 0.0"
+                    % mock_condition)
+                if is_eye:
+                    _expr(
+                        camera, "tx",
+                        "(%s) + (%s)" % (shift_expression, head_x))
+                    _expr(
+                        camera, "ty",
+                        "parent().par.Vrheadymetres.eval() if (%s) else 0.0"
+                        % mock_condition)
+                    _expr(
+                        camera, "tz",
+                        "parent().par.Vrheadzmetres.eval() if (%s) else 0.0"
+                        % mock_condition)
+                    _expr(
+                        camera, "rx",
+                        "parent().par.Vrheadpitchdegrees.eval() if (%s) else 0.0"
+                        % mock_condition)
+                    _expr(
+                        camera, "ry",
+                        "parent().par.Vrheadyawdegrees.eval() if (%s) else 0.0"
+                        % mock_condition)
+                    _expr(
+                        camera, "rz",
+                        "parent().par.Vrheadrolldegrees.eval() if (%s) else 0.0"
+                        % mock_condition)
+                else:
+                    _expr(camera, "tx", shift_expression)
+                    _set(camera, "ty", 0.0)
+                    _set(camera, "tz", 0.0)
+                    _set(camera, "rx", 0.0)
+                    _set(camera, "ry", 0.0)
+                    _set(camera, "rz", 0.0)
                 # Match the default 60-degree vertical reconstruction
                 # intrinsics so the center camera reprojects the source
                 # without an avoidable scale mismatch.
-                _set(camera, "fov", 60.0)
+                if is_eye:
+                    _expr(
+                        camera, "fov",
+                        "parent().par.Vrfovdegrees.eval() if (%s) else 60.0"
+                        % mock_condition)
+                else:
+                    _set(camera, "fov", 60.0)
                 _set(camera, "near", 0.05)
                 _set(camera, "far", 100.0)
                 _set(camera, "ipdshift", 0.0)
@@ -5420,6 +5793,79 @@ def _build_show_control(pipeline, report):
             label=readable + " Interaction Intensity",
             minimum=0.0, maximum=10.0)
 
+    vr_page = _page(control, "VR Simulation")
+    experience = _custom(
+        control, vr_page, "Menu", "Experience", "installation",
+        ("installation", "vr", "combined"), label="Experience Mode")
+    if experience is not None:
+        try:
+            experience.menuLabels = [
+                "Installation Only",
+                "VR Only (desktop simulation)",
+                "Installation + VR",
+            ]
+        except Exception:
+            pass
+    vr_source = _custom(
+        control, vr_page, "Menu", "Vrinputsource", "mock",
+        ("mock", "openvr"), label="VR Pose / Hand Provider")
+    if vr_source is not None:
+        try:
+            vr_source.menuLabels = [
+                "Desktop Mock",
+                "Quest / OpenVR (requires headset)",
+            ]
+        except Exception:
+            pass
+    _custom(control, vr_page, "Int", "Vrtargethz", 72,
+            label="Target Headset Hz", minimum=60, maximum=144)
+    _custom(control, vr_page, "Int", "Vreyewidth", 1280,
+            label="Mock Eye Width", minimum=320, maximum=4096)
+    _custom(control, vr_page, "Int", "Vreyeheight", 720,
+            label="Mock Eye Height", minimum=180, maximum=4096)
+    _custom(control, vr_page, "Float", "Vripdmetres", 0.064,
+            label="Mock IPD (metres)", minimum=0.05, maximum=0.08)
+    _custom(control, vr_page, "Float", "Vrfovdegrees", 75.0,
+            label="Mock Vertical FOV", minimum=30.0, maximum=130.0)
+    for name, label, lower, upper in (
+            ("Vrheadxmetres", "Mock Head X (metres)", -5.0, 5.0),
+            ("Vrheadymetres", "Mock Head Y (metres)", -5.0, 5.0),
+            ("Vrheadzmetres", "Mock Head Z (metres)", -5.0, 5.0),
+            ("Vrheadyawdegrees", "Mock Head Yaw", -180.0, 180.0),
+            ("Vrheadpitchdegrees", "Mock Head Pitch", -89.0, 89.0),
+            ("Vrheadrolldegrees", "Mock Head Roll", -180.0, 180.0)):
+        _custom(control, vr_page, "Float", name, 0.0, label=label,
+                minimum=lower, maximum=upper)
+    _custom(control, vr_page, "Pulse", "Resetvrheadpose", False,
+            label="Reset Mock Head Pose")
+
+    vr_hands_page = _page(control, "VR Mock Hands")
+    _custom(control, vr_hands_page, "Toggle", "Vrhandenabled", False,
+            label="Mock Hand Interaction Enabled")
+    _custom(control, vr_hands_page, "Float", "Vrhandgain", 0.65,
+            label="Hand Interaction Gain", minimum=0.0, maximum=2.0)
+    for side, sign in (("Left", -1.0), ("Right", 1.0)):
+        prefix = "Vr%shand" % side.lower()
+        _custom(control, vr_hands_page, "Float", prefix + "xmetres",
+                0.28 * sign, label=side + " Hand X",
+                minimum=-3.0, maximum=3.0)
+        _custom(control, vr_hands_page, "Float", prefix + "ymetres",
+                0.02, label=side + " Hand Y",
+                minimum=-3.0, maximum=3.0)
+        _custom(control, vr_hands_page, "Float", prefix + "zmetres",
+                -1.15, label=side + " Hand Z",
+                minimum=-5.0, maximum=0.0)
+    _custom(control, vr_hands_page, "Pulse", "Resetvrhands", False,
+            label="Reset Mock Hands")
+    vr_status = _custom(
+        control, vr_page, "Str", "Vrstatus",
+        "installation only; mock VR disabled",
+        label="VR Runtime Status")
+    try:
+        vr_status.readOnly = True
+    except Exception:
+        pass
+
     audio_page = _page(control, "Audio")
     _custom(
         control, audio_page, "Toggle", "Audioenabled",
@@ -5697,6 +6143,8 @@ def _build_show_control(pipeline, report):
         ["Completion / Fog", "COMPLETION + view-grade shader constants"],
         ["Color Adjustment", "single, six wall views + stereo grade shaders"],
         ["Interaction", "radius/falloff/timing + per-output enable/intensity"],
+        ["VR Simulation", "mock head pose, eye framing and fail-closed headset provider"],
+        ["VR Mock Hands", "two sparse hands merged with audience interaction"],
         ["Camera Depth", "selectable webcam Depth Anything or native Femto Mega sensor"],
         ["Camera Calibration", "independent webcam/Femto trims + Femto audience depth gate"],
         ["Panoramic", "wrap camera yaw/FOV + procedural atmosphere"],
@@ -5718,7 +6166,12 @@ def _build_show_control(pipeline, report):
         "grades the rendered point-cloud views only: single wall, all six "
         "triple-wall feeds, and both stereo preview eyes. Neutral defaults "
         "leave the accepted image unchanged, and Reset Color Adjustment "
-        "restores them. The Camera Depth tab selects either the existing "
+        "restores them. VR Simulation is opt-in and defaults to Installation "
+        "Only. Desktop Mock moves only the stereo cameras; its two sparse "
+        "hand primitives merge with, but never replace, the audience sensor. "
+        "Quest/OpenVR remains fail-closed until a physical headset supplies "
+        "pose, projection, hand joints and compositor timing. The Camera "
+        "Depth tab selects either the existing "
         "webcam + Depth Anything path or the native Femto Mega pointcloud; "
         "only the selected source is enabled. The webcam device name, index, "
         "and mirror values stay intact while Femto is selected. The webcam "
@@ -5742,6 +6195,59 @@ def _build_show_control(pipeline, report):
         "every displayed value reapplied.",
         report)
     return control
+
+
+def install_vr_foundation(root=None):
+    """Install only the opt-in desktop VR and mock-hand managed scope.
+
+    The bounded upgrade preserves the accepted installation/triple outputs,
+    does not create an active OpenVR/OpenXR operator, and never saves the TOE.
+    It is safe to run before a Quest 3 is available.
+    """
+
+    global LAST_REPORT
+    report = BuildReport()
+    LAST_REPORT = report
+    if root is None:
+        root = _op(ROOT_PATH)
+    elif isinstance(root, str):
+        root = _op(root)
+    if root is None:
+        raise RuntimeError("FlexGPU root %s does not exist" % ROOT_PATH)
+    pipeline = root.op(PIPELINE_NAME)
+    if pipeline is None:
+        raise RuntimeError("WORKING_PIPELINE is missing; build it first")
+    reconstruction = pipeline.op("RECONSTRUCTION")
+    contract = pipeline.op("RENDER_CONTRACT")
+    if reconstruction is None or contract is None:
+        raise RuntimeError(
+            "RECONSTRUCTION and RENDER_CONTRACT must exist before VR install")
+
+    vr = _build_vr_output(pipeline, report)
+    sensor = _build_sensor(pipeline, report)
+    point_render = _build_point_render(pipeline, report)
+    stereo = _build_stereo(pipeline, report)
+    _build_show_control(pipeline, report)
+
+    _connect(reconstruction, sensor, 0, 0, report, replace=True)
+    _connect(vr, sensor, 1, 2, report, replace=True)
+    _connect(contract, point_render, 0, 0, report, replace=True)
+    _connect(contract, point_render, 1, 1, report, replace=True)
+    _connect(contract, point_render, 2, 2, report, replace=True)
+    _connect(point_render, vr, 0, 1, report, replace=True)
+    _connect(point_render, vr, 1, 2, report, replace=True)
+    _connect(vr, stereo, 0, 0, report, replace=True)
+    _connect(vr, stereo, 1, 1, report, replace=True)
+    _align_interaction_position_resolutions(pipeline)
+    try:
+        pipeline.store("vr_foundation_install_report", report.as_dict())
+        pipeline.store("vr_headset_validated", False)
+    except Exception:
+        pass
+    print(
+        "[FlexGPU runtime] VR foundation ready disabled: desktop mock head/"
+        "hands installed, Quest compositor deferred; TOE remains unsaved")
+    return vr
 
 
 def install_perform_window(root=None):
@@ -6721,6 +7227,7 @@ def build(root=None):
     sources = _build_sources(pipeline, report)
     role_bridge = _build_role_bridge(pipeline, report)
     reconstruction = _build_reconstruction(pipeline, report)
+    vr = _build_vr_output(pipeline, report)
     sensor = _build_sensor(pipeline, report)
     temporal = _build_persistence(pipeline, report)
     completion = _build_completion(pipeline, report)
@@ -6742,6 +7249,7 @@ def build(root=None):
     _connect(role_bridge, reconstruction, 1, 1, report, replace=True)
     _connect(role_bridge, reconstruction, 2, 2, report, replace=True)
     _connect(reconstruction, sensor, 0, 0, report, replace=True)
+    _connect(vr, sensor, 1, 2, report, replace=True)
     _connect(reconstruction, temporal, 0, 0, report, replace=True)
     _connect(reconstruction, temporal, 1, 1, report, replace=True)
     _connect(sensor, temporal, 2, 1, report, replace=True)
@@ -6765,8 +7273,10 @@ def build(root=None):
     for destination_index, source_index in enumerate(range(3, 9)):
         _connect(point_render, triple, destination_index, source_index, report, replace=True)
     _connect(completion, triple, 6, 1, report, replace=True)
-    _connect(point_render, stereo, 0, 1, report, replace=True)
-    _connect(point_render, stereo, 1, 2, report, replace=True)
+    _connect(point_render, vr, 0, 1, report, replace=True)
+    _connect(point_render, vr, 1, 2, report, replace=True)
+    _connect(vr, stereo, 0, 0, report, replace=True)
+    _connect(vr, stereo, 1, 1, report, replace=True)
 
     display_route = _ensure(
         pipeline, "switchTOP", "DISPLAY_MODE_ROUTE", report)
@@ -6832,9 +7342,10 @@ def build(root=None):
          "OUT_TRIPLE_ARTISTIC_LEFT/CENTER/RIGHT + OUT_TRIPLE_ARTISTIC"],
         ["active_display_output", "OUT_DISPLAY_ACTIVE"],
         ["show_control", "SHOW_CONTROL (public live parameters only)"],
+        ["vr_foundation", "VR_OUTPUT: mock head/hands plus deferred headset contract"],
         ["stereo_output", "OUT_LEFT_EYE, OUT_RIGHT_EYE, OUT_STEREO_PREVIEW"],
         ["interaction_debug_output", "OUT_INTERACTION_DEBUG (visualization only)"],
-        ["openvr_dependency", "none"],
+        ["openvr_dependency", "deferred; no headset operator is active without hardware"],
         ["unknown_nodes", "preserved"],
     ], report)
     _text(pipeline, "README_FIRST", "FLEXGPU WORKING PIPELINE\n\n"
@@ -6842,7 +7353,8 @@ def build(root=None):
           "OUT_TRIPLE_WRAP or OUT_TRIPLE_ARTISTIC for three-surface mosaics, "
           "and OUT_DISPLAY_ACTIVE for the mode selected on WORKING_PIPELINE. "
           "Each triple mode also exposes independent LEFT/CENTER/RIGHT TOPs. "
-          "Open OUT_STEREO_PREVIEW for a desktop stereo view. "
+          "Open OUT_STEREO_PREVIEW for a desktop stereo view and VR_OUTPUT "
+          "for the opt-in mock head/hand adapter. "
           "Open SHOW_CONTROL for geometry provider, display, completion, "
           "interaction, panoramic coverage and GPU quality presets. "
           "The animated RGB/depth and sensor sources work immediately. "

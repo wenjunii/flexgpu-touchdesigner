@@ -18,7 +18,7 @@ mapping, controller input, or headset compositor.
 | `ai` | Demo source or user-supplied StreamDiffusionTD/depth adapter and RGB/depth packet production | Configured update-rate budget; production adapter should be asynchronous with queue depth one |
 | `world` | Simulated or adapter-supplied replay/sensor boundary, calibrated reconstruction, audience forces, confidence/age lifecycle, persistent point simulation, completion | TouchDesigner frame clock; production sensor capture and measured calibration remain user-supplied |
 | `installation` | Development installation texture | Target FPS is metadata until venue output is integrated |
-| `vr` | Left/right eye textures and desktop stereo preview | TouchDesigner frame clock; head tracking, controllers, and headset clock are future adapter responsibilities |
+| `vr` | Left/right eye textures, desktop stereo preview, and default-off mock head/hand rehearsal | TouchDesigner frame clock; runtime tracking, controllers/hands, and headset clock remain adapter responsibilities |
 
 In a single-GPU profile these roles share one TouchDesigner process.  In a
 dual-local profile the AI role gets one process/GPU and the show roles get a
@@ -86,8 +86,10 @@ Stable outputs are `OUT_POSITION`, `OUT_COLOR`, `OUT_INTERACTION`,
 `OUT_INSTALLATION`, `OUT_TRIPLE_WRAP_LEFT/CENTER/RIGHT`,
 `OUT_TRIPLE_WRAP`, `OUT_TRIPLE_ARTISTIC_LEFT/CENTER/RIGHT`,
 `OUT_TRIPLE_ARTISTIC`, `OUT_DISPLAY_ACTIVE`, `OUT_LEFT_EYE`,
-`OUT_RIGHT_EYE`, and `OUT_STEREO_PREVIEW`. These are textures, not a promise
-that projection mapping or a headset compositor is configured.
+`OUT_RIGHT_EYE`, and `OUT_STEREO_PREVIEW`. The optional `VR_OUTPUT` also
+publishes sparse `OUT_HAND_POSITIONS`. These are development textures and
+contracts, not a promise that projection mapping or a headset compositor is
+configured.
 
 The original single output is unchanged. Panoramic wrap uses three cameras at
 one common origin with yaw `-A / 0 / +A`; its FOV and yaw must be calibrated to
@@ -155,6 +157,23 @@ volume, skeleton tracker, controller collider, or general physics solver.
 The parallel-eye textures are headset-independent development views. They do
 not consume runtime head pose, asymmetric per-eye projection, predicted display
 time, hidden-area mesh, controller state, late-latching, or compositor textures.
+
+### Headset-independent VR foundation
+
+`VR_OUTPUT` is an opt-in adapter boundary rather than a headset runtime. In
+desktop-mock mode it applies a bounded synthetic head transform to only the
+left/right metric cameras and emits at most two sparse world-space hand
+primitives. The interaction shader samples those two cells directly in
+addition to its existing bounded 32x32 audience occupancy scan. This keeps the
+mock hand cost fixed and preserves the separate physical depth-sensor path.
+
+The Show Control `Experience` menu enables `installation`, `vr`, or
+`combined`; the default is `installation`. `Vrinputsource=mock` supports
+headset-free camera and interaction rehearsal. `Vrinputsource=openvr` fails
+closed and reports that no headset adapter is installed. A future Quest/OpenXR
+adapter must replace `HEADSET_ADAPTER_CONTRACT` with runtime pose, per-eye
+projection, predicted timing, tracked hand/controller state, and compositor
+submission without changing the public point-world or installation outputs.
 
 ## Deployment matrix
 

@@ -75,7 +75,7 @@ touchdesigner/       TD 2025 bootstrap source and integration guide
 | Depth Anything generated geometry | Selectable default-off alternative using the same synchronized generated RGB/depth atlas boundary, isolated ports, frozen relative-depth slab, fail-closed routing, and provider-specific reconstruction calibration; live-accepted with single, panoramic, and artistic 1920x1080 outputs on the 3080 Ti Laptop, then migration-checked at about 12 accepted geometry FPS on the RTX 5090 |
 | Embody/knowledge MCP integration | Project-scoped context, privacy rules, output audit order, and local MCP configuration implemented and used against an ignored working TOE; Embody remains optional and untracked |
 | Temporary laptop audience sensor | Default-off result-only TD bridge and optional Depth Anything V2 Small webcam worker implemented; mirrored live interaction, RGB-free transport, stale zero-gating, 5 Hz rehearsal, and gentler force tuning live-accepted on the 3080 Ti Laptop; paid-app and physical-sensor acceptance remain future local gates |
-| Installation and VR | Unchanged single display, selectable three-surface panoramic wrap, artistic multi-angle outputs, and parallel-camera stereo development textures; projector warping/blending, headset runtime, pose/input, compositor submission, and physical validation are user-supplied |
+| Installation and VR | Unchanged single display, selectable three-surface panoramic wrap, artistic multi-angle outputs, parallel-camera stereo textures, and a default-off desktop mock head/hand rehearsal path; projector warping/blending, Quest/OpenXR runtime pose/input, compositor submission, and physical validation are still user-supplied |
 | SHARP and Gaussian reconstruction | Disabled external-worker adapter contracts; inference is not bundled |
 
 Experience and completion flags select the corresponding branches. The
@@ -928,6 +928,47 @@ panoramic/artistic wall feeds, and both stereo preview eyes. It does not alter
 `OUT_SOURCE_COLOR`, `OUT_COLOR`, or private StreamDiffusionTD output. Defaults
 are neutral; disocclusion fog/background is left ungraded, and `Reset Color
 Adjustment` returns every color value to neutral.
+
+### Headset-independent VR rehearsal
+
+The public builder now includes a default-off `VR_OUTPUT` foundation that can
+be installed and tested before a Meta Quest 3 is available. It adds
+`VR Simulation` and `VR Mock Hands` pages to `SHOW_CONTROL`, publishes
+`VR_OUTPUT/OUT_LEFT_EYE`, `VR_OUTPUT/OUT_RIGHT_EYE`, and the sparse
+`VR_OUTPUT/OUT_HAND_POSITIONS` contract, and routes two bounded mock hand
+samples into the existing world-space interaction field. The installation and
+all three-wall outputs keep their existing cameras and resolutions.
+
+To add the foundation to an ignored 3080 working TOE, first save a rollback
+checkpoint, stop streaming, and run this in the TouchDesigner Textport:
+
+```python
+from pathlib import Path
+import importlib, sys
+root = Path(r'C:\path\to\flexgpu-touchdesigner')
+sys.path.insert(0, str(root / 'touchdesigner'))
+import runtime_pipeline as rp
+importlib.reload(rp)
+rp.install_vr_foundation(op('/project1/flexgpu'))
+```
+
+Leave `Experience Mode` at `Installation Only` for the accepted wall show. For
+desktop rehearsal, choose `VR` or `Combined`, keep `VR Pose / Hand Provider` at
+`Desktop Mock`, and adjust mock head pose, eye size/IPD/FOV, hand positions,
+and hand gain. `Reset Mock Head Pose` and `Reset Mock Hands` restore neutral
+positions; switch `Mock Hand Interaction Enabled` off when the rehearsal ends.
+The tracked implementation deliberately fails closed if `OpenVR` is selected:
+it creates no OpenVR/OpenXR operator and never claims Quest tracking,
+asymmetric runtime projection, predicted timing, lens correction, or compositor
+submission. Those become a separate adapter and hardware acceptance step when
+the headset is present.
+
+The reversible live control validator now inventories 101 values, 12 pulses,
+and 8 read-only statuses (121 FlexGPU controls total). Its 3080 report checker
+requires the desktop-mock head/hand, eye-dimension, reset, and
+installation-only restoration checks while explicitly returning
+`headset_validation=not_performed`. Working TOE files and their ignored JSON
+reports remain machine-local and are never part of the public sync.
 
 The optional `Audio` tab mirrors the public
 `STREAMDIFFUSION_ADAPTER` audio contract. `Audio Enabled` controls the one

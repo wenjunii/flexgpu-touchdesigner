@@ -32,9 +32,9 @@ class ShowControlValidatorSourceTests(unittest.TestCase):
 
     def test_validator_is_import_safe_and_covers_every_public_control(self) -> None:
         ast.parse(self.source)
-        self.assertEqual(len(self.module.VALUE_CONTROLS), 80)
-        self.assertEqual(len(self.module.PULSE_CONTROLS), 10)
-        self.assertEqual(len(self.module.STATUS_CONTROLS), 7)
+        self.assertEqual(len(self.module.VALUE_CONTROLS), 101)
+        self.assertEqual(len(self.module.PULSE_CONTROLS), 12)
+        self.assertEqual(len(self.module.STATUS_CONTROLS), 8)
         self.assertEqual(len(self.module.ADAPTER_VALUE_CONTROLS), 14)
         self.assertEqual(len(self.module.ADAPTER_PULSE_CONTROLS), 4)
         controls = (
@@ -42,8 +42,8 @@ class ShowControlValidatorSourceTests(unittest.TestCase):
             + self.module.PULSE_CONTROLS
             + self.module.STATUS_CONTROLS
         )
-        self.assertEqual(len(controls), 97)
-        self.assertEqual(len(set(controls)), 97)
+        self.assertEqual(len(controls), 121)
+        self.assertEqual(len(set(controls)), 121)
         adapter_controls = (
             self.module.ADAPTER_VALUE_CONTROLS
             + self.module.ADAPTER_PULSE_CONTROLS
@@ -132,6 +132,14 @@ class ShowControlValidatorSourceTests(unittest.TestCase):
         self.assertIn('"FLEXGPU_INTERACTION_FALLOFF"', self.source)
         self.assertIn('"FLEXGPU_INTERACTION_RESPONSE"', self.source)
         self.assertIn('"FLEXGPU_INTERACTION_DECAY"', self.source)
+        self.assertIn('"Experience_vr_enabled"', self.source)
+        self.assertIn('"Vrinputsource"', self.source)
+        self.assertIn('"Vrhandenabled"', self.source)
+        self.assertIn('"FLEXGPU_VR_HAND_GAIN"', self.source)
+        self.assertIn('"Vrleft_eye_dimensions"', self.source)
+        self.assertIn('"Vrright_eye_dimensions"', self.source)
+        self.assertIn("callbacks._reset_vr_head_pose()", self.source)
+        self.assertIn("callbacks._reset_vr_hands()", self.source)
         self.assertIn('"INSTALLATION", True, 6.3', self.source)
         self.assertIn('"CENTER", True, 8.5', self.source)
         self.assertIn(
@@ -169,6 +177,12 @@ class ShowControlValidatorSourceTests(unittest.TestCase):
             "$result.output_dimensions.status -ne 'pass'",
             "Cooked wall output dimensions",
             "actual=$($_.Value.actual -join 'x')",
+            "$valueControls.Count -ne 101",
+            "$pulseControls.Count -ne 12",
+            "$statusControls.Count -ne 8",
+            "Experience_installation_vr_disabled",
+            "vr_foundation = 'desktop_mock_pass'",
+            "headset_validation = 'not_performed'",
         ):
             self.assertIn(marker, source)
         for forbidden in ("Stop-Process", "Start-Process", "git "):

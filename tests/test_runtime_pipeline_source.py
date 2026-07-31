@@ -110,6 +110,7 @@ assert normalized({src_path!r}) in {{
             "validity_combine",
             "depth_to_position",
             "sensor_position",
+            "mock_hand_positions",
             "femto_sensor_position",
             "femto_sensor_validity",
             "sensor_to_world",
@@ -400,6 +401,7 @@ assert normalized({src_path!r}) in {{
     def test_public_top_contracts_cover_render_sensor_installation_and_stereo(self) -> None:
         expected = {
             "RGB", "DEPTH", "POSITION", "COLOR", "SENSOR_POSITION",
+            "HAND_POSITION",
             "CONFIDENCE", "TEMPORAL_STATE", "INTERACTION", "INSTALLATION",
             "TRIPLE_DISPLAY", "STEREO",
         }
@@ -434,6 +436,48 @@ assert normalized({src_path!r}) in {{
         self.assertIn("DEPTH_SENSOR_ADAPTER", self.source)
         self.assertIn("REPLACE_WITH_CALIBRATED_SENSOR_POSITION", self.source)
         self.assertIn("SENSOR_POSITION_SOURCE", self.source)
+
+    def test_vr_foundation_is_opt_in_bounded_and_headset_honest(self) -> None:
+        mock_hands = self.module.SHADERS["mock_hand_positions"]
+        interaction = self.module.SHADERS["interaction_field"]
+        for marker in (
+                "FLEXGPU_VR_HANDS_ENABLED",
+                "FLEXGPU_VR_LEFT_HAND",
+                "FLEXGPU_VR_RIGHT_HAND"):
+            self.assertIn(marker, mock_hands)
+        self.assertIn("sTD2DInputs[2]", interaction)
+        self.assertIn("FLEXGPU_VR_HAND_GAIN", interaction)
+        self.assertIn("handIndex < 2", interaction)
+        self.assertIn('"VR_OUTPUT"', self.source)
+        self.assertIn('"Enabled", False', inspect.getsource(
+            self.module._build_vr_output))
+        self.assertNotIn(
+            "openvrTOP", inspect.getsource(self.module._build_vr_output))
+        self.assertIn(
+            "not headset-validated",
+            inspect.getsource(self.module._build_vr_output))
+        installer = inspect.getsource(self.module.install_vr_foundation)
+        self.assertIn("_build_vr_output", installer)
+        self.assertIn("vr_headset_validated", installer)
+        self.assertNotIn("destroy", installer)
+        self.assertNotIn(".save", installer.casefold())
+        self.assertNotIn("build(root", installer)
+
+    def test_show_control_exposes_mock_head_and_hand_controls(self) -> None:
+        for marker in (
+                "Experience", "Vrinputsource", "Vrtargethz",
+                "Vreyewidth", "Vreyeheight", "Vripdmetres",
+                "Vrfovdegrees", "Vrheadxmetres", "Vrheadyawdegrees",
+                "Vrhandenabled", "Vrhandgain",
+                "Vrlefthandxmetres", "Vrrighthandxmetres",
+                "Resetvrheadpose", "Resetvrhands", "Vrstatus"):
+            self.assertIn(marker, self.source)
+        callbacks = self.module.SHOW_CONTROL_CALLBACKS
+        self.assertIn("def _apply_vr_controls():", callbacks)
+        self.assertIn("def _reset_vr_head_pose():", callbacks)
+        self.assertIn("def _reset_vr_hands():", callbacks)
+        self.assertIn("vr_headset_validated", callbacks)
+        self.assertIn("no headset adapter is installed", callbacks)
 
     def test_interaction_smoothing_is_low_latency_and_feedback_bounded(self) -> None:
         smoothing = self.module.SHADERS["interaction_smoothing"]
