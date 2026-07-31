@@ -118,6 +118,27 @@ VALUE_CONTROLS = (
     "Preservegeometryaspect",
     "Workspaceroot",
     "Gpuindex",
+    "Experience",
+    "Vrinputsource",
+    "Vrtargethz",
+    "Vreyewidth",
+    "Vreyeheight",
+    "Vripdmetres",
+    "Vrfovdegrees",
+    "Vrheadxmetres",
+    "Vrheadymetres",
+    "Vrheadzmetres",
+    "Vrheadyawdegrees",
+    "Vrheadpitchdegrees",
+    "Vrheadrolldegrees",
+    "Vrhandenabled",
+    "Vrhandgain",
+    "Vrlefthandxmetres",
+    "Vrlefthandymetres",
+    "Vrlefthandzmetres",
+    "Vrrighthandxmetres",
+    "Vrrighthandymetres",
+    "Vrrighthandzmetres",
 )
 
 PULSE_CONTROLS = (
@@ -131,6 +152,8 @@ PULSE_CONTROLS = (
     "Stopcameradepthworker",
     "Resetsensorcalibrationtrim",
     "Resetfemtocalibrationtrim",
+    "Resetvrheadpose",
+    "Resetvrhands",
 )
 
 STATUS_CONTROLS = (
@@ -141,6 +164,7 @@ STATUS_CONTROLS = (
     "Sensorworkerpid",
     "Sensorworkerstatus",
     "Femtostatus",
+    "Vrstatus",
 )
 
 ADAPTER_VALUE_CONTROLS = (
@@ -399,6 +423,8 @@ def validate(
         pipeline.path + "/SOURCES/FEMTO_MEGA_ADAPTER")
     render = _assert_operator(
         pipeline.op("POINT_RENDER"), PIPELINE_PATH + "/POINT_RENDER")
+    vr = _assert_operator(
+        pipeline.op("VR_OUTPUT"), PIPELINE_PATH + "/VR_OUTPUT")
     triple = _assert_operator(
         pipeline.op("TRIPLE_DISPLAY"), PIPELINE_PATH + "/TRIPLE_DISPLAY")
     reconstruction = _assert_operator(
@@ -634,6 +660,87 @@ def validate(
             _record(
                 checks, "Resetcolor_" + name,
                 _value(control, name), expected)
+
+        _apply(callbacks, control, "Experience", "combined")
+        _record(
+            checks, "Experience_vr_enabled",
+            bool(_value(vr, "Enabled", False)), True)
+        _record(
+            checks, "Experience_render_vr_enabled",
+            bool(_value(render, "Vrenabled", False)), True)
+        _set_and_check(
+            checks, callbacks, control, "Vrinputsource",
+            "mock", vr, "Inputsource")
+        for name, value, target, target_parameter in (
+                ("Vrtargethz", 80, vr, "Targethz"),
+                ("Vreyewidth", 960, vr, "Eyewidth"),
+                ("Vreyeheight", 540, vr, "Eyeheight"),
+                ("Vripdmetres", 0.066, vr, "Ipdmetres"),
+                ("Vrfovdegrees", 82.0, vr, "Fovdegrees"),
+                ("Vrheadxmetres", 0.12, render, "Vrheadxmetres"),
+                ("Vrheadymetres", -0.08, render, "Vrheadymetres"),
+                ("Vrheadzmetres", 0.16, render, "Vrheadzmetres"),
+                ("Vrheadyawdegrees", 13.0, render, "Vrheadyawdegrees"),
+                ("Vrheadpitchdegrees", -7.0, render,
+                 "Vrheadpitchdegrees"),
+                ("Vrheadrolldegrees", 4.0, render,
+                 "Vrheadrolldegrees"),
+                ("Vrhandgain", 0.73, vr, "Handgain"),
+                ("Vrlefthandxmetres", -0.19, vr,
+                 "Lefthandxmetres"),
+                ("Vrlefthandymetres", 0.11, vr,
+                 "Lefthandymetres"),
+                ("Vrlefthandzmetres", -0.92, vr,
+                 "Lefthandzmetres"),
+                ("Vrrighthandxmetres", 0.21, vr,
+                 "Righthandxmetres"),
+                ("Vrrighthandymetres", 0.09, vr,
+                 "Righthandymetres"),
+                ("Vrrighthandzmetres", -0.95, vr,
+                 "Righthandzmetres")):
+            _set_and_check(
+                checks, callbacks, control, name,
+                value, target, target_parameter)
+        _apply(callbacks, control, "Vrhandenabled", True)
+        _record(
+            checks, "Vrhandenabled",
+            bool(_value(vr, "Handsenabled", False)), True)
+        _record(
+            checks, "Vrhandgain_shader",
+            _shader_contains(
+                sensor.op("interaction_field_PIXEL"),
+                "FLEXGPU_VR_HAND_GAIN", 0.73),
+            True)
+        _record(
+            checks, "Vrleft_eye_dimensions",
+            _top_dimensions(vr.op("OUT_LEFT_EYE")), [960, 540])
+        _record(
+            checks, "Vrright_eye_dimensions",
+            _top_dimensions(vr.op("OUT_RIGHT_EYE")), [960, 540])
+        callbacks._reset_vr_head_pose()
+        for name in (
+                "Vrheadxmetres", "Vrheadymetres", "Vrheadzmetres",
+                "Vrheadyawdegrees", "Vrheadpitchdegrees",
+                "Vrheadrolldegrees"):
+            _record(
+                checks, "Resetvrheadpose_" + name,
+                _value(control, name), 0.0)
+        callbacks._reset_vr_hands()
+        for name, expected in (
+                ("Vrlefthandxmetres", -0.28),
+                ("Vrlefthandymetres", 0.02),
+                ("Vrlefthandzmetres", -1.15),
+                ("Vrrighthandxmetres", 0.28),
+                ("Vrrighthandymetres", 0.02),
+                ("Vrrighthandzmetres", -1.15)):
+            _record(
+                checks, "Resetvrhands_" + name,
+                _value(control, name), expected)
+        _apply(callbacks, control, "Vrhandenabled", False)
+        _apply(callbacks, control, "Experience", "installation")
+        _record(
+            checks, "Experience_installation_vr_disabled",
+            bool(_value(vr, "Enabled", True)), False)
 
         _set_and_check(
             checks, callbacks, control, "Interactionradius",
