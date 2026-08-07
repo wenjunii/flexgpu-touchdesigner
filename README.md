@@ -1006,11 +1006,15 @@ private component paths.
 
 For combined podcast checkpoints, the validator also treats the nested public
 `STREAMDIFFUSION_ADAPTER/show_control` as a black-box integration boundary. It
-requires all 18 exposed values and pulses (playback, crossfade/random seed,
-exclusive audio source, and source-side color controls) while never reading
-private StreamDiffusionTD internals. Run the timeline/scene pulses from the
-visible panel and compare two stable `OUT_RGB` samples after a scene interval;
-an unchanged or effectively near-black frame is a failed visual check even when
+requires all 19 exposed values and pulses (playback, original/human-figure
+visual path, crossfade/random seed, exclusive audio source, and source-side
+color controls) while never reading private StreamDiffusionTD internals. The
+bounded `touchdesigner/update_combined_podcast_3080.py` updater can refresh
+that public adapter from a local home-podcast checkout without saving the TOE,
+starting a model server, changing the StreamDiffusion operator list, or
+accepting a 5090 project name. Run the timeline/scene pulses from the visible
+panel and compare two stable `OUT_RGB` samples after a scene interval; an
+unchanged or effectively near-black frame is a failed visual check even when
 operator errors and output dimensions are clean.
 
 If F1 reports that

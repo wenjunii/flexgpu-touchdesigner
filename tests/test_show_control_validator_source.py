@@ -35,7 +35,7 @@ class ShowControlValidatorSourceTests(unittest.TestCase):
         self.assertEqual(len(self.module.VALUE_CONTROLS), 101)
         self.assertEqual(len(self.module.PULSE_CONTROLS), 12)
         self.assertEqual(len(self.module.STATUS_CONTROLS), 8)
-        self.assertEqual(len(self.module.ADAPTER_VALUE_CONTROLS), 14)
+        self.assertEqual(len(self.module.ADAPTER_VALUE_CONTROLS), 15)
         self.assertEqual(len(self.module.ADAPTER_PULSE_CONTROLS), 4)
         controls = (
             self.module.VALUE_CONTROLS
@@ -48,8 +48,8 @@ class ShowControlValidatorSourceTests(unittest.TestCase):
             self.module.ADAPTER_VALUE_CONTROLS
             + self.module.ADAPTER_PULSE_CONTROLS
         )
-        self.assertEqual(len(adapter_controls), 18)
-        self.assertEqual(len(set(adapter_controls)), 18)
+        self.assertEqual(len(adapter_controls), 19)
+        self.assertEqual(len(set(adapter_controls)), 19)
 
     def test_validator_restores_state_even_when_a_check_fails(self) -> None:
         self.assertIn("finally:", self.source)
@@ -89,6 +89,9 @@ class ShowControlValidatorSourceTests(unittest.TestCase):
         self.assertIn("callbacks._reset_color_grade()", self.source)
         self.assertIn('"Audioenabled_adapter"', self.source)
         self.assertIn('"Audiosource_exclusive_switch_index"', self.source)
+        self.assertIn('"adapter_Visualpath_connector_"', self.source)
+        self.assertIn('"adapter_Visualpath_scene_"', self.source)
+        self.assertIn('"Humanfigurejson"', self.source)
         self.assertIn('"Camerainteractionenabled_mode_depth_sensor"', self.source)
         self.assertIn('"Camerasensorsource_femto_mega"', self.source)
         self.assertIn('"Camerasensorsource_depth_bridge_disabled"', self.source)

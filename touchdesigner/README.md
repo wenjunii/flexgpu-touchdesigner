@@ -227,6 +227,30 @@ bound to the adapter's enabled state. The installer never creates tracks,
 stores media paths, inspects private StreamDiffusionTD internals, or saves the
 TOE.
 
+To refresh an existing combined 3080 checkpoint with the Recovered Homes dual
+visual-prompt path, save a rollback TOE, stop generation, and run this in the
+TouchDesigner Textport:
+
+```python
+from pathlib import Path
+import importlib, sys
+root = Path(r'C:\path\to\flexgpu-touchdesigner')
+podcast_root = Path(r'C:\path\to\home-podcast')
+sys.path.insert(0, str(root / 'touchdesigner'))
+import update_combined_podcast_3080 as podcast_update
+importlib.reload(podcast_update)
+report = podcast_update.update_live_combined_podcast_3080(podcast_root)
+print(report)
+```
+
+The updater accepts only a combined 3080-named TOE and the exact public
+`STREAMDIFFUSION_ADAPTER` boundary. It preserves the StreamDiffusion operator
+list, saved control values, and the combined TOE's existing audio, color, and
+Spout pipelines. It installs `Original Story Visuals` and `Human Figures`,
+rebinds only the public Recovered Homes callback/media paths, and reports
+`saved=False` and `model_servers_started=False`. Inspect both prompt paths
+before saving a new numbered 3080 checkpoint.
+
 On the 3080, run this only after opening the latest 3080-tagged working TOE.
 Keep `Qualityprofile` at `3080ti_16gb`, confirm `Gpuindex`, pulse `Applyall`,
 and save to a new 3080-tagged checkpoint after validation. Never use the
@@ -317,7 +341,7 @@ predicted display time, compositor submission, comfort, or headset cadence.
 To verify all 121 FlexGPU public controls after installing an upgrade, run this
 inside TouchDesigner. It changes one control at a time, checks the corresponding
 managed operator or shader, and restores every original value in a `finally`
-block. In a combined podcast TOE it also inventories all 18 public adapter
+block. In a combined podcast TOE it also inventories all 19 public adapter
 controls and safely exercises the adapter value controls without reading
 private StreamDiffusionTD internals:
 

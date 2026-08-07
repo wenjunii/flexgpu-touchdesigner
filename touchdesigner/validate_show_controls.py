@@ -170,6 +170,7 @@ STATUS_CONTROLS = (
 ADAPTER_VALUE_CONTROLS = (
     "Play",
     "Audioenabled",
+    "Visualpath",
     "Randomseeds",
     "Crossfadesec",
     "Audiosource",
@@ -441,6 +442,10 @@ def validate(
         adapter.op("DEPTH_ANYTHING_GEOMETRY_BRIDGE"),
         adapter.path + "/DEPTH_ANYTHING_GEOMETRY_BRIDGE")
     adapter_show_control = adapter.op("show_control")
+    adapter_show_callbacks = (
+        adapter_show_control.op("control_callbacks")
+        if adapter_show_control is not None else None)
+    adapter_execute_callbacks = adapter.op("execute_callbacks")
     audio_switch = adapter.op("audiosource_switch")
     audio_out = adapter.op("audio_out")
 
@@ -473,6 +478,10 @@ def validate(
             adapter_show_control, "Audiosource", None),
         "switch_index": _parameter_state(audio_switch, "index"),
         "out_active": _parameter_state(audio_out, "active"),
+    }
+    visual_snapshot = {
+        "adapter": _value(adapter, "Visualpath", None),
+        "show": _value(adapter_show_control, "Visualpath", None),
     }
     adapter_control_snapshot = {}
     if adapter_show_control is not None:
@@ -524,6 +533,7 @@ def validate(
             for name, test_value in (
                     ("Randomseeds", not bool(_value(
                         adapter_show_control, "Randomseeds", True))),
+                    ("Visualpath", "human_figures"),
                     ("Crossfadesec", 1.75),
                     ("Colorenabled", not bool(_value(
                         adapter_show_control, "Colorenabled", True))),
@@ -548,6 +558,38 @@ def validate(
                         "through the live panel so pausing the timeline cannot "
                         "deadlock this synchronous validator.")
                 })
+
+            if adapter_show_callbacks is None:
+                _record(
+                    checks, "adapter_Visualpath_callbacks",
+                    "missing", "present")
+            else:
+                visual_callback_module = adapter_show_callbacks.module
+                for visual_path, expected_file in (
+                        ("human_figures",
+                         "2013-12.01-visual-scenes-human-figures.json"),
+                        ("original", "2013-12.01-visual-scenes.json")):
+                    _set(adapter_show_control, "Visualpath", visual_path)
+                    visual_callback_module.onValueChange(
+                        _parameter(adapter_show_control, "Visualpath"),
+                        visual_snapshot["show"],
+                    )
+                    _record(
+                        checks,
+                        "adapter_Visualpath_connector_" + visual_path,
+                        _value(adapter, "Visualpath"),
+                        visual_path,
+                    )
+                    scene_parameter = (
+                        "Humanfigurejson"
+                        if visual_path == "human_figures" else "Scenejson")
+                    _record(
+                        checks,
+                        "adapter_Visualpath_scene_" + visual_path,
+                        Path(str(_value(
+                            adapter, scene_parameter, ""))).name,
+                        expected_file,
+                    )
 
         for name in STATUS_CONTROLS:
             _record(
@@ -1223,6 +1265,13 @@ def validate(
                     audio_snapshot["show_source"])
                 for name, value in adapter_control_snapshot.items():
                     _set(adapter_show_control, name, value)
+            if visual_snapshot["adapter"] is not None:
+                _set(adapter, "Visualpath", visual_snapshot["adapter"])
+            if adapter_execute_callbacks is not None:
+                try:
+                    adapter_execute_callbacks.module.get_controller().reload()
+                except Exception:
+                    pass
             _restore_parameter_state(
                 audio_switch, "index", audio_snapshot["switch_index"])
             _restore_parameter_state(
