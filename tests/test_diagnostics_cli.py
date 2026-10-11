@@ -310,7 +310,7 @@ class DiagnosticAndCliTests(unittest.TestCase):
                 self.assertEqual(runtime_status(config)["state"], "running")
             finally:
                 if started:
-                    with mock.patch("flexgpu.runtime.GRACEFUL_STOP_SECONDS", 0.0):
+                    with mock.patch("flexgpu.runtime.GRACEFUL_STOP_SECONDS", 0.5):
                         stop_managed(config, execute=True)
 
     def test_execute_start_refuses_reuse_when_environment_changed(self) -> None:
@@ -496,7 +496,7 @@ class DiagnosticAndCliTests(unittest.TestCase):
                 self.assertEqual(runtime_status(config)["summary"]["running"], 1)
             finally:
                 if started:
-                    with mock.patch("flexgpu.runtime.GRACEFUL_STOP_SECONDS", 0.0):
+                    with mock.patch("flexgpu.runtime.GRACEFUL_STOP_SECONDS", 0.5):
                         stop_managed(config, execute=True)
 
     def test_ai_restart_replaces_only_the_ai_pid(self) -> None:
@@ -508,7 +508,7 @@ class DiagnosticAndCliTests(unittest.TestCase):
                 first = recover_managed(plan, config, execute=True)
                 started = True
                 first_pid = first["started"][0]["pid"]
-                with mock.patch("flexgpu.runtime.GRACEFUL_STOP_SECONDS", 0.0):
+                with mock.patch("flexgpu.runtime.GRACEFUL_STOP_SECONDS", 0.5):
                     second = recover_managed(
                         plan,
                         config,
@@ -524,7 +524,7 @@ class DiagnosticAndCliTests(unittest.TestCase):
                 self.assertEqual(status["processes"][0]["pid"], second_pid)
             finally:
                 if started:
-                    with mock.patch("flexgpu.runtime.GRACEFUL_STOP_SECONDS", 0.0):
+                    with mock.patch("flexgpu.runtime.GRACEFUL_STOP_SECONDS", 0.5):
                         stop_managed(config, execute=True)
 
     def test_recovery_attempts_are_bounded_and_leave_degraded_manifest(self) -> None:

@@ -8,6 +8,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -735,6 +736,25 @@ def _pid_alive(pid: int) -> bool:
         # terminated but has not been released. _windows_process_core checks
         # STILL_ACTIVE and also avoids unsafe 32-bit HANDLE truncation.
         return _windows_process_core(pid) is not None
+    if sys.platform.startswith("linux"):
+        child = _LOCAL_CHILDREN.get(pid)
+        if child is not None and child.poll() is not None:
+            return False
+        try:
+            # Signal 0 also succeeds for zombies. They have exited and no
+            # longer expose the identity needed for a subsequent forced stop.
+            # Read the state without signaling an unverified process.
+            with open(
+                "/proc/%d/status" % pid, "r", encoding="utf-8", errors="replace"
+            ) as handle:
+                for line in handle:
+                    if line.startswith("State:"):
+                        return line.split()[1] not in {"Z", "X", "x"}
+        except (FileNotFoundError, ProcessLookupError):
+            return False
+        except (OSError, IndexError):
+            # Retain the existing probe when procfs is unavailable/restricted.
+            pass
     try:
         os.kill(pid, 0)
     except (OSError, ValueError):
@@ -818,6 +838,10 @@ def _record_process_status(item: Mapping[str, Any]) -> tuple[str, str]:
         return "dead", "process is no longer running"
     current = _inspect_process(pid)
     if current is None:
+        # A process can exit after the first liveness check, removing its
+        # executable/cmdline before identity inspection. Refuse only if live.
+        if not _pid_alive(pid):
+            return "dead", "process is no longer running"
         return "refuse", "live process identity could not be inspected"
     return _compare_recorded_identity(item, current)
 

@@ -10,6 +10,19 @@ permissions:
   contents: read
 
 jobs:
+  linux-source-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install pinned source-test dependencies
+        run: python -m pip install -r requirements-test.txt
+      - name: Run portable source and process-lifecycle tests
+        run: python -m unittest discover -s tests -v
+
   publication-safety:
     runs-on: windows-latest
     timeout-minutes: 10
