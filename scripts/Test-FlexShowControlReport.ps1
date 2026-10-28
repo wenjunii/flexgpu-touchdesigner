@@ -14,6 +14,9 @@ an OpenXR/OpenVR compositor or a physical headset.
 
 This command is read-only. It does not start TouchDesigner, launch workers,
 change Git state, or inspect private component internals.
+An ok result accepts only the control mappings and cooked dimensions. It is
+never full live-show acceptance: worker buttons, changing imagery, physical
+sensors, headset submission, and a thermal soak require separate evidence.
 #>
 #Requires -Version 5.1
 [CmdletBinding()]
@@ -142,6 +145,8 @@ if ($failedVrChecks.Count -gt 0) {
 
 [ordered]@{
     status = 'ok'
+    acceptance_scope = 'public_control_mapping_and_output_dimensions'
+    complete_live_acceptance = $false
     report = $reportPath
     profile = $result.profile
     controls_passed = [int]$result.summary.pass

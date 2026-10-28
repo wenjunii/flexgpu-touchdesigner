@@ -5,8 +5,10 @@ Validates the project-scoped FlexGPU TD Knowledge MCP and Envoy wiring.
 .DESCRIPTION
 Checks the public FlexGPU project contract and, unless -SkipLocalConfig is
 used, the ignored .codex/config.toml. The local check verifies that the
-configured Python, MCP server, knowledge index, project context, and dynamic
-Envoy registry exist. When -RequireEnvoy is supplied, the active registry
+configured Python can load the MCP server CLI and that the knowledge index,
+project context, and dynamic Envoy registry exist. The CLI probe only runs
+--help with a bounded timeout; it never installs packages or opens a server.
+When -RequireEnvoy is supplied, the active registry
 entry must reference a live TouchDesigner process with a reachable loopback
 port.
 
@@ -28,7 +30,9 @@ param(
     [ValidateRange(100, 10000)]
     [int]$ConnectTimeoutMs = 2000,
     [ValidateRange(0, 120000)]
-    [int]$WaitReadyMs = 0
+    [int]$WaitReadyMs = 0,
+    [ValidateRange(100, 30000)]
+    [int]$RuntimeTimeoutMs = 10000
 )
 
 Set-StrictMode -Version Latest
@@ -136,6 +140,55 @@ function Get-RequiredArgumentValue {
     return $Arguments[$valueIndex]
 }
 
+function Test-TDKnowledgePythonRuntime {
+    param(
+        [Parameter(Mandatory)][string]$Python,
+        [Parameter(Mandatory)][string]$Server,
+        [Parameter(Mandatory)][int]$TimeoutMs
+    )
+
+    $probe = [System.Diagnostics.Process]::new()
+    $probe.StartInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $probe.StartInfo.FileName = $Python
+    $probe.StartInfo.Arguments = '-B "' + $Server + '" --help'
+    $probe.StartInfo.WorkingDirectory = [IO.Path]::GetDirectoryName($Server)
+    $probe.StartInfo.UseShellExecute = $false
+    $probe.StartInfo.CreateNoWindow = $true
+    $probe.StartInfo.RedirectStandardOutput = $true
+    $probe.StartInfo.RedirectStandardError = $true
+    try {
+        if (-not $probe.Start()) {
+            throw 'Could not start the configured TD Knowledge Python CLI probe.'
+        }
+        # Drain both streams concurrently, but do not expose local paths or
+        # dependency diagnostics that could contain private environment data.
+        $stdout = $probe.StandardOutput.ReadToEndAsync()
+        $stderr = $probe.StandardError.ReadToEndAsync()
+        if (-not $probe.WaitForExit($TimeoutMs)) {
+            # This handle belongs only to our --help probe, never to the live
+            # TouchDesigner process or an existing MCP server.
+            $probe.Kill()
+            $probe.WaitForExit(1000) | Out-Null
+            throw 'The TD Knowledge Python CLI probe timed out; the live project was not stopped.'
+        }
+        if (-not $stdout.Wait(1000) -or -not $stderr.Wait(1000)) {
+            throw 'The TD Knowledge Python CLI probe did not close its output streams.'
+        }
+        $stdout.GetAwaiter().GetResult() | Out-Null
+        $stderr.GetAwaiter().GetResult() | Out-Null
+        if ($probe.ExitCode -ne 0) {
+            throw (
+                'The configured TD Knowledge Python cannot load the server CLI. ' +
+                'Use the td-knowledge-mcp project''s own .venv Python, not the ' +
+                'td-ai-assistant library environment. No packages were installed.'
+            )
+        }
+    }
+    finally {
+        $probe.Dispose()
+    }
+}
+
 function Test-LoopbackPort {
     param(
         [Parameter(Mandatory)]
@@ -232,6 +285,7 @@ if (-not ([string]$context.network.managed_scope).StartsWith("$rootOperator/")) 
 }
 
 $localConfigState = 'skipped'
+$pythonRuntimeState = 'skipped'
 $envoyRegistryPath = $null
 if (-not $SkipLocalConfig) {
     $configPath = Resolve-ExistingPath `
@@ -258,6 +312,12 @@ if (-not $SkipLocalConfig) {
         -Path $serverCandidates[0] `
         -PathType Leaf `
         -Label 'Configured TD Knowledge server' | Out-Null
+
+    Test-TDKnowledgePythonRuntime `
+        -Python $parsed.Command `
+        -Server $serverCandidates[0] `
+        -TimeoutMs $RuntimeTimeoutMs
+    $pythonRuntimeState = 'ready'
 
     $configuredProjectContext = Resolve-ExistingPath `
         -Path (Get-RequiredArgumentValue `
@@ -330,7 +390,8 @@ if ($null -ne $envoyRegistryPath) {
             "The active FlexGPU Envoy process or loopback listener is unavailable " +
             "after waiting $WaitReadyMs ms. Preview stale registrations with " +
             "scripts\Repair-FlexShowEnvoyRegistry.ps1, then use -Repair only " +
-            "after reviewing its output."
+            "after reviewing its output. Also check that Embody Envoy Enable " +
+            "is on and the project timeline can advance during startup."
         )
     }
 }
@@ -344,6 +405,7 @@ elseif ($RequireEnvoy) {
     root_operator = $rootOperator
     managed_scope = [string]$context.network.managed_scope
     local_config = $localConfigState
+    python_runtime = $pythonRuntimeState
     envoy = $envoyState
     active_instance = $activeInstance
     active_port = $activePort

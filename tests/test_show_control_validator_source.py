@@ -56,6 +56,9 @@ class ShowControlValidatorSourceTests(unittest.TestCase):
         self.assertIn("callbacks.apply_all()", self.source)
         self.assertIn('"restoration_failures"', self.source)
         self.assertIn('"external_validation_required"', self.source)
+        self.assertIn('"complete_live_acceptance": False', self.source)
+        self.assertIn('"acceptance_scope": "public_control_mapping_and_output_dimensions"', self.source)
+        self.assertIn("Source tests verify wrapper contracts, not live button execution.", self.source)
         self.assertIn('"adapter_control_inventory"', self.source)
         self.assertIn('"adapter_ui_buttons"', self.source)
         self.assertIn('"adapter_restored"', self.source)
@@ -186,6 +189,8 @@ class ShowControlValidatorSourceTests(unittest.TestCase):
             "Experience_installation_vr_disabled",
             "vr_foundation = 'desktop_mock_pass'",
             "headset_validation = 'not_performed'",
+            "complete_live_acceptance = $false",
+            "acceptance_scope = 'public_control_mapping_and_output_dimensions'",
         ):
             self.assertIn(marker, source)
         for forbidden in ("Stop-Process", "Start-Process", "git "):

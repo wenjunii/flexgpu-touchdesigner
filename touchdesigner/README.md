@@ -393,6 +393,14 @@ resets, and installation-only fail-closed state passed. Its paired
 `headset_validation=not_performed` field deliberately prevents that result
 from being described as Quest/OpenVR acceptance.
 
+The live report and its PowerShell checker explicitly label acceptance as
+`public_control_mapping_and_output_dimensions` with
+`complete_live_acceptance=false`. The source release gate verifies wrapper
+contracts only; it does not press live worker buttons. Keep separate evidence
+for actual Start/Stop and duplicate-start behavior, fresh geometry from real
+generated images, the seven wall outputs, physical sensors, headset timing,
+and a thermal soak. A control-mapping pass does not waive those checks.
+
 When a selected Femto Mega is physically disconnected, the validator accepts
 that hardware state only when the public status explicitly reports the device
 as unavailable and the adapter remains disabled. A missing device is therefore
