@@ -16,7 +16,9 @@ them; a Git pull is not a package upgrade.
 
 Pillow 13 fixes the advisories affecting the previous image-library pin and
 requires Python 3.11+. See the [upstream release notes](https://pillow.readthedocs.io/en/stable/releasenotes/13.0.0.html).
-The source-test CI matrix is now Python 3.11/3.12 on Windows and 3.12 on Linux.
+The full manual/release CI matrix is Python 3.11/3.12 on Windows and 3.12 on
+Linux. Ordinary code PRs run the full source gate on Windows/Python 3.11;
+post-merge and documentation-only checks use the explicitly limited Quick gate.
 The dependency-free launcher remains usable on Python 3.10; do not install
 the image/model requirements into that interpreter or into TouchDesigner.
 
@@ -80,3 +82,66 @@ apps merely to satisfy `pip check`.
 
 Passing a smoke test is necessary but not sufficient for show acceptance.
 Leave the existing working environments available until the live checks pass.
+
+## Local candidate workflow: test, accept explicitly, roll back
+
+There is no global environment selector, silent package upgrade, venv copying,
+or automatic activation. The working `.venv/moge2` and `.venv/depth-anything`
+stay in place. Use a fresh machine-tagged candidate name; trying to install
+into an existing candidate is rejected, including a partially installed one.
+
+```powershell
+# Preview first. Add -Install explicitly to create this separate environment.
+.\scripts\Initialize-DepthAnything.ps1 -CandidateName 3080-security-oct2026
+.\scripts\Initialize-DepthAnything.ps1 -CandidateName 3080-security-oct2026 -Install
+$candidate = (Resolve-Path .\.venv\depth-anything-candidate-3080-security-oct2026\Scripts\python.exe).Path
+
+# No GPU/model/network/camera work; checks installed package/source pins.
+.\scripts\Test-WorkerCandidate.ps1 -Provider depth_anything `
+  -Profile 3080ti_16gb -WorkerPython $candidate -AuditOnly
+
+# Only on an idle 3080, with the show's model workers stopped.
+# Uses existing verified model files; it never downloads a checkpoint.
+.\scripts\Test-WorkerCandidate.ps1 -Provider depth_anything `
+  -Profile 3080ti_16gb -WorkerPython $candidate -RunGpuSmoke
+
+# Rehearsal/acceptance uses the candidate for THIS launch only.
+# Select the matching provider in TD and stop the previous worker first.
+.\scripts\Start-DepthAnythingGeometryWorker.ps1 -Profile 3080ti_16gb `
+  -WorkerPython $candidate
+# Add -Start after checking the preview, then perform live and thermal checks.
+```
+
+MoGe uses `Initialize-MoGe2.ps1 -CandidateName 3080-security-oct2026`, the
+resulting `.venv/moge2-candidate-3080-security-oct2026/Scripts/python.exe`,
+`-Provider moge2`, and `Start-MoGe2Worker.ps1`. The audience-camera
+`Start-DepthAnythingWorker.ps1` also accepts `-WorkerPython`; test its camera
+and interaction path separately. These flags never change the Show Control
+buttons' saved launch behavior. Continue launching the accepted candidate
+with its explicit path until a separate, reviewed live integration is made.
+
+With neither `-AuditOnly` nor `-RunGpuSmoke`, the candidate checker only previews
+the plan. Its ignored report is
+`runtime/validation/worker-<profile>-<provider>-latest.json`; `-Report` can
+retain a timestamped checkpoint under `runtime/`. Failed checks replace stale
+pass evidence with failure. An audit pass certifies pins only, not GPU work or
+show readiness. The GPU test checks physical GPU/profile identity and refuses
+4090/5090 certification because its synthetic geometry contract is 3080-only.
+It refuses a generated-geometry worker already running from the same checkout,
+but cannot detect every GPU consumer: stop diffusion/other GPU jobs yourself.
+
+**Accept:** after the source Full check, candidate audit, GPU smoke, and real
+freshness/orientation/wall/sensor/performance/soak checks pass, record the exact
+candidate path and evidence locally and continue passing that path explicitly.
+Reports are evidence, not authorization to switch a running show.
+
+**Rollback:** stop the candidate through the existing checkout-scoped stop
+control, then rerun the same launch command without `-WorkerPython` (or with
+the previously accepted explicit path). The default environment was not
+modified. Rolling back may restore older vulnerable pins: use only as a
+temporary operational fallback and retain the security remediation plan.
+Never delete the previous environment before accepting its replacement.
+
+Do not move/copy a virtual environment between the 3080 and 5090. Candidate
+names, reports, working TOEs, local configs, GPU UUIDs, and calibration stay
+machine-local. No CI result substitutes for a physical show check.

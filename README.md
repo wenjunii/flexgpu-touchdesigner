@@ -1333,6 +1333,11 @@ deleting it only from the latest revision is insufficient.
 
 ### Test suite
 
+Local-first maintenance is the default: tests do not require a GitHub workflow,
+and a source sync does not upgrade the installed worker environments. GitHub
+keeps the publication and security backstops; the show does not call GitHub to
+run these checks during playback.
+
 Point the gate at the Python 3.11+ interpreter you intend to use, install the
 same pinned source-test dependencies used by CI into that exact interpreter,
 then run the complete non-publishing source release gate:
@@ -1341,7 +1346,27 @@ then run the complete non-publishing source release gate:
 $env:FLEXSHOW_PYTHON = (Get-Command python).Source
 & $env:FLEXSHOW_PYTHON -m pip install --disable-pip-version-check -r .\requirements-test.txt
 .\scripts\Test-FlexShowRelease.ps1
+
+# Fast edit-time check; explicitly NOT full release or live-show acceptance.
+.\scripts\Test-FlexShowRelease.ps1 -Mode Quick
+
+# Optional read-only machine/config/ownership diagnostics in the same report.
+.\scripts\Test-FlexShowRelease.ps1 -Mode Quick -Config .\config\local-moge2-3080.json
 ```
+
+`Full` remains the default. Both modes check dependencies, compile Python,
+validate public configurations, parse PowerShell, preview the sensor wrapper,
+check TD Knowledge public wiring, and scan publication candidates/history.
+Quick runs only the maintenance-contract tests; Full additionally runs the
+complete unit suite, synthetic benchmark, and initializer/launcher smoke.
+Quick never substitutes for a pre-release Full check.
+
+Each run writes pass/fail, stage timings, and an explicit `not_checked` list to
+`runtime/validation/source-{quick|full}-latest.json`, including on test failure.
+Use `-Report runtime/validation/my-check.json` for a retained checkpoint.
+Reports must stay inside this checkout's ignored `runtime/`; symlink/junction
+destinations are rejected. No report claims GPU, live visual, headset, or
+thermal acceptance. Without `-Config`, local runtime readiness is not checked.
 
 Set `FLEXSHOW_PYTHON` directly to `.venv\Scripts\python.exe` or another full
 path when that is the intended runtime. The release script reports a focused
@@ -1375,9 +1400,31 @@ For a focused unit-only rerun:
 python -m unittest discover -s tests -v
 ```
 
-GitHub Actions executes the same release script on Python 3.11 and 3.12 after
-the independent full-history publication-safety job passes. Portable source
-and process-lifecycle tests also run on Linux with Python 3.12.
+GitHub runs fewer repeated jobs while preserving the full release path:
+
+| Event | Source checks after publication safety |
+| --- | --- |
+| PR changing code, dependencies, workflows, or unknown paths | Full on Windows/Python 3.11 |
+| PR changing only README, `docs/*.md`, or LICENSE | Quick on Windows/Python 3.11 |
+| Push to `main` after merge | Quick on Windows/Python 3.11 |
+| Actions **Run workflow**, or a published release | Full on Windows/Python 3.11 and 3.12, plus portable Linux/Python 3.12 tests |
+
+Publication safety always runs, including docs-only changes. Missing/invalid
+diff information takes the full PR path. New PR commits cancel obsolete PR
+runs, never a manual or release run. GitHub CodeQL default setup and Dependabot
+alerts remain enabled independently of this workflow. Routine Python and
+Actions dependency PRs are grouped monthly (one open routine group per
+ecosystem); security-update groups are separate and do not wait for that
+routine schedule. Nothing auto-merges or installs an update on either GPU.
+
+This public repository uses standard runners, whose compute minutes are
+[free](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
+Reduced runs save repeat work, not a promised dollar amount. No workflow
+artifacts, paid larger runners, self-hosted show-machine runners, or additional
+caches are introduced. Keeping CodeQL and Dependabot means GitHub usage is
+reduced, not zero. Their dynamic jobs are not controlled solely by `ci.yml`.
+For candidate worker validation, explicit per-launch acceptance, and rollback,
+see [dependency maintenance](docs/DEPENDENCY_MAINTENANCE.md).
 
 Configuration files may contain arbitrary process commands. Treat downloaded
 or shared configurations as executable input: inspect them before using

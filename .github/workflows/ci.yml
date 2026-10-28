@@ -5,12 +5,21 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  release:
+    types: [published]
 
 permissions:
   contents: read
 
+# A superseded PR run is disposable; never cancel a release/manual gate.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   linux-source-tests:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'release'
+    needs: publication-safety
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -26,6 +35,8 @@ jobs:
   publication-safety:
     runs-on: windows-latest
     timeout-minutes: 10
+    outputs:
+      docs_only: ${{ steps.scope.outputs.docs_only }}
 
     steps:
       - name: Check out complete repository history
@@ -42,6 +53,14 @@ jobs:
         shell: pwsh
         run: .\scripts\Test-PublicSync.ps1 -Scope All -SelfTest -ExitWithCode
 
+      - name: Classify changed paths without skipping publication safety
+        id: scope
+        shell: pwsh
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python tools/ci_scope.py "--base=$env:BASE_SHA" "--head=$env:HEAD_SHA" --github-output "$env:GITHUB_OUTPUT"
+
   windows-tests:
     needs: publication-safety
     runs-on: windows-latest
@@ -49,7 +68,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.11', '3.12']
+        python-version: ${{ fromJSON((github.event_name == 'workflow_dispatch' || github.event_name == 'release') && '["3.11", "3.12"]' || '["3.11"]') }}
 
     steps:
       - name: Check out repository
@@ -65,5 +84,7 @@ jobs:
 
       - name: Run the shared source release verification
         shell: pwsh
+        env:
+          CHECK_MODE: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'release' || (github.event_name == 'pull_request' && needs.publication-safety.outputs.docs_only != 'true')) && 'Full' || 'Quick' }}
         # The publication-safety job already performs the all-ref history scan.
-        run: .\scripts\Test-FlexShowRelease.ps1 -SkipPublicSync
+        run: .\scripts\Test-FlexShowRelease.ps1 -SkipPublicSync -Mode $env:CHECK_MODE

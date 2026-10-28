@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Runs the complete non-publishing FlexShow source release verification.
+Runs Full (default) or Quick non-publishing FlexShow source verification.
 
 .DESCRIPTION
 Compiles Python sources, validates shipped profiles, runs the unit suite and
@@ -22,16 +22,29 @@ The script never launches TouchDesigner or show processes. Live TouchDesigner,
 private adapter, physical sensor, dual-GPU, headset, and venue acceptance tests
 remain separate machine-local gates. It uses temporary and ignored outputs but
 never changes Git state or tracked project files.
+Quick omits the full unit suite, benchmark, and initializer smoke; it is not
+release acceptance. Both modes retain publication checks unless the caller
+explicitly delegates them to CI with SkipPublicSync. Optional Config runs
+read-only local diagnostics. JSON reports always enumerate unchecked areas.
 #>
 #Requires -Version 5.1
 [CmdletBinding()]
 param(
+    [ValidateSet('Quick', 'Full')]
+    [string]$Mode = 'Full',
+
+    [string]$Report = '',
+
+    # Optional read-only machine diagnostics; never start the live project.
+    [string]$Config = '',
+
     [switch]$SkipPublicSync,
 
     [switch]$AllRefs
 )
 
 . (Join-Path $PSScriptRoot '_FlexShow.Common.ps1')
+. (Join-Path $PSScriptRoot '_LocalVerification.Common.ps1')
 
 if ($SkipPublicSync -and $AllRefs) {
     throw '-AllRefs cannot be combined with -SkipPublicSync.'
@@ -39,12 +52,32 @@ if ($SkipPublicSync -and $AllRefs) {
 
 $root = Get-FlexShowRepositoryRoot
 $python = Get-FlexShowPython
+$releaseChecks = [System.Collections.Generic.List[object]]::new()
+$releaseStarted = [DateTime]::UtcNow
+$releasePassed = $false
+if (-not $Report) { $Report = "runtime/validation/source-$($Mode.ToLowerInvariant())-latest.json" }
+$reportPath = Resolve-FlexGpuLocalReportPath -Root $root -Path $Report
 $publicChecker = Join-Path $PSScriptRoot 'Test-PublicSync.ps1'
 $initializer = Join-Path $PSScriptRoot 'Initialize-FlexShow.ps1'
 $startWrapper = Join-Path $PSScriptRoot 'Start-FlexShow.ps1'
 $recoverWrapper = Join-Path $PSScriptRoot 'Recover-FlexShow.ps1'
 $depthAnythingWrapper = Join-Path $PSScriptRoot 'Start-DepthAnythingWorker.ps1'
 $tdKnowledgeBridgeChecker = Join-Path $PSScriptRoot 'Test-TDKnowledgeBridge.ps1'
+
+function Invoke-ReleaseCheck {
+    param([string]$Name, [scriptblock]$Action)
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    $status = 'fail'
+    try {
+        & $Action
+        $status = 'pass'
+    } finally {
+        $timer.Stop()
+        $releaseChecks.Add([ordered]@{
+            name = $Name; status = $status; elapsed_ms = $timer.ElapsedMilliseconds
+        })
+    }
+}
 
 function Invoke-CheckedPython {
     param(
@@ -55,38 +88,39 @@ function Invoke-CheckedPython {
         [string[]]$Arguments
     )
 
-    Write-Host "[FlexShow release] $Name"
-    $commandArguments = [System.Collections.Generic.List[string]]::new()
-    foreach ($prefixArgument in $python.PrefixArgs) {
-        $commandArguments.Add($prefixArgument)
-    }
-    foreach ($argument in $Arguments) {
-        $commandArguments.Add($argument)
-    }
-
-    $previousErrorActionPreference = $ErrorActionPreference
-    $hadNativePreference = Test-Path Variable:PSNativeCommandUseErrorActionPreference
-    $previousNativePreference = $null
-    if ($hadNativePreference) {
-        $previousNativePreference = $PSNativeCommandUseErrorActionPreference
-        $PSNativeCommandUseErrorActionPreference = $false
-    }
-    try {
-        # unittest writes normal progress to stderr. Do not promote it to a
-        # terminating PowerShell error; the captured native exit code remains
-        # authoritative for every Python step.
-        $ErrorActionPreference = 'Continue'
-        & $python.Executable @commandArguments
-        $exitCode = $LASTEXITCODE
-    }
-    finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-        if ($hadNativePreference) {
-            $PSNativeCommandUseErrorActionPreference = $previousNativePreference
+    Invoke-ReleaseCheck -Name $Name -Action {
+        Write-Host "[FlexShow release] $Name"
+        $commandArguments = [System.Collections.Generic.List[string]]::new()
+        foreach ($prefixArgument in $python.PrefixArgs) {
+            $commandArguments.Add($prefixArgument)
         }
-    }
-    if ($exitCode -ne 0) {
-        throw "$Name failed with code $exitCode."
+        foreach ($argument in $Arguments) {
+            $commandArguments.Add($argument)
+        }
+
+        $previousErrorActionPreference = $ErrorActionPreference
+        $hadNativePreference = Test-Path Variable:PSNativeCommandUseErrorActionPreference
+        $previousNativePreference = $null
+        if ($hadNativePreference) {
+            $previousNativePreference = $PSNativeCommandUseErrorActionPreference
+            $PSNativeCommandUseErrorActionPreference = $false
+        }
+        try {
+            # unittest writes normal progress to stderr. Do not promote it to a
+            # terminating PowerShell error; the native exit code is authoritative.
+            $ErrorActionPreference = 'Continue'
+            & $python.Executable @commandArguments
+            $exitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+            if ($hadNativePreference) {
+                $PSNativeCommandUseErrorActionPreference = $previousNativePreference
+            }
+        }
+        if ($exitCode -ne 0) {
+            throw "$Name failed with code $exitCode."
+        }
     }
 }
 
@@ -527,65 +561,106 @@ try {
     Invoke-CheckedPython -Name 'Validate shipped configurations' -Arguments @(
         'tools/validate_configs.py'
     )
-    Invoke-CheckedPython -Name 'Run unit tests' -Arguments @(
-        # Quiet mode still prints failures and the final count while avoiding
-        # hundreds of progress lines on constrained CI/operator log pipes.
-        '-m', 'unittest', 'discover', '-s', 'tests', '-q'
-    )
-    Invoke-CheckedPython -Name 'Run synthetic 3080 Ti benchmark' -Arguments @(
-        'tools/benchmark_flexshow.py',
-        'synthetic',
-        '--tier', '3080ti_16gb',
-        '--samples', '32',
-        '--pattern', 'cycle',
-        '--summary-json', $benchmarkSummary,
-        '--compact'
-    )
-    if (-not (Test-Path -LiteralPath $benchmarkSummary -PathType Leaf)) {
-        throw 'Synthetic benchmark did not write its summary.'
-    }
-    $benchmark = Get-Content -LiteralPath $benchmarkSummary -Raw | ConvertFrom-Json
-    if ($benchmark.status -ne 'ok' -or $benchmark.processed_samples -ne 32) {
-        throw 'Synthetic benchmark summary failed its result contract.'
+    if ($Mode -eq 'Full') {
+        Invoke-CheckedPython -Name 'Run unit tests' -Arguments @(
+            # Quiet mode still prints failures and the final count while avoiding
+            # hundreds of progress lines on constrained CI/operator log pipes.
+            '-m', 'unittest', 'discover', '-s', 'tests', '-q'
+        )
+        Invoke-CheckedPython -Name 'Run synthetic 3080 Ti benchmark' -Arguments @(
+            'tools/benchmark_flexshow.py',
+            'synthetic',
+            '--tier', '3080ti_16gb',
+            '--samples', '32',
+            '--pattern', 'cycle',
+            '--summary-json', $benchmarkSummary,
+            '--compact'
+        )
+        if (-not (Test-Path -LiteralPath $benchmarkSummary -PathType Leaf)) {
+            throw 'Synthetic benchmark did not write its summary.'
+        }
+        $benchmark = Get-Content -LiteralPath $benchmarkSummary -Raw | ConvertFrom-Json
+        if ($benchmark.status -ne 'ok' -or $benchmark.processed_samples -ne 32) {
+            throw 'Synthetic benchmark summary failed its result contract.'
+        }
+    } else {
+        Invoke-CheckedPython -Name 'Run quick maintenance contracts (not the full suite)' -Arguments @(
+            '-m', 'unittest', '-q',
+            'tests.test_ci_scope', 'tests.test_local_maintenance',
+            'tests.test_dependency_maintenance', 'tests.test_release_script_source'
+        )
     }
 
-    Test-PowerShellSources
-    Test-TDKnowledgeBridgeWiring
-    Test-DepthAnythingWrapperPreview
-    Test-InitializerSmoke `
-        -TemporaryDirectory $temporaryDirectory `
-        -LocalConfig $localConfig
+    Invoke-ReleaseCheck -Name 'Parse PowerShell scripts' -Action { Test-PowerShellSources }
+    Invoke-ReleaseCheck -Name 'TD Knowledge public wiring' -Action { Test-TDKnowledgeBridgeWiring }
+    Invoke-ReleaseCheck -Name 'Worker preview contract' -Action { Test-DepthAnythingWrapperPreview }
+    if ($Mode -eq 'Full') {
+        Invoke-ReleaseCheck -Name 'Initializer and launcher smoke' -Action {
+            Test-InitializerSmoke `
+                -TemporaryDirectory $temporaryDirectory `
+                -LocalConfig $localConfig
+        }
+    }
+    if ($Config) {
+        Invoke-ReleaseCheck -Name 'Read-only local configuration and runtime diagnostics' -Action {
+            & (Join-Path $PSScriptRoot 'Diagnose-FlexShow.ps1') -Config $Config -Json
+        }
+    }
 
     if (-not $SkipPublicSync) {
-        if (-not (Test-Path -LiteralPath $publicChecker -PathType Leaf)) {
-            throw "Public-sync checker does not exist: $publicChecker"
-        }
-        if ($AllRefs) {
-            Write-Host '[FlexShow release] Scan all local refs and public candidates'
-            & $publicChecker -Scope All -SelfTest
-        }
-        else {
-            Write-Host '[FlexShow release] Scan exact publish candidates and index'
-            & $publicChecker -Scope Both -SelfTest
-            Write-Host '[FlexShow release] Scan history reachable from HEAD'
-            & $publicChecker -Scope History -Revision HEAD
+        Invoke-ReleaseCheck -Name 'Publication safety' -Action {
+            if (-not (Test-Path -LiteralPath $publicChecker -PathType Leaf)) {
+                throw "Public-sync checker does not exist: $publicChecker"
+            }
+            if ($AllRefs) {
+                Write-Host '[FlexShow release] Scan all local refs and public candidates'
+                & $publicChecker -Scope All -SelfTest
+            }
+            else {
+                Write-Host '[FlexShow release] Scan exact publish candidates and index'
+                & $publicChecker -Scope Both -SelfTest
+                Write-Host '[FlexShow release] Scan history reachable from HEAD'
+                & $publicChecker -Scope History -Revision HEAD
+            }
         }
     }
 
-    Write-Host '[FlexShow release] PASS: all selected source release checks completed.'
+    $releasePassed = $true
+    Write-Host "[FlexShow release] PASS ($Mode): all selected source checks completed. Live/GPU/venue acceptance was not performed."
 }
 finally {
-    if (Test-Path -LiteralPath $localConfig) {
-        Remove-Item -LiteralPath $localConfig -Force -ErrorAction SilentlyContinue
+    $notChecked = @('live_touchdesigner', 'gpu_inference', 'physical_sensors', 'headset', 'visual_acceptance', 'thermal_soak')
+    if ($Mode -eq 'Quick') { $notChecked += @('full_unit_suite', 'synthetic_benchmark', 'initializer_smoke') }
+    if (-not $Config) { $notChecked += 'local_runtime_readiness' }
+    if ($SkipPublicSync) { $notChecked += 'publication_safety_external_gate_required' }
+    if (-not $releasePassed) { $notChecked += 'remaining_source_checks_after_failure' }
+    try {
+        Write-FlexGpuLocalReport -Root $root -Path $reportPath -Value ([ordered]@{
+            version = 'flexgpu-source-verification/v1'
+            status = if ($releasePassed) { 'pass' } else { 'fail' }
+            mode = $Mode.ToLowerInvariant()
+            source = Get-FlexGpuVerificationSource -Root $root
+            source_release_accepted = [bool]($releasePassed -and $Mode -eq 'Full' -and -not $SkipPublicSync)
+            started_utc = $releaseStarted.ToString('o')
+            completed_utc = [DateTime]::UtcNow.ToString('o')
+            checks = $releaseChecks.ToArray()
+            not_checked = $notChecked
+            changed_installed_environments = $false
+        })
+        Write-Host "[FlexShow release] Local report: $reportPath"
+    } finally {
+        if (Test-Path -LiteralPath $localConfig) {
+            Remove-Item -LiteralPath $localConfig -Force -ErrorAction SilentlyContinue
+        }
+        $temporaryParent = [System.IO.Path]::GetFullPath(
+            [System.IO.Path]::GetDirectoryName($temporaryDirectory)
+        )
+        $temporaryLeaf = [System.IO.Path]::GetFileName($temporaryDirectory)
+        if ($temporaryParent.TrimEnd('\') -eq $temporaryRoot.TrimEnd('\') -and
+            $temporaryLeaf.StartsWith('flexshow-release-', [System.StringComparison]::Ordinal) -and
+            (Test-Path -LiteralPath $temporaryDirectory -PathType Container)) {
+            Remove-Item -LiteralPath $temporaryDirectory -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        Pop-Location
     }
-    $temporaryParent = [System.IO.Path]::GetFullPath(
-        [System.IO.Path]::GetDirectoryName($temporaryDirectory)
-    )
-    $temporaryLeaf = [System.IO.Path]::GetFileName($temporaryDirectory)
-    if ($temporaryParent.TrimEnd('\') -eq $temporaryRoot.TrimEnd('\') -and
-        $temporaryLeaf.StartsWith('flexshow-release-', [System.StringComparison]::Ordinal) -and
-        (Test-Path -LiteralPath $temporaryDirectory -PathType Container)) {
-        Remove-Item -LiteralPath $temporaryDirectory -Recurse -Force -ErrorAction SilentlyContinue
-    }
-    Pop-Location
 }
