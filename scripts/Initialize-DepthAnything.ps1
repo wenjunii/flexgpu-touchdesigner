@@ -6,6 +6,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '_WorkerPython.Common.ps1')
 $root = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $venv = Join-Path $root '.venv\depth-anything'
 $venvPython = Join-Path $venv 'Scripts\python.exe'
@@ -84,9 +85,11 @@ $env:HF_HUB_DISABLE_TELEMETRY = '1'
 
 if ($Install) {
     $basePython = Resolve-BasePython
+    Assert-FlexGpuWorkerPython -Python $basePython
     if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
         Invoke-Checked -Executable $basePython -Arguments @('-m', 'venv', $venv) -Label 'Create isolated Python environment'
     }
+    Assert-FlexGpuWorkerPython -Python $venvPython
     Invoke-Checked -Executable $venvPython -Arguments @('-m', 'pip', 'install', 'pip==25.1.1') -Label 'Pin pip'
     Invoke-Checked -Executable $venvPython -Arguments @(
         '-m', 'pip', 'install',
@@ -96,11 +99,13 @@ if ($Install) {
     Invoke-Checked -Executable $venvPython -Arguments @(
         '-m', 'pip', 'install', '-r', $requirements
     ) -Label 'Install pinned Depth Anything runtime dependencies'
+    Invoke-Checked -Executable $venvPython -Arguments @('-m', 'pip', 'check') -Label 'Verify runtime dependency compatibility'
 }
 
 if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
     throw 'The Depth Anything environment is missing. Run this script with -Install first.'
 }
+Assert-FlexGpuWorkerPython -Python $venvPython
 
 if ($DownloadModel) {
     Invoke-Checked -Executable $venvPython -Arguments @(

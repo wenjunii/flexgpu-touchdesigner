@@ -3,9 +3,10 @@
 # CUDA wheel index by scripts/Initialize-DepthAnything.ps1.
 numpy==2.2.6
 opencv-python==4.10.0.84
-Pillow==12.3.0
-# Transformers 5.5.0 contains the security fixes through CVE-2026-5241 and
-# requires huggingface-hub>=1.5. Keep this audited pair pinned together.
+# Pillow 13 contains the October 2026 security fixes and requires Python 3.11+.
+Pillow==13.0.0
+# 5.17.0 includes upstream fix cbc1651 (custom-generation consent ordering),
+# which is absent from 5.10.1. Keep its compatible runtime dependencies pinned.
 huggingface-hub==1.24.0
-transformers==5.5.0
-safetensors==0.5.3
+transformers==5.17.0
+safetensors==0.8.0

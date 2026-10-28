@@ -37,8 +37,8 @@ class DepthAnythingIntegrationSourceTests(unittest.TestCase):
             "numpy==2.2.6",
             "opencv-python==4.10.0.84",
             "huggingface-hub==1.24.0",
-            "transformers==5.5.0",
-            "safetensors==0.5.3",
+            "transformers==5.17.0",
+            "safetensors==0.8.0",
         ):
             self.assertIn(marker, requirements)
         installer = INITIALIZE.read_text(encoding="utf-8")

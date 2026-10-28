@@ -48,9 +48,13 @@ Model acquisition is a separate, explicit network action:
 The environment lives under ignored `.venv/depth-anything/`; the snapshot and
 cache remain under ignored `runtime/`. Normal inference is forced offline and
 verifies the pinned weight and both configuration files before loading them.
-The public runtime pins `transformers==5.5.0` and
-`huggingface-hub==1.24.0` together; partial automated upgrades must not be
-merged without repeating the pinned offline-model inference audit.
+The public runtime pins `transformers==5.17.0`, `huggingface-hub==1.24.0`,
+`safetensors==0.8.0`, and `Pillow==13.0.0` together. Python 3.11+ is required;
+the initializer checks both the base interpreter and any existing environment
+before installing packages, then runs `pip check`. Partial automated upgrades
+must not be merged without repeating the pinned offline-model inference audit.
+Use the preview-first [security smoke procedure](../../docs/DEPENDENCY_MAINTENANCE.md)
+in a separate checkout/environment; do not upgrade the only show copy in place.
 
 ## Rehearse without a webcam or model
 

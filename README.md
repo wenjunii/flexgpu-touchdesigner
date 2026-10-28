@@ -37,8 +37,9 @@ headset submission, SHARP, and Gaussian inference are user-supplied adapters.
   Build 2025.33060 may be installed side-by-side, but remains a compatibility
   candidate until a copied local project passes the in-process validator and
   hardware smoke/soak checks. Never upgrade the only show copy in place.
-- Python 3.10 or newer, or TouchDesigner's bundled Python runtime. JSON works
-  on 3.10; TOML configuration requires a runtime with `tomllib` (Python 3.11+).
+- Python 3.11+ for the isolated workers and source release tests (Pillow 13).
+  The dependency-free launcher still accepts Python 3.10 or TouchDesigner's
+  bundled runtime for JSON; TOML configuration requires `tomllib` (3.11+).
 
 ## What is included
 
@@ -1230,13 +1231,22 @@ source/destination checklist and private-transfer boundary.
 
 ## Testing and security
 
-The optional Depth Anything runtime pins `transformers==5.5.0` with its
-compatible `huggingface-hub==1.24.0` dependency. The worker runs normal
+The optional Depth Anything runtime pins `transformers==5.17.0`,
+`huggingface-hub==1.24.0`, and `safetensors==0.8.0`. Both geometry runtimes and
+the source-test environment pin `Pillow==13.0.0`. The worker runs normal
 inference offline with `trust_remote_code=False`, loads safetensors only, and
 verifies the exact model, model-config, and processor-config SHA-256 values
 before Transformers parses them. Treat any dependency update as one coherent
 runtime change: repeat the pinned local-model inference audit and never merge a
 single-package Dependabot bump into either the 3080 or 5090 working setup.
+
+The October 2026 security update replaces the incomplete Transformers 5.10.1
+proposal and raises the source-test Python baseline to 3.11. A preview-first
+offline CUDA smoke tool checks the installed pins, the custom-generation
+consent regression, and synchronized geometry at 512x512, 1024x567, and
+1024x576 source sizes. Stage it in a separate environment before replacing a
+working worker environment; syncing source alone does not update installed
+packages. See [dependency maintenance](docs/DEPENDENCY_MAINTENANCE.md).
 
 ### Public GitHub sync policy
 
@@ -1323,7 +1333,7 @@ deleting it only from the latest revision is insufficient.
 
 ### Test suite
 
-Point the gate at the Python 3.10+ interpreter you intend to use, install the
+Point the gate at the Python 3.11+ interpreter you intend to use, install the
 same pinned source-test dependencies used by CI into that exact interpreter,
 then run the complete non-publishing source release gate:
 
@@ -1337,8 +1347,9 @@ Set `FLEXSHOW_PYTHON` directly to `.venv\Scripts\python.exe` or another full
 path when that is the intended runtime. The release script reports a focused
 failure if the selected interpreter cannot load the schema validator or NumPy.
 
-The release script selects a working Python 3.10+ interpreter through the same
-logic as the launcher, compiles `src`, `tools`, `tests`, and `touchdesigner`,
+The release script selects an interpreter through the same logic as the
+launcher, then requires Python 3.11+ and the patched Pillow pin before it
+compiles `src`, `tools`, `tests`, and `touchdesigner`,
 validates every shipped JSON profile, runs the unit suite and deterministic
 3080 Ti benchmark, parses every PowerShell script, validates the public
 TD Knowledge bridge contract, smoke-tests initializer write/read/validation
@@ -1364,8 +1375,9 @@ For a focused unit-only rerun:
 python -m unittest discover -s tests -v
 ```
 
-GitHub Actions executes the same release script on Python 3.10 and 3.12 after
-the independent full-history publication-safety job passes.
+GitHub Actions executes the same release script on Python 3.11 and 3.12 after
+the independent full-history publication-safety job passes. Portable source
+and process-lifecycle tests also run on Linux with Python 3.12.
 
 Configuration files may contain arbitrary process commands. Treat downloaded
 or shared configurations as executable input: inspect them before using

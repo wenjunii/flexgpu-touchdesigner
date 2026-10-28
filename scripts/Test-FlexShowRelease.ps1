@@ -483,6 +483,15 @@ try {
 
     Write-Host "[FlexShow release] Python source: $($python.Source)"
     try {
+        Invoke-CheckedPython -Name 'Check source-test Python baseline' -Arguments @(
+            '-c',
+            'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'
+        )
+    }
+    catch {
+        throw 'The source release gate requires Python 3.11+ for patched Pillow. Set FLEXSHOW_PYTHON to a separate test environment; the dependency-free launcher still supports Python 3.10.'
+    }
+    try {
         Invoke-CheckedPython -Name 'Check pinned schema validator' -Arguments @(
             '-c',
             "import importlib.metadata as m; raise SystemExit(0 if m.version('jsonschema') == '4.17.3' else 1)"
@@ -500,6 +509,16 @@ try {
     }
     catch {
         throw "The selected Python runtime ($($python.Source)) must contain NumPy. Install requirements-test.txt into that exact interpreter or set FLEXSHOW_PYTHON. $($_.Exception.Message)"
+    }
+
+    try {
+        Invoke-CheckedPython -Name 'Check patched Pillow source-test dependency' -Arguments @(
+            '-c',
+            "import importlib.metadata as m; from PIL import Image; raise SystemExit(0 if m.version('Pillow') == '13.0.0' else 1)"
+        )
+    }
+    catch {
+        throw "The selected Python runtime ($($python.Source)) must contain Pillow==13.0.0. Install requirements-test.txt into that exact interpreter or set FLEXSHOW_PYTHON. $($_.Exception.Message)"
     }
 
     Invoke-CheckedPython -Name 'Compile Python sources' -Arguments @(
