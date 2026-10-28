@@ -3,9 +3,10 @@
 Run this inside TouchDesigner after the tracked runtime has been installed.
 The validator changes one public parameter at a time, verifies its managed
 target, and restores every original value in a ``finally`` block.  Worker
-start/stop pulses are intentionally tested by the external PowerShell release
-gate because waiting for a worker inside TouchDesigner's main thread would
-prevent bridge callbacks from cooking.  When the optional combined-podcast
+start/stop pulses require a separate live test; the source release gate only
+tests wrapper contracts and is not evidence that a live button works. Waiting
+for a worker inside TouchDesigner's main thread would prevent bridge callbacks
+from cooking. When the optional combined-podcast
 ``show_control`` exists at the stable adapter boundary, its complete public
 parameter inventory and safe value controls are checked without inspecting
 private StreamDiffusionTD internals.
@@ -1327,6 +1328,8 @@ def validate(
         "captured_ns": time.time_ns(),
         "duration_ms": round((time.time_ns() - started_ns) / 1_000_000.0, 3),
         "profile": expected_profile,
+        "acceptance_scope": "public_control_mapping_and_output_dimensions",
+        "complete_live_acceptance": False,
         "status": (
             "pass" if not failures and not all_restoration_failures else "fail"),
         "summary": {
@@ -1349,8 +1352,9 @@ def validate(
         "worker_buttons": {
             "status": "external_validation_required",
             "reason": (
-                "Worker start/stop is verified by the PowerShell release gate "
-                "so TouchDesigner's main thread remains free to cook."),
+                "Source tests verify wrapper contracts, not live button execution. "
+                "Pulse each worker start/stop separately and verify process "
+                "ownership plus fresh results while TD remains free to cook."),
         },
         "adapter_ui_buttons": {
             "status": "external_validation_required",

@@ -29,7 +29,9 @@ material.
    TouchDesigner's versioned-save option may create a `.1.toe` successor.
 7. Copy `.codex/config.toml.example` to the ignored
    `.codex/config.toml` and replace every placeholder with an absolute local
-   path. Keep the `--envoy-config` argument pointed at
+   path. Set `TD_KNOWLEDGE_MCP_PYTHON` to the `td-knowledge-mcp` project's own
+   `.venv/Scripts/python.exe`, not the `td-ai-assistant` library interpreter;
+   those environments can have different dependencies. Keep the `--envoy-config` argument pointed at
    `runtime/embody-ai/.embody/envoy.json` and `--project-context` pointed at
    `integrations/embody/flexgpu-project-context.json`.
 8. Restart the MCP client so it loads the project-scoped server configuration.
@@ -52,8 +54,13 @@ Validate the checked-in contract and local wiring from the repository root:
 .\scripts\Test-TDKnowledgeBridge.ps1 -RequireEnvoy -WaitReadyMs 30000
 ```
 
-The first command validates local paths and reports whether the registered
-Envoy instance is ready. The second makes the live TouchDesigner process and
+The first command validates local paths, probes the configured Python/server
+pair with `--help`, and reports whether the registered Envoy instance is ready.
+The CLI probe is bounded to 10 seconds by default (`-RuntimeTimeoutMs`), does
+not install dependencies, and discards stdout/stderr so local diagnostics are
+not published. `python_runtime=ready` means the CLI loaded successfully, not
+that an MCP session or generated-image pipeline has been validated.
+The second command makes the live TouchDesigner process and
 its loopback listener mandatory and follows registry changes for up to 30
 seconds, which covers a normal cold-start registration window. Neither command
 starts or changes TouchDesigner, and neither publishes local paths.
@@ -73,6 +80,15 @@ restricted to this checkout's ignored runtime registry. Also close the
 TouchDesigner Textport after diagnostics; while it is open, the timeline can be
 paused and live Envoy calls that require cooking may time out.
 
+If the registry and interpreter are correct but Envoy is still offline, confirm
+that Embody's **Envoy Enable** is on and the timeline can advance during
+startup. A combined-podcast TOE saved with its public **Play** control off can
+re-pause the timeline. For a deliberate check, first mute public **Audio
+Enabled**, then enable **Play**; restore both previous settings after the test.
+These checks do not require changing private component internals, tool
+permissions, or externalization settings. Do not save over the working TOE as
+part of a connectivity probe.
+
 With TouchDesigner closed, the MCP should still expose:
 
 - `get_td_project_context`
@@ -84,8 +100,8 @@ With the local FlexGPU TOE open and Envoy enabled, the same server should also
 expose Envoy tools such as `get_td_info`, `query_network`, `get_op_errors`,
 `capture_top`, and `get_project_performance`.
 
-The PowerShell preflight validates configuration, registry following, process
-identity, and TCP reachability. The MCP tool checks above remain the
+The PowerShell preflight validates the configured CLI runtime, configuration,
+registry following, process identity, and TCP reachability. The MCP tool checks above remain the
 end-to-end proof that the knowledge library and live Envoy proxy negotiated
 successfully.
 

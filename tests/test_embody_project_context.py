@@ -98,6 +98,9 @@ class EmbodyProjectContextTests(unittest.TestCase):
             "RequireEnvoy",
             "WaitReadyMs",
             "Get-EnvoyRuntimeState",
+            "Test-TDKnowledgePythonRuntime",
+            "RuntimeTimeoutMs",
+            "python_runtime = $pythonRuntimeState",
         ):
             self.assertIn(marker, checker)
         for marker in (
@@ -109,6 +112,8 @@ class EmbodyProjectContextTests(unittest.TestCase):
             self.assertIn(marker, example)
 
         self.assertIsNone(WINDOWS_ABSOLUTE_PATH.search(example))
+        self.assertIn("<ABSOLUTE_PATH_TO_TD_KNOWLEDGE_MCP_PYTHON>", example)
+        self.assertNotIn("<ABSOLUTE_PATH_TO_TD_AI_ASSISTANT_PYTHON>", example)
         self.assertIn(".codex/config.toml", gitignore)
         for documentation in (readme, embody_doc):
             self.assertIn("Test-TDKnowledgeBridge.ps1", documentation)

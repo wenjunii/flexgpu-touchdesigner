@@ -158,6 +158,17 @@ it follows the newly registered project-scoped Envoy port instead of failing
 during the short listener startup window. It does not start or modify
 TouchDesigner.
 
+The preflight also runs the configured server's `--help` in its configured
+Python, with a 10-second timeout (`-RuntimeTimeoutMs` overrides this). Use the
+`td-knowledge-mcp` project's own `.venv` Python for `command`; the separate
+`td-ai-assistant` library environment may not contain the MCP dependencies.
+`python_runtime=ready` confirms that the CLI loads, not that live tools or
+generated imagery have passed acceptance. No dependencies are installed.
+If Envoy remains offline, check Embody's **Envoy Enable** and allow the project
+timeline to advance during startup. In a combined podcast TOE, the public
+podcast **Play** control can keep the timeline paused; mute audio before a
+deliberate startup test and restore the previous controls afterward.
+
 If the preflight reports that every Envoy port is occupied after an abnormal
 shutdown, preview the project-scoped registry before changing it:
 
@@ -1065,6 +1076,12 @@ The checker is read-only. Worker and combined-podcast timeline/scene buttons
 remain explicit live checks and are reported as
 `external_validation_required`, rather than being silently counted as
 automated passes.
+Both reports label their scope as `public_control_mapping_and_output_dimensions`
+and set `complete_live_acceptance=false`. A passing control sweep is not a
+claim that every worker button, live image, sensor, headset, or thermal soak
+has been tested. Test each geometry Start/Stop pair separately on the 3080,
+including duplicate-start rejection and fresh results before stopping; use
+actual generated imagery for the subsequent single/triple-output comparison.
 
 MoGe-2 uses CUDA for model inference but also performs significant CPU work for
 image resizing, tensor-to-array transfer, atlas packing, and transport. On the

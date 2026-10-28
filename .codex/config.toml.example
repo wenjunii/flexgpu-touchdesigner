@@ -1,5 +1,5 @@
 [mcp_servers.td-knowledge]
-command = '<ABSOLUTE_PATH_TO_TD_AI_ASSISTANT_PYTHON>'
+command = '<ABSOLUTE_PATH_TO_TD_KNOWLEDGE_MCP_PYTHON>'
 args = [
   "-u",
   '<ABSOLUTE_PATH_TO_TD_KNOWLEDGE_MCP_SERVER>',
