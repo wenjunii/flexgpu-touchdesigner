@@ -6,6 +6,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '_WorkerPython.Common.ps1')
 $root = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $venv = Join-Path $root '.venv\moge2'
 $venvPython = Join-Path $venv 'Scripts\python.exe'
@@ -75,9 +76,11 @@ $env:HF_HUB_DISABLE_TELEMETRY = '1'
 
 if ($Install) {
     $basePython = Resolve-BasePython
+    Assert-FlexGpuWorkerPython -Python $basePython
     if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
         Invoke-Checked -Executable $basePython -Arguments @('-m', 'venv', $venv) -Label 'Create isolated Python environment'
     }
+    Assert-FlexGpuWorkerPython -Python $venvPython
     Invoke-Checked -Executable $venvPython -Arguments @('-m', 'pip', 'install', 'pip==25.1.1') -Label 'Pin pip'
     Invoke-Checked -Executable $venvPython -Arguments @(
         '-m', 'pip', 'install',
@@ -95,6 +98,7 @@ if ($Install) {
 if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
     throw 'The MoGe-2 environment is missing. Run this script with -Install first.'
 }
+Assert-FlexGpuWorkerPython -Python $venvPython
 
 if ($DownloadModel) {
     Invoke-Checked -Executable $venvPython -Arguments @(
