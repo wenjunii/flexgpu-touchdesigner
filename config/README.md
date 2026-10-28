@@ -169,7 +169,7 @@ Schema Draft 2020-12 implementation. Run the same check locally with the
 optional pinned validation dependency:
 
 ```powershell
-python -m pip install jsonschema==4.17.3
+python -m pip install jsonschema==4.26.0
 python tools/validate_configs.py
 python tools/validate_configs.py config/local-flexshow.json
 ```

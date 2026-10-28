@@ -1,12 +1,13 @@
 # Runtime-only dependencies for the optional Depth Anything V2 Small sensor
 # emulator. PyTorch/torchvision are installed separately from the official
 # CUDA wheel index by scripts/Initialize-DepthAnything.ps1.
-numpy==2.5.4
+# NumPy 2.5+ requires Python 3.12; retain the shared Python 3.11 baseline.
+numpy==2.4.6
 opencv-python==5.0.0.93
 # Pillow 13 contains the October 2026 security fixes and requires Python 3.11+.
 Pillow==13.0.0
-# 5.17.0 includes upstream fix cbc1651 (custom-generation consent ordering),
-# which is absent from 5.10.1. Keep its compatible runtime dependencies pinned.
+# Retains the custom-generation consent fix from 5.17.0; the offline smoke
+# verifies rejection before download. Keep compatible runtime pins together.
 huggingface-hub==2.3.0
 transformers==5.20.2
 safetensors==0.8.0

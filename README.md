@@ -1231,8 +1231,8 @@ source/destination checklist and private-transfer boundary.
 
 ## Testing and security
 
-The optional Depth Anything runtime pins `transformers==5.17.0`,
-`huggingface-hub==1.24.0`, and `safetensors==0.8.0`. Both geometry runtimes and
+The optional Depth Anything runtime pins `transformers==5.20.2`,
+`huggingface-hub==2.3.0`, and `safetensors==0.8.0`. Both geometry runtimes and
 the source-test environment pin `Pillow==13.0.0`. The worker runs normal
 inference offline with `trust_remote_code=False`, loads safetensors only, and
 verifies the exact model, model-config, and processor-config SHA-256 values
@@ -1247,6 +1247,11 @@ consent regression, and synchronized geometry at 512x512, 1024x567, and
 1024x576 source sizes. Stage it in a separate environment before replacing a
 working worker environment; syncing source alone does not update installed
 packages. See [dependency maintenance](docs/DEPENDENCY_MAINTENANCE.md).
+
+The routine-update candidate retains Python 3.11 compatibility with
+`numpy==2.4.6` and `scipy==1.17.1`; the newer NumPy 2.5 and SciPy 1.18 series
+require Python 3.12. Source checks use `jsonschema==4.26.0`. These are staged
+dependency pins, not authorization to upgrade either machine's live workers.
 
 ### Public GitHub sync policy
 

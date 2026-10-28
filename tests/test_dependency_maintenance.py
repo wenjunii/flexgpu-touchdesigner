@@ -18,6 +18,14 @@ spec.loader.exec_module(smoke)
 
 
 class DependencyMaintenanceTests(unittest.TestCase):
+    def test_numeric_pins_retain_python_311_compatible_series(self):
+        # Newer NumPy/SciPy releases need 3.12 and must not silently raise
+        # the worker baseline. Keep source tests and both workers aligned.
+        for path in (ROOT / "requirements-test.txt", *sorted((ROOT / "integrations").glob("*/requirements-runtime.txt"))):
+            self.assertIn("numpy==2.4.6", path.read_text(), str(path))
+        moge = (ROOT / "integrations/moge2/requirements-runtime.txt").read_text()
+        self.assertIn("scipy==1.17.1", moge)
+
     def test_all_image_runtimes_use_same_patched_pillow(self):
         for path in (ROOT / "requirements-test.txt", *sorted((ROOT / "integrations").glob("*/requirements-runtime.txt"))):
             pins = [line for line in path.read_text().splitlines() if line.lower().startswith("pillow==")]
