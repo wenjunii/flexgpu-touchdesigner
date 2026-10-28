@@ -4,6 +4,9 @@ param(
     [ValidateSet('3080ti_16gb', '4090', '5090')]
     [string]$Profile,
 
+    # Per-launch opt-in; omit to retain the existing environment.
+    [string]$WorkerPython = '',
+
     [ValidateSet('moge2', 'mock')]
     [string]$Backend = 'moge2',
 
@@ -49,6 +52,8 @@ $ErrorActionPreference = 'Stop'
 $root = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 . (Join-Path $PSScriptRoot '_GeneratedGeometry.Common.ps1')
 $python = Join-Path $root '.venv\moge2\Scripts\python.exe'
+. (Join-Path $PSScriptRoot '_WorkerPython.Common.ps1')
+if ($WorkerPython) { $python = Resolve-FlexGpuWorkerOverride -Root $root -WorkerPython $WorkerPython }
 $worker = Join-Path $root 'tools\moge2_worker.py'
 $model = Join-Path $root 'runtime\moge2-model\model.pt'
 $cache = Join-Path $root 'runtime\moge2-cache'

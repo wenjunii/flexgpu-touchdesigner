@@ -9,3 +9,14 @@ function Assert-FlexGpuWorkerPython {
         throw 'The patched worker dependencies require Python 3.11 or newer. Create a separate environment; do not upgrade the only working show environment in place.'
     }
 }
+
+function Resolve-FlexGpuWorkerOverride {
+    param([string]$Root, [string]$WorkerPython)
+    $resolved = if ([IO.Path]::IsPathRooted($WorkerPython)) {
+        [IO.Path]::GetFullPath($WorkerPython)
+    } else { [IO.Path]::GetFullPath((Join-Path $Root $WorkerPython)) }
+    if (-not (Test-Path -LiteralPath $resolved -PathType Leaf)) {
+        throw 'The explicit candidate Python does not exist. No fallback environment will be used.'
+    }
+    return $resolved
+}

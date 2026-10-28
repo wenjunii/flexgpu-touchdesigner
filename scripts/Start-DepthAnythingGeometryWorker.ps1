@@ -4,6 +4,8 @@ param(
     [ValidateSet('3080ti_16gb', '4090', '5090')]
     [string]$Profile,
 
+    [string]$WorkerPython = '',
+
     [ValidateSet('depth_anything', 'mock')]
     [string]$Backend = 'depth_anything',
 
@@ -72,6 +74,8 @@ $ErrorActionPreference = 'Stop'
 $root = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 . (Join-Path $PSScriptRoot '_GeneratedGeometry.Common.ps1')
 $isolatedPython = Join-Path $root '.venv\depth-anything\Scripts\python.exe'
+. (Join-Path $PSScriptRoot '_WorkerPython.Common.ps1')
+if ($WorkerPython) { $isolatedPython = Resolve-FlexGpuWorkerOverride -Root $root -WorkerPython $WorkerPython }
 $python = $isolatedPython
 $worker = Join-Path $root 'tools\moge2_worker.py'
 $model = Join-Path $root 'runtime\depth-anything-v2-small'
@@ -212,6 +216,7 @@ if (-not (Test-Path -LiteralPath $worker -PathType Leaf)) {
     throw 'tools\moge2_worker.py is missing.'
 }
 if (-not (Test-Path -LiteralPath $isolatedPython -PathType Leaf)) {
+    if ($WorkerPython) { throw 'The explicitly selected candidate disappeared; refusing fallback.' }
     if ($Backend -ne 'mock') {
         throw 'The isolated Depth Anything environment is missing. Run Initialize-DepthAnything.ps1 -Install first.'
     }

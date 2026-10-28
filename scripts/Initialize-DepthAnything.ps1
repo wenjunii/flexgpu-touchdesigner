@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$Python,
+    [ValidatePattern('^(3080|4090|5090)-[a-z0-9][a-z0-9-]{0,39}$')]
+    [string]$CandidateName,
     [switch]$Install,
     [switch]$DownloadModel
 )
@@ -9,6 +11,10 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_WorkerPython.Common.ps1')
 $root = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $venv = Join-Path $root '.venv\depth-anything'
+if ($CandidateName) { $venv = Join-Path $root ".venv\depth-anything-candidate-$CandidateName" }
+if ($CandidateName -and $Install -and (Test-Path -LiteralPath $venv)) {
+    throw 'Candidate environment already exists. Choose a fresh CandidateName; never overwrite accepted or partially installed candidates.'
+}
 $venvPython = Join-Path $venv 'Scripts\python.exe'
 $requirements = Join-Path $root 'integrations\depth_anything\requirements-runtime.txt'
 $worker = Join-Path $root 'tools\depth_anything_worker.py'

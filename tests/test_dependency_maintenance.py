@@ -25,7 +25,8 @@ class DependencyMaintenanceTests(unittest.TestCase):
 
     def test_source_ci_and_release_require_python_311(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
-        self.assertIn("python-version: ['3.11', '3.12']", workflow)
+        self.assertIn("'[\"3.11\", \"3.12\"]'", workflow)
+        self.assertIn("|| '[\"3.11\"]'", workflow)
         release = (ROOT / "scripts/Test-FlexShowRelease.ps1").read_text()
         self.assertIn("sys.version_info >= (3, 11)", release)
         self.assertIn("m.version('Pillow') == '13.0.0'", release)

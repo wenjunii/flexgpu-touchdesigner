@@ -9,6 +9,7 @@ This is dependency compatibility evidence, not visual or venue acceptance.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.metadata as metadata
 import json
 from pathlib import Path
@@ -73,6 +74,23 @@ def check_versions(provider: str) -> dict[str, str]:
             raise RuntimeError(f"{name}: installed {actual}, expected {expected}")
         versions[name] = actual
     return versions
+
+
+def audit_runtime(provider: str) -> dict:
+    """Metadata only: no torch/transformers import, CUDA, webcam, or network."""
+    versions = check_versions(provider)
+    if provider == "moge2":
+        import moge2_worker as worker_module
+        check_source_revision("moge", worker_module.MOGE_SOURCE_REVISION)
+        versions["moge"] = metadata.version("moge")
+    manifest = ROOT / "integrations" / provider / "requirements-runtime.txt"
+    return {
+        "status": "ok", "mode": "audit_only", "provider": provider,
+        "python": str(Path(sys.executable).resolve()), "versions": versions,
+        "requirements_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
+        "gpu_inference": "not_run", "visual_acceptance": "not_tested",
+        "activated": False,
+    }
 
 
 def synthetic_frame(provider: str, frame_id: int, width: int, height: int):
@@ -168,9 +186,11 @@ def main(argv=None) -> int:
     parser.add_argument("--provider", required=True, choices=("moge2", "depth_anything"))
     parser.add_argument("--model", type=Path, help="Existing pinned checkpoint file or Depth Anything directory")
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--run", action="store_true", help="Explicitly load the model and run six synthetic GPU inferences")
+    action = parser.add_mutually_exclusive_group()
+    action.add_argument("--run", action="store_true", help="Explicitly load the model and run six synthetic GPU inferences")
+    action.add_argument("--audit-only", action="store_true", help="Check exact installed pins without model imports or GPU use")
     args = parser.parse_args(argv)
-    if not args.run:
+    if not args.run and not args.audit_only:
         print(json.dumps({"status": "preview", "provider": args.provider, "inferences": 6}))
         return 0
     model = args.model or (
@@ -178,7 +198,7 @@ def main(argv=None) -> int:
         else ROOT / "runtime" / "depth-anything-v2-small"
     )
     try:
-        result = run_smoke(args.provider, model, args.device)
+        result = audit_runtime(args.provider) if args.audit_only else run_smoke(args.provider, model, args.device)
     except Exception as exc:
         print(json.dumps({"status": "error", "type": type(exc).__name__, "error": str(exc)}))
         return 1
