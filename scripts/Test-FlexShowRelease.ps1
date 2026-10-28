@@ -528,11 +528,11 @@ try {
     try {
         Invoke-CheckedPython -Name 'Check pinned schema validator' -Arguments @(
             '-c',
-            "import importlib.metadata as m; raise SystemExit(0 if m.version('jsonschema') == '4.17.3' else 1)"
+            "import importlib.metadata as m; raise SystemExit(0 if m.version('jsonschema') == '4.26.0' else 1)"
         )
     }
     catch {
-        throw "The selected Python runtime ($($python.Source)) must contain jsonschema==4.17.3. Install it into that exact interpreter or set FLEXSHOW_PYTHON. $($_.Exception.Message)"
+        throw "The selected Python runtime ($($python.Source)) must contain jsonschema==4.26.0. Install it into that exact interpreter or set FLEXSHOW_PYTHON. $($_.Exception.Message)"
     }
 
     try {

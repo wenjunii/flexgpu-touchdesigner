@@ -21,7 +21,7 @@ class ReleaseScriptSourceTests(unittest.TestCase):
         source = SCRIPT_PATH.read_text(encoding="utf-8")
         for marker in (
             "Get-FlexShowPython",
-            "m.version('jsonschema') == '4.17.3'",
+            "m.version('jsonschema') == '4.26.0'",
             "Check NumPy source-test dependency",
             '"import numpy"',
             "-m', 'compileall'",
@@ -140,8 +140,8 @@ class ReleaseScriptSourceTests(unittest.TestCase):
         )
         self.assertIn("-r requirements-test.txt", workflow)
         self.assertIn(r"-r .\requirements-test.txt", readme)
-        self.assertIn("jsonschema==4.17.3", requirements)
-        self.assertIn("numpy==2.2.6", requirements)
+        self.assertIn("jsonschema==4.26.0", requirements)
+        self.assertIn("numpy==2.4.6", requirements)
         self.assertIn("Pillow==13.0.0", requirements)
         self.assertIn(r".\scripts\Test-FlexShowRelease.ps1", readme)
         self.assertIn("does not launch TouchDesigner", readme)

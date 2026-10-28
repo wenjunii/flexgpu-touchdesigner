@@ -10,9 +10,33 @@ them; a Git pull is not a package upgrade.
 | Package | Pin | Scope |
 | --- | --- | --- |
 | Pillow | 13.0.0 | Source tests, MoGe-2, Depth Anything |
-| Transformers | 5.17.0 | Depth Anything sensor and geometry |
-| huggingface-hub | 1.24.0 (unchanged) | Depth Anything |
-| safetensors | 0.8.0 | Depth Anything; required by Transformers 5.17.0 |
+| Transformers | 5.20.2 | Depth Anything sensor and geometry |
+| huggingface-hub | 2.3.0 | MoGe-2 and Depth Anything |
+| safetensors | 0.8.0 | Depth Anything |
+| NumPy | 2.4.6 | Source tests, MoGe-2, Depth Anything |
+| SciPy | 1.17.1 | MoGe-2 |
+| OpenCV | 5.0.0.93 | MoGe-2 and Depth Anything |
+| Matplotlib | 3.11.2 | MoGe-2 |
+| jsonschema | 4.26.0 | Source/schema tests only |
+
+Dependabot PR #26 originally proposed NumPy 2.5.4 and SciPy 1.18.1, which
+require Python 3.12 and cannot install on our 3.11 baseline. The repaired
+candidate uses [NumPy 2.4.6](https://pypi.org/project/numpy/2.4.6/) and
+[SciPy 1.17.1](https://pypi.org/project/scipy/1.17.1/), both with Python 3.11
+Windows wheels. Keep these compatibility-series limits under review rather
+than disabling dependency security alerts. The newer Hub/OpenCV APIs and
+Transformers are still a coherent runtime upgrade: a source CI pass alone
+does not approve them for the working show.
+
+Candidate evidence on an RTX 3080 Ti Laptop (28 October 2026): fresh Python
+3.11 environments installed successfully; the Full source gate passed 495
+tests with four platform-specific skips. Both pinned models passed six
+offline CUDA inferences (one model load each) across all three source sizes,
+with synchronized atlas RGB and positive finite valid depth. The
+custom-generation consent regression passed. OpenCV 5 camera API symbols and
+synthetic resize were checked without opening a camera. No working environment
+was activated, no TOE was changed, and live sensor/visual/thermal/5090
+acceptance remains separate.
 
 Pillow 13 fixes the advisories affecting the previous image-library pin and
 requires Python 3.11+. See the [upstream release notes](https://pillow.readthedocs.io/en/stable/releasenotes/13.0.0.html).
@@ -22,7 +46,8 @@ post-merge and documentation-only checks use the explicitly limited Quick gate.
 The dependency-free launcher remains usable on Python 3.10; do not install
 the image/model requirements into that interpreter or into TouchDesigner.
 
-Transformers 5.17.0 contains the custom-generation consent fix
+The runtime retains the custom-generation consent fix introduced in
+Transformers 5.17.0,
 [`cbc1651`](https://github.com/huggingface/transformers/commit/cbc1651a032b923da7f4b44b3d0e6f68e6ba6b55),
 which is absent from Dependabot PR #21's proposed 5.10.1. This is a targeted
 compatibility candidate, not a claim that any version will remain free of

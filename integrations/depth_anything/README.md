@@ -48,7 +48,7 @@ Model acquisition is a separate, explicit network action:
 The environment lives under ignored `.venv/depth-anything/`; the snapshot and
 cache remain under ignored `runtime/`. Normal inference is forced offline and
 verifies the pinned weight and both configuration files before loading them.
-The public runtime pins `transformers==5.17.0`, `huggingface-hub==1.24.0`,
+The public runtime pins `transformers==5.20.2`, `huggingface-hub==2.3.0`,
 `safetensors==0.8.0`, and `Pillow==13.0.0` together. Python 3.11+ is required;
 the initializer checks both the base interpreter and any existing environment
 before installing packages, then runs `pip check`. Partial automated upgrades

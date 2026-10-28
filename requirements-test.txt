@@ -1,6 +1,7 @@
 # Pinned dependencies for the source release gate and GitHub Actions.
 # GPU/model runtimes remain isolated under integrations/* and are not installed here.
 # Python 3.11+ is required by the patched Pillow runtime.
-jsonschema==4.17.3
-numpy==2.2.6
+jsonschema==4.26.0
+# NumPy 2.5+ requires Python 3.12; retain the shared Python 3.11 baseline.
+numpy==2.4.6
 Pillow==13.0.0

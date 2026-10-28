@@ -34,10 +34,10 @@ class DepthAnythingIntegrationSourceTests(unittest.TestCase):
     def test_runtime_dependencies_and_model_are_pinned(self) -> None:
         requirements = REQUIREMENTS.read_text(encoding="utf-8")
         for marker in (
-            "numpy==2.2.6",
-            "opencv-python==4.10.0.84",
-            "huggingface-hub==1.24.0",
-            "transformers==5.17.0",
+            "numpy==2.4.6",
+            "opencv-python==5.0.0.93",
+            "huggingface-hub==2.3.0",
+            "transformers==5.20.2",
             "safetensors==0.8.0",
         ):
             self.assertIn(marker, requirements)

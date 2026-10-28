@@ -1,11 +1,13 @@
 # Runtime-only dependencies for the pinned MoGe-2 worker.  PyTorch and
 # torchvision are installed separately from the official CUDA wheel index by
 # scripts/Initialize-MoGe2.ps1.
-numpy==2.2.6
+# NumPy 2.5+ requires Python 3.12; retain the shared Python 3.11 baseline.
+numpy==2.4.6
 # Pillow 13 contains the October 2026 security fixes and requires Python 3.11+.
 Pillow==13.0.0
-huggingface-hub==0.25.2
-opencv-python==4.10.0.84
-scipy==1.14.1
-matplotlib==3.9.2
+huggingface-hub==2.3.0
+opencv-python==5.0.0.93
+# SciPy 1.18+ also requires Python 3.12.
+scipy==1.17.1
+matplotlib==3.11.2
 utils3d @ git+https://github.com/EasternJournalist/utils3d.git@3fab839f0be9931dac7c8488eb0e1600c236e183
