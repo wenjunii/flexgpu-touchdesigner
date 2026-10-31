@@ -943,7 +943,7 @@ assert normalized({src_path!r}) in {{
             self.module.SHOW_CONTROL_CALLBACKS,
         )
         self.assertIn(
-            "1 if source == 'soundscape' else 0",
+            "available.index(source)",
             self.module.SHOW_CONTROL_CALLBACKS,
         )
         installer = inspect.getsource(

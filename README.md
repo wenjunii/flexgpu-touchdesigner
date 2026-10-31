@@ -1029,6 +1029,34 @@ panel and compare two stable `OUT_RGB` samples after a scene interval; an
 unchanged or effectively near-black frame is a failed visual check even when
 operator errors and output dimensions are clean.
 
+The later local `podcast.40.toe` uses a different, reviewed storytelling
+playlist: 136 stories, 619 scenes in each of three visual paths, 2,862 captions,
+and a 3:18:58.720 audio clock. For this edition use
+`touchdesigner/update_combined_storytelling_3080.py` and
+`touchdesigner/validate_combined_storytelling_3080.py` instead of the legacy
+dual-path updater. The migration extends the public podcast panel, retains a
+disabled panel backup, adds three audio modes and story navigation, and binds
+the continuous-image hold/interpolation modules from the local home-podcast
+checkout. It preserves the current renderer list and geometry bridge inputs.
+The main FlexGPU Audio page gains Narration + Ambient only when a combined
+audio track exists. See [the combined playlist procedure](touchdesigner/README.md#combined-3080-storytelling-playlist-podcast40).
+
+The reviewed media, playlist manifests and edition helper modules remain local
+dependencies in home-podcast; updating this Git repository alone does not copy
+them. Installation starts paused and muted, does not start model servers or
+save the TOE, and rejects 5090 projects. Save an accepted result as a new
+3080-tagged checkpoint. The legacy updater refuses a playlist-equipped adapter
+to avoid restoring the historical two-path setup.
+
+The accepted local 3080 checkpoint is
+`FlexShow-moge2-embody-podcast-local-3080.43.toe`. A cold-reopen audit retained
+the 136-story edition, passed 2,598 playlist checks and 311 FlexGPU control
+checks, and confirmed seven 1920x1080 wall TOPs plus two 5760x1080 mosaics.
+Generated-image, physical-sensor, headset and thermal acceptance remain
+separate. The local launcher should target this 3080 checkpoint with
+`Set-FlexShowLocalProject.ps1 -ExpectedTier 3080ti_16gb`; the working TOE and
+local config remain ignored. The migration and audit reject 5090 project names.
+
 If F1 reports that
 `/project1/flexgpu/INSTALLATION_OUT/window1` is missing, run
 `runtime_pipeline.install_perform_window(op('/project1/flexgpu'))` in the

@@ -126,6 +126,13 @@ def update_combined_podcast_3080(
         raise RuntimeError(
             "Missing the approved combined podcast adapter: %s" % ADAPTER_PATH
         )
+    playlist = _parameter(adapter, "Playlistmanifest")
+    if playlist is not None and str(playlist.eval()).strip():
+        raise RuntimeError(
+            "This adapter has a reviewed storytelling playlist. Use "
+            "update_combined_storytelling_3080 / validate_combined_storytelling_3080; "
+            "the legacy dual-path updater would replace its playback configuration."
+        )
 
     root, paths = _required_paths(podcast_root)
     missing = [str(path) for path in paths.values() if not path.is_file()]

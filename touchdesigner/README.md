@@ -1,5 +1,59 @@
 # FlexGPU TouchDesigner project
 
+## Combined 3080 storytelling playlist (podcast.40)
+
+The bounded migration from the local reviewed home-podcast `.40` edition adds
+136 stories, three visual treatments (Original, Human Figures and Balanced
+Memories), three audio modes (Narration, Ambient and Combined), 2,862 captions,
+story navigation and a 3:18:58.720 loop. Images hold across uncovered intervals;
+scene and story/loop interpolation default to three seconds. Gap colour is
+disabled. Canonical playback uses `3080_safe` with local variations locked off.
+
+Back up the combined 3080 TOE and stop the selected StreamDiffusionTD server
+before running this inside TouchDesigner 2025.32820:
+
+```python
+from pathlib import Path
+import sys, importlib
+root = Path(r'C:\path\to\2d-3d')
+sys.path.insert(0, str(root / 'touchdesigner'))
+import update_combined_storytelling_3080 as migration
+importlib.reload(migration)
+result = migration.install_live(root.parent / 'home-podcast')
+```
+
+Run once per older combined checkpoint. The installer extends public controls
+in place, retains `show_control_before_playlist40` disabled, and preserves
+renderer selection, geometry routing and private components. The selected
+edition's media, manifest and helper modules must remain available in the
+home-podcast checkout. It validates reviewed plan hashes, counts and audio
+headers before editing. It does not regenerate media or save a TOE.
+
+For a muted native audit with the generated-image servers stopped:
+
+```python
+import validate_combined_storytelling_3080 as audit
+importlib.reload(audit)
+report = audit.validate(root.parent / 'home-podcast', lookup=op,
+    report_path=root / 'runtime/validation/combined-playlist-3080.json')
+print(report)
+```
+
+This verifies all scene joins and held gaps, story/loop navigation, native
+prompt/seed bindings, audio routing and decoding. Generated-image visual
+acceptance remains separate. The ordinary FlexGPU control validator also
+supports the manifest's three visual paths. After review, save a new combined
+3080 checkpoint; the original saved `.42` stays available for rollback.
+
+The saved local `.43` has passed a cold reopen with 2,598 playlist checks and
+311 FlexGPU control/dimension checks. Its saved visual-path and audio-enable
+choices are preserved by verification. The audit explicitly applies the
+pause/mute state before checking the native clock, since Parameter Execute
+callbacks can be deferred until the next application frame. For Envoy startup
+in a saved-paused project, follow [the startup check](../docs/EMBODY_MCP.md#connection-check).
+
+## Base project
+
 `bootstrap_project.py` and `runtime_pipeline.py` version `1.2.1` build a
 labelled TouchDesigner 2025 project at `/project1/flexgpu`. It includes a
 stock-operator `WORKING_PIPELINE` that runs
