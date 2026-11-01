@@ -3,5 +3,5 @@
 # Python 3.11+ is required by the patched Pillow runtime.
 jsonschema==4.26.0
 # NumPy 2.5+ requires Python 3.12; retain the shared Python 3.11 baseline.
-numpy==2.4.6
+numpy==2.5.4
 Pillow==13.0.0
