@@ -1363,7 +1363,10 @@ def _apply_audio_controls():
     adapter = pipeline.op('SOURCES/STREAMDIFFUSION_ADAPTER')
     enabled = bool(_value('Audioenabled', False))
     source = str(_value('Audiosource', 'voices')).strip().lower()
-    if source not in ('voices', 'soundscape'):
+    available = ('voices', 'soundscape', 'combined') if (
+        adapter is not None and adapter.op('combined_audio') is not None
+    ) else ('voices', 'soundscape')
+    if source not in available:
         source = 'voices'
     _set(controls, 'Audioenabled', enabled)
     _set(controls, 'Audiosource', source)
@@ -1375,7 +1378,7 @@ def _apply_audio_controls():
     _set(adapter_control, 'Audioenabled', enabled)
     _set(adapter_control, 'Audiosource', source)
     audio_switch = adapter.op('audiosource_switch')
-    _set(audio_switch, 'index', 1 if source == 'soundscape' else 0)
+    _set(audio_switch, 'index', available.index(source))
     audio_out = adapter.op('audio_out')
     if audio_out is not None:
         try:
@@ -2826,13 +2829,14 @@ def _ensure_audio_adapter_contract(adapter):
     source = _custom(
         adapter, page, "Menu", "Audiosource",
         str(_value(adapter, "Audiosource", "voices")),
-        ("voices", "soundscape"), label="Audio Source")
+        (("voices", "soundscape", "combined") if adapter.op("combined_audio") is not None
+         else ("voices", "soundscape")), label="Audio Source")
     if source is not None:
         try:
             source.menuLabels = [
                 "Human Voices Only",
                 "Soundscape Only",
-            ]
+            ] + (["Narration + Ambient"] if adapter.op("combined_audio") is not None else [])
         except Exception:
             pass
     return enabled, source
@@ -5874,13 +5878,14 @@ def _build_show_control(pipeline, report):
     audio_source = _custom(
         control, audio_page, "Menu", "Audiosource",
         str(_value(adapter, "Audiosource", "voices")),
-        ("voices", "soundscape"), label="Audio Source")
+        (("voices", "soundscape", "combined") if adapter.op("combined_audio") is not None
+         else ("voices", "soundscape")), label="Audio Source")
     if audio_source is not None:
         try:
             audio_source.menuLabels = [
                 "Human Voices Only",
                 "Soundscape Only",
-            ]
+            ] + (["Narration + Ambient"] if adapter.op("combined_audio") is not None else [])
         except Exception:
             pass
 

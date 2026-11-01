@@ -566,10 +566,16 @@ def validate(
                     "missing", "present")
             else:
                 visual_callback_module = adapter_show_callbacks.module
-                for visual_path, expected_file in (
+                visual_files = [
                         ("human_figures",
                          "2013-12.01-visual-scenes-human-figures.json"),
-                        ("original", "2013-12.01-visual-scenes.json")):
+                        ("original", "2013-12.01-visual-scenes.json")]
+                playlist_path = str(_value(adapter, "Playlistmanifest", ""))
+                if playlist_path:
+                    playlist = json.loads(Path(playlist_path).read_text(encoding="utf-8"))
+                    visual_files = [(mode, Path(playlist["plans"][mode]["path"]).name)
+                                    for mode in ("human_figures", "original", "balanced")]
+                for visual_path, expected_file in visual_files:
                     _set(adapter_show_control, "Visualpath", visual_path)
                     visual_callback_module.onValueChange(
                         _parameter(adapter_show_control, "Visualpath"),
@@ -582,8 +588,8 @@ def validate(
                         visual_path,
                     )
                     scene_parameter = (
-                        "Humanfigurejson"
-                        if visual_path == "human_figures" else "Scenejson")
+                        {"human_figures": "Humanfigurejson", "original": "Scenejson",
+                         "balanced": "Balancedjson"}[visual_path])
                     _record(
                         checks,
                         "adapter_Visualpath_scene_" + visual_path,
