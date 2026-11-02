@@ -10,8 +10,8 @@ them; a Git pull is not a package upgrade.
 | Package | Pin | Scope |
 | --- | --- | --- |
 | Pillow | 13.0.0 | Source tests, MoGe-2, Depth Anything |
-| Transformers | 5.21.0 | Depth Anything sensor and geometry |
-| huggingface-hub | 2.3.0 | MoGe-2 and Depth Anything |
+| Transformers | 5.22.0 | Depth Anything sensor and geometry |
+| huggingface-hub | 2.4.0 | MoGe-2 and Depth Anything |
 | safetensors | 0.8.0 | Depth Anything |
 | NumPy | 2.4.6 | Source tests, MoGe-2, Depth Anything |
 | SciPy | 1.17.1 | MoGe-2 |
@@ -59,6 +59,20 @@ The existing verified checkpoint was read locally; no model download, webcam,
 listener, TOE change, or working-environment activation occurred. MoGe's pins
 are unchanged from the October candidate; this follow-up did not rerun MoGe
 inference or certify live visuals, sensors, thermal behavior, or the 5090.
+
+PR #30 follow-up evidence (1 November 2026): fresh Python 3.11 candidates
+installed Hub 2.4.0 for both providers and Transformers 5.22.0 for Depth
+Anything. Both exact-pin/source-revision audits passed; Depth Anything also
+passed `pip check`. Each provider passed six offline CUDA inferences on the
+3080 Ti Laptop across all three source sizes, with one model load,
+synchronized atlas RGB, expected geometry dimensions, and positive finite
+valid depth. The custom-generation consent regression passed. The Full source
+gate passed 504 tests with four platform-specific skips. An initial local test
+attempt encountered a Windows temporary-directory rename access error;
+three focused reruns and the complete unit-suite rerun passed without a code
+change. The initial failure evidence is retained locally. No candidate was
+activated, checkpoint downloaded, webcam/listener opened, TOE changed, or
+5090 environment modified. Live visual/sensor/thermal acceptance is separate.
 
 Pillow 13 fixes the advisories affecting the previous image-library pin and
 requires Python 3.11+. See the [upstream release notes](https://pillow.readthedocs.io/en/stable/releasenotes/13.0.0.html).

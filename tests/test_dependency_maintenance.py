@@ -19,6 +19,14 @@ spec.loader.exec_module(smoke)
 
 
 class DependencyMaintenanceTests(unittest.TestCase):
+    def test_shared_hub_candidate_pin_and_documentation_are_aligned(self):
+        for provider in ("depth_anything", "moge2"):
+            folder = ROOT / "integrations" / provider
+            pins = [line for line in (folder / "requirements-runtime.txt").read_text().splitlines()
+                    if line.startswith("huggingface-hub==")]
+            self.assertEqual(pins, ["huggingface-hub==2.4.0"], provider)
+            self.assertIn("huggingface-hub==2.4.0", (folder / "README.md").read_text())
+
     def test_routine_numeric_limits_do_not_suppress_security_updates(self):
         source = (ROOT / ".github/dependabot.yml").read_text()
         pip = source.split("  - package-ecosystem: github-actions", 1)[0]

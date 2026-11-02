@@ -43,7 +43,8 @@ headset submission, SHARP, and Gaussian inference are user-supplied adapters.
 
 Dependency candidates retain Python 3.11-compatible NumPy/SciPy series;
 routine numeric updates are patch-only while security updates remain enabled.
-The Transformers 5.21.0 candidate is separate from installed show workers.
+The Transformers 5.22.0 / Hugging Face Hub 2.4.0 candidate is separate from
+installed show workers.
 See [isolated dependency maintenance](docs/DEPENDENCY_MAINTENANCE.md); pulling
 source does not upgrade either machine's environment or modify a working TOE.
 
@@ -1282,14 +1283,15 @@ source/destination checklist and private-transfer boundary.
 
 ## Testing and security
 
-The optional Depth Anything runtime pins `transformers==5.20.2`,
-`huggingface-hub==2.3.0`, and `safetensors==0.8.0`. Both geometry runtimes and
+The optional Depth Anything runtime pins `transformers==5.22.0`,
+`huggingface-hub==2.4.0`, and `safetensors==0.8.0`. Both geometry runtimes and
 the source-test environment pin `Pillow==13.0.0`. The worker runs normal
 inference offline with `trust_remote_code=False`, loads safetensors only, and
 verifies the exact model, model-config, and processor-config SHA-256 values
 before Transformers parses them. Treat any dependency update as one coherent
-runtime change: repeat the pinned local-model inference audit and never merge a
-single-package Dependabot bump into either the 3080 or 5090 working setup.
+runtime candidate: repeat the pinned local-model inference audit and never
+activate untested packages in either the 3080 or 5090 working environment.
+Merging source does not install or activate a candidate.
 
 The October 2026 security update replaces the incomplete Transformers 5.10.1
 proposal and raises the source-test Python baseline to 3.11. A preview-first
