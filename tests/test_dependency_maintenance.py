@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 from types import ModuleType, SimpleNamespace
@@ -18,6 +19,35 @@ spec.loader.exec_module(smoke)
 
 
 class DependencyMaintenanceTests(unittest.TestCase):
+    def test_routine_numeric_limits_do_not_suppress_security_updates(self):
+        source = (ROOT / ".github/dependabot.yml").read_text()
+        pip = source.split("  - package-ecosystem: github-actions", 1)[0]
+        rules = pip.split("    allow:\n", 1)[1].split("    groups:", 1)[0]
+        entries = re.findall(
+            r"      - dependency-name: ([\w.-]+)\n((?:(?!      - dependency-name:).)*?)(?=      - dependency-name:|\Z)",
+            rules, re.S,
+        )
+        allowed = dict(entries)
+        self.assertEqual(len(entries), len(allowed), "duplicate allow rules")
+        manifests = (ROOT / "requirements-test.txt", *sorted(
+            (ROOT / "integrations").glob("*/requirements-runtime.txt")))
+        dependencies = {
+            match.group(1).lower()
+            for path in manifests
+            for line in path.read_text().splitlines()
+            if (match := re.match(r"^([\w.-]+)(?:==| @ )", line))
+        }
+        self.assertEqual(set(allowed), dependencies)
+        for name, body in allowed.items():
+            if name in {"numpy", "scipy"}:
+                self.assertEqual(body.strip(), "update-types: ['version-update:semver-patch']")
+            else:
+                self.assertEqual(body.strip(), "", name)
+        # No ignored versions: security updates can still cross minor/major
+        # boundaries and require an explicit baseline review if necessary.
+        self.assertNotIn("    ignore:", pip)
+        self.assertIn("applies-to: security-updates", pip)
+
     def test_numeric_pins_retain_python_311_compatible_series(self):
         # Newer NumPy/SciPy releases need 3.12 and must not silently raise
         # the worker baseline. Keep source tests and both workers aligned.

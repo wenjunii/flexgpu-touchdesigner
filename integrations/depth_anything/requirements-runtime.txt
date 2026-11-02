@@ -2,7 +2,7 @@
 # emulator. PyTorch/torchvision are installed separately from the official
 # CUDA wheel index by scripts/Initialize-DepthAnything.ps1.
 # NumPy 2.5+ requires Python 3.12; retain the shared Python 3.11 baseline.
-numpy==2.5.4
+numpy==2.4.6
 opencv-python==5.0.0.93
 # Pillow 13 contains the October 2026 security fixes and requires Python 3.11+.
 Pillow==13.0.0

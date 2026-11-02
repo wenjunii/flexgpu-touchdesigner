@@ -8,6 +8,23 @@ updates:
     schedule:
       interval: monthly
     open-pull-requests-limit: 1
+    # Numeric minor upgrades currently require Python 3.12. Allow only their
+    # patch updates until the shared 3.11 worker baseline is migrated.
+    # allow.update-types affects version updates, not security updates.
+    # Keep this direct-dependency inventory aligned with all three manifests.
+    allow:
+      - dependency-name: numpy
+        update-types: ['version-update:semver-patch']
+      - dependency-name: scipy
+        update-types: ['version-update:semver-patch']
+      - dependency-name: jsonschema
+      - dependency-name: pillow
+      - dependency-name: opencv-python
+      - dependency-name: huggingface-hub
+      - dependency-name: transformers
+      - dependency-name: safetensors
+      - dependency-name: matplotlib
+      - dependency-name: utils3d
     groups:
       routine-python:
         applies-to: version-updates
