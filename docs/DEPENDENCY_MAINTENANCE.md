@@ -5,12 +5,12 @@ model weights, or existing worker environments. It does not modify the 5090
 machine. Shared dependency pins apply only when a machine explicitly installs
 them; a Git pull is not a package upgrade.
 
-## October 2026 candidate pins
+## November 2026 candidate pins
 
 | Package | Pin | Scope |
 | --- | --- | --- |
 | Pillow | 13.0.0 | Source tests, MoGe-2, Depth Anything |
-| Transformers | 5.20.2 | Depth Anything sensor and geometry |
+| Transformers | 5.21.0 | Depth Anything sensor and geometry |
 | huggingface-hub | 2.3.0 | MoGe-2 and Depth Anything |
 | safetensors | 0.8.0 | Depth Anything |
 | NumPy | 2.4.6 | Source tests, MoGe-2, Depth Anything |
@@ -28,6 +28,16 @@ than disabling dependency security alerts. The newer Hub/OpenCV APIs and
 Transformers are still a coherent runtime upgrade: a source CI pass alone
 does not approve them for the working show.
 
+PR #29 repeated the incompatible numeric upgrades. Its repair retains the
+same numeric pins and advances only Transformers from 5.20.2 to 5.21.0.
+Routine NumPy/SciPy updates are now patch-only through Dependabot's
+[`allow.update-types`](https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference#update-types-allow).
+Other direct packages retain normal version updates. This option does not
+restrict security updates; no dependency/version ignore rules or alert
+dismissals are added. A security fix requiring newer Python must trigger a
+reviewed baseline migration, not an untested show-environment upgrade.
+The test suite keeps the allow-list aligned with every direct manifest pin.
+
 Candidate evidence on an RTX 3080 Ti Laptop (28 October 2026): fresh Python
 3.11 environments installed successfully; the Full source gate passed 495
 tests with four platform-specific skips. Both pinned models passed six
@@ -37,6 +47,18 @@ custom-generation consent regression passed. OpenCV 5 camera API symbols and
 synthetic resize were checked without opening a camera. No working environment
 was activated, no TOE was changed, and live sensor/visual/thermal/5090
 acceptance remains separate.
+
+PR #29 follow-up evidence (1 November 2026): the Full Python 3.11 source
+gate passed 503 tests with four platform-specific skips. A fresh isolated
+Depth Anything candidate installed with Transformers 5.21.0 and passed
+`pip check`, the exact-pin metadata audit, the custom-generation consent
+regression, and six offline CUDA inferences on the idle 3080 Ti Laptop.
+All three source sizes retained synchronized atlas RGB, the expected adaptive
+geometry dimensions, and nonempty positive finite depth, with one model load.
+The existing verified checkpoint was read locally; no model download, webcam,
+listener, TOE change, or working-environment activation occurred. MoGe's pins
+are unchanged from the October candidate; this follow-up did not rerun MoGe
+inference or certify live visuals, sensors, thermal behavior, or the 5090.
 
 Pillow 13 fixes the advisories affecting the previous image-library pin and
 requires Python 3.11+. See the [upstream release notes](https://pillow.readthedocs.io/en/stable/releasenotes/13.0.0.html).

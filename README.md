@@ -41,6 +41,12 @@ headset submission, SHARP, and Gaussian inference are user-supplied adapters.
   The dependency-free launcher still accepts Python 3.10 or TouchDesigner's
   bundled runtime for JSON; TOML configuration requires `tomllib` (3.11+).
 
+Dependency candidates retain Python 3.11-compatible NumPy/SciPy series;
+routine numeric updates are patch-only while security updates remain enabled.
+The Transformers 5.21.0 candidate is separate from installed show workers.
+See [isolated dependency maintenance](docs/DEPENDENCY_MAINTENANCE.md); pulling
+source does not upgrade either machine's environment or modify a working TOE.
+
 ## What is included
 
 ```text

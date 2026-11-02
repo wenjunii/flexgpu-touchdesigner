@@ -9,5 +9,5 @@ Pillow==13.0.0
 # Retains the custom-generation consent fix from 5.17.0; the offline smoke
 # verifies rejection before download. Keep compatible runtime pins together.
 huggingface-hub==2.3.0
-transformers==5.20.2
+transformers==5.21.0
 safetensors==0.8.0
