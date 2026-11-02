@@ -42,7 +42,9 @@ Normal inference never contacts Hugging Face.  It verifies the local model
 size and SHA-256 before `torch.load`, sets offline mode, and refuses a missing
 or changed checkpoint.
 
-The patched image runtime pins `Pillow==13.0.0` and requires Python 3.11+.
+The runtime candidate pins `huggingface-hub==2.4.0` and `Pillow==13.0.0`
+and requires Python 3.11+. Source synchronization does not upgrade the
+installed show environment; stage and validate a separate candidate first.
 The initializer rejects older base or existing environment interpreters before
 installing packages. MoGe is still installed with `--no-deps`: its upstream
 metadata includes optional application packages (Gradio, pipeline, trimesh,

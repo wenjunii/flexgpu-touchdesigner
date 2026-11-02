@@ -36,8 +36,8 @@ class DepthAnythingIntegrationSourceTests(unittest.TestCase):
         for marker in (
             "numpy==2.4.6",
             "opencv-python==5.0.0.93",
-            "huggingface-hub==2.3.0",
-            "transformers==5.21.0",
+            "huggingface-hub==2.4.0",
+            "transformers==5.22.0",
             "safetensors==0.8.0",
         ):
             self.assertIn(marker, requirements)
