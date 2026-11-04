@@ -209,6 +209,12 @@ machine-local. No CI result substitutes for a physical show check.
 
 ## Retire disposable test artifacts after verification
 
+Under this workspace's standing authorization in `AGENTS.md`, the agent performs
+this cleanup automatically at task completion without asking again for verified
+disposable task artifacts. The agent must still review exact targets and shared
+dependencies first. Uncertain files are kept for clarification, not guessed away.
+This is an agent-managed completion step, not an unattended deletion script.
+
 After a task is verified, review and retire superseded candidate environments,
 failed partial installs, one-off validation scripts, scratch copies, and completed
 installation archives that are known task artifacts. Age alone or absence from a
@@ -231,7 +237,8 @@ Inventory an explicitly named environment without changing it:
 This read-only helper verifies same-repository worktree identity, confines names
 to direct `.venv` children, rejects ancestor junctions, skips/reports child
 reparse points, and reports size, `pyvenv.cfg` identity, active-process and local
-configuration references. Current-checkout environments and explicit
+configuration references. Git-tracked content is reported and blocks staging
+retirement. Current-checkout environments and explicit
 `-KeepEnvironmentName` entries are marked `keep`. Unreferenced staging copies are
 only `requires_dependency_review`, never automatically safe to remove: saved TOE
 overrides, launch shortcuts, external users, and rollback needs still need review.

@@ -2,9 +2,10 @@
 .SYNOPSIS
 Read-only inventory of explicitly named test environments in a Git worktree.
 .DESCRIPTION
-Reports sizes, venv identity, active-process/config references, and keep flags.
+Reports sizes, venv identity, tracked files, process/config references, and keep flags.
 Never removes files, selects obsolete environments, or schedules cleanup.
 Absence of a reference is not proof of non-use: dependency review is required.
+Supports the agent-managed task-completion cleanup policy in AGENTS.md.
 #>
 #Requires -Version 5.1
 [CmdletBinding()]
@@ -74,6 +75,8 @@ foreach ($name in $names) {
     $cfg = Join-Path $path 'pyvenv.cfg'
     if (-not (Test-Path -LiteralPath $cfg -PathType Leaf)) { throw 'Target has no pyvenv.cfg identity.' }
     Assert-NoReparseAncestor $cfg
+    $tracked = @(& git -C $worktreeRoot ls-files -- ('.venv/' + $name))
+    if ($LASTEXITCODE -ne 0) { throw 'Unable to verify tracked-file protection.' }
     $bytes = [long]0; $files = [long]0; $reparse = [long]0
     $pending = New-Object 'System.Collections.Generic.Stack[System.IO.DirectoryInfo]'
     $pending.Push((New-Object IO.DirectoryInfo($path)))
@@ -96,11 +99,11 @@ foreach ($name in $names) {
         ($_.ExecutablePath -and $_.ExecutablePath.Replace('\', '/').ToLowerInvariant() -match $pattern)
     } | ForEach-Object { $_.ProcessId })
     $keep = ($worktreeRoot -eq $root) -or ($name -in $KeepEnvironmentName)
-    $classification = if ($keep) { 'keep' } elseif ($reparse -or $pids.Count -or $references.Count -or
+    $classification = if ($keep) { 'keep' } elseif ($tracked.Count -or $reparse -or $pids.Count -or $references.Count -or
         $processCheck -ne 'available') { 'blocked' } else { 'requires_dependency_review' }
     $items += [ordered]@{ name=$name; path=$path; bytes=$bytes; files=$files;
         pyvenv_cfg_sha256=(Get-FileHash -LiteralPath $cfg -Algorithm SHA256).Hash;
-        reparse_points=$reparse; process_ids=$pids; config_references=$references;
+        tracked_files=$tracked; reparse_points=$reparse; process_ids=$pids; config_references=$references;
         classification=$classification }
 }
 [ordered]@{ version='flexgpu-test-environment-inventory/v1'; mode='read_only';
