@@ -1484,6 +1484,14 @@ reduced, not zero. Their dynamic jobs are not controlled solely by `ci.yml`.
 For candidate worker validation, explicit per-launch acceptance, and rollback,
 see [dependency maintenance](docs/DEPENDENCY_MAINTENANCE.md).
 
+Superseded test copies can be retired after target/dependency review. The
+read-only `scripts/Get-TestEnvironmentInventory.ps1` reports explicit staging
+environments and reference/keep guards; it never deletes files or infers non-use
+from age. Keep the working environments, latest unactivated candidates, source
+tester, validation evidence, models, TOEs, MCP/library, and machine-local settings.
+Prefer recoverable Recycle Bin cleanup of verified disposable task artifacts;
+see [test-artifact retirement](docs/DEPENDENCY_MAINTENANCE.md#retire-disposable-test-artifacts-after-verification).
+
 Configuration files may contain arbitrary process commands. Treat downloaded
 or shared configurations as executable input: inspect them before using
 `-Start`. Shutdown records include process creation time, executable identity,
