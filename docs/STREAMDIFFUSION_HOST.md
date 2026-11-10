@@ -183,6 +183,11 @@ Smoothing defaults off. The native-resolution RGBA16F feedback blend uses a
 dimensions, delivery connection and smoothing changes. Timing follows actual
 filter cooks; extra inference frames are not forced. Both providers see the
 same filtered RGB before depth estimation, never color-only smoothing after it.
+**Generation Preview / OUT_RAW is intentionally unfiltered.** If **Send RGB to
+3D** is off and nothing requests `OUTPUT_ROUTE`, the filtered branch can remain
+idle; its last-cook frame and history weight do not prove a fault. Preview the
+public filtered `OUTPUT_ROUTE` or connect delivery to evaluate smoothing. The
+native RGB resolution is preserved; wall output resolution is independent.
 
 This can reduce flicker, but does not increase generation throughput or create
 true intermediate motion. Strong settings blur details, ghost moving subjects
@@ -228,15 +233,32 @@ pins, not an active AI-worker environment. Read-only TD structural gate:
 
 ```python
 import validate_streamdiffusion_host as validation
-print(validation.validate(op('/project1/flexgpu')))
+print(validation.validate(op('/project1/flexgpu'),
+    report_path=root/'runtime'/'validation'/'streamdiffusion-host-3080.json'))
 ```
+
+This gate is read-only: it checks feedback/preview/gate wiring, bounded history
+weight, route selection, shared provider input and Show Control value mirrors.
+It fails cleanly for absent/partial hosts and reports generator buttons as
+`external_validation_required`; a structural pass is not a generation test.
+It never inspects private descendants or pulses native controls. Reports and
+prompt/capture data remain local. The full, mutating `validate_show_controls`
+audit requires audio prompt following off first, and its PowerShell report
+checker now verifies the optional host's value, pulse **and status** inventory.
 
 Tests cover explicit delivery, safe mapped pulses, cold-start disconnection,
 missing-output blocking, epoch isolation, listener preservation, square/wide
 dimensions, smoothing and unchanged downstream routes. Structural or synthetic
-success is not real-imagery acceptance. The user deferred real generation for
-this upgrade. Native Start/Stop behavior, dynamic smoothing, both providers,
-single/triple walls, stereo, FPS/latency and thermal soak remain live gates.
+success is not real-imagery acceptance. The 3080 `.45` front end was checked live
+on November 10: real generation preview, automatic weighted audio cue changes,
+and 120 filtered frames with finite pixels and confirmed previous-frame
+blending. Smoothing was on at 50 ms; the 3D delivery switch stayed off. Temporary
+probes/captures were removed and the selected generator/audio settings were
+preserved. This does not validate every native button of every `.tox` version.
+For the following source/publication audit TouchDesigner was closed, and the
+user deferred fresh two-provider, single/triple-wall and stereo visuals.
+Native button compatibility, FPS/latency, physical inputs and thermal soak
+remain separate live gates.
 Desktop stereo does not prove headset VR readiness.
 
 Review and save a new incremented local TOE when accepted. Do not overwrite the

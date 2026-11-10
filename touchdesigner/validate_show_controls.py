@@ -424,6 +424,13 @@ def validate(
     adapter = _assert_operator(
         pipeline.op("SOURCES/STREAMDIFFUSION_ADAPTER"),
         PIPELINE_PATH + "/SOURCES/STREAMDIFFUSION_ADAPTER")
+    host = adapter.op("STREAMDIFFUSION_HOST")
+    if host is not None and bool(_value(host, "Followpodcast", False)):
+        raise RuntimeError(
+            "Turn off Follow Audio / Podcast Prompts before the mutating "
+            "show-control audit; it can change scene tables and does not "
+            "restore generator prompts. Use validate_streamdiffusion_host "
+            "for a read-only audit during generation.")
     completion = _assert_operator(
         pipeline.op("COMPLETION"), PIPELINE_PATH + "/COMPLETION")
     sensor = _assert_operator(
@@ -1348,6 +1355,15 @@ def validate(
                 "actual_top_dimensions_are_authoritative": True,
             },
         )
+    host_report = {"status": "not_installed"}
+    if adapter.op("STREAMDIFFUSION_HOST") is not None:
+        try:
+            import validate_streamdiffusion_host as host_validation
+        except ImportError:
+            from touchdesigner import validate_streamdiffusion_host as host_validation
+        host_report = host_validation.validate(_operator(ROOT_PATH, operator_lookup))
+        _record(checks, "streamdiffusion_host_structure", host_report["status"], "pass",
+                details={"checks": host_report["checks"], "generator_pulses_sent": False})
     failures = [item for item in checks if item["status"] != "pass"]
     all_restoration_failures = (
         list(restoration_failures)
@@ -1377,7 +1393,10 @@ def validate(
                 if adapter.op("STREAMDIFFUSION_HOST") is not None else [],
             "streamdiffusion_host_pulse": list(SD_HOST_PULSE_CONTROLS)
                 if adapter.op("STREAMDIFFUSION_HOST") is not None else [],
+            "streamdiffusion_host_status": list(SD_HOST_STATUS_CONTROLS)
+                if adapter.op("STREAMDIFFUSION_HOST") is not None else [],
         },
+        "streamdiffusion_host": host_report,
         "checks": checks,
         "restored": restored,
         "adapter_restored": adapter_restored,

@@ -9,6 +9,9 @@ the wrong GPU profile, and cooked wall or mosaic TOP dimensions that differ
 from the requested venue output. Actual TOP width and height are authoritative;
 this detects license-tier clamping even when resolution parameters still show
 1920 by 1080. It also requires the complete 121-control public inventory and
+the optional single-generator host's exact control/status inventory and wiring
+gate when installed. Generator start/stop/offload pulses are never inferred
+from a structural pass. It requires
 the default-off desktop VR head/hand rehearsal checks. This does not validate
 an OpenXR/OpenVR compositor or a physical headset.
 
@@ -143,6 +146,42 @@ if ($failedVrChecks.Count -gt 0) {
     )
 }
 
+$hostReportStatus = 'not_installed'
+$hostValues = @($result.controls.streamdiffusion_host_value)
+$hostPulses = @($result.controls.streamdiffusion_host_pulse)
+$hostStatuses = @($result.controls.streamdiffusion_host_status)
+if (($hostValues + $hostPulses + $hostStatuses | Where-Object { $null -ne $_ }).Count -gt 0) {
+    $expectedHostValues = @(
+        'Sdsource','Sdsmoothenabled','Sdsmoothms','Sdtoxfile','Sdpayload',
+        'Sdrgboutput','Sdfollowpodcast','Sdpromptformat','Sdpromptparameter',
+        'Sdseedparameter','Sdstartparameter','Sdstopparameter','Sdstreamenabled',
+        'Sdnoiseenabled','Sdnoisewidth','Sdnoiseheight','Sdnoiseseed'
+    )
+    $expectedHostPulses = @(
+        'Sdreset','Sdloadtox','Sdstart','Sdstop','Sdopencontrols',
+        'Sdopenpreview','Sdopennoisecontrols','Sdopennoisepreview','Sdoffload'
+    )
+    $expectedHostStatuses = @('Sdstatus','Sdstage','Sdoffloadstatus','Sdpromptstatus')
+    foreach ($inventory in @(
+        @{ actual = $hostValues; expected = $expectedHostValues },
+        @{ actual = $hostPulses; expected = $expectedHostPulses },
+        @{ actual = $hostStatuses; expected = $expectedHostStatuses }
+    )) {
+        if ($inventory.actual.Count -ne $inventory.expected.Count -or
+            @(Compare-Object $inventory.actual $inventory.expected).Count -ne 0) {
+            throw 'Single-generator host inventory is missing or stale; regenerate the live report.'
+        }
+    }
+    if ($result.streamdiffusion_host.version -ne 'flexgpu-streamdiffusion-host-validation/v1' -or
+        $result.streamdiffusion_host.status -ne 'pass' -or
+        $checksByName['streamdiffusion_host_structure'] -ne 'pass' -or
+        $result.streamdiffusion_host.complete_live_acceptance -ne $false -or
+        $result.streamdiffusion_host.generator_buttons -ne 'external_validation_required') {
+        throw 'Single-generator host structural gate failed or does not separate untested generator buttons.'
+    }
+    $hostReportStatus = 'structure_pass_buttons_not_tested'
+}
+
 [ordered]@{
     status = 'ok'
     acceptance_scope = 'public_control_mapping_and_output_dimensions'
@@ -159,4 +198,5 @@ if ($failedVrChecks.Count -gt 0) {
     headset_validation = 'not_performed'
     worker_buttons = $result.worker_buttons.status
     adapter_ui_buttons = $result.adapter_ui_buttons.status
+    streamdiffusion_host = $hostReportStatus
 } | ConvertTo-Json -Depth 5

@@ -248,7 +248,7 @@ cross-profile, or ambiguously named local files:
 # Run this separate pair only on the RTX 3080 workstation.
 .\scripts\Set-FlexShowLocalProject.ps1 `
   -Config .\config\local-moge2-3080.json `
-  -Project .\projects\FlexShow-moge2-embody-local-3080.27.toe `
+  -Project .\projects\FlexShow-moge2-embody-podcast-local-3080.45.toe `
   -ExpectedTier 3080ti_16gb `
   -WhatIf
 ```
@@ -1088,14 +1088,33 @@ save the TOE, and rejects 5090 projects. Save an accepted result as a new
 3080-tagged checkpoint. The legacy updater refuses a playlist-equipped adapter
 to avoid restoring the historical two-path setup.
 
-The accepted local 3080 checkpoint is
-`FlexShow-moge2-embody-podcast-local-3080.43.toe`. A cold-reopen audit retained
+The playlist/control baseline was
+`FlexShow-moge2-embody-podcast-local-3080.43.toe`. Its cold-reopen audit retained
 the 136-story edition, passed 2,598 playlist checks and 311 FlexGPU control
 checks, and confirmed seven 1920x1080 wall TOPs plus two 5760x1080 mosaics.
 Generated-image, physical-sensor, headset and thermal acceptance remain
-separate. The local launcher should target this 3080 checkpoint with
+separate. The current single-generator 3080 front-end checkpoint is
+`FlexShow-moge2-embody-podcast-local-3080.45.toe`: one selected private `.tox`,
+native noise controls and previews, public Stop Server/offload, weighted audio
+prompt forwarding, and optional temporal smoothing. On November 10, live audio
+cue handoff and a 120-frame smoothing probe passed with no operator/shader
+errors; the probe preserved settings and was removed. Smoothing was on at
+50 ms, while RGB delivery to 3D remained off. A fresh two-provider/single/triple
+visual audit, physical sensor/headset test, and thermal soak are **not** implied
+by those front-end checks and were deferred for this source/GitHub sync.
+The local launcher should target the latest accepted 3080 checkpoint with
 `Set-FlexShowLocalProject.ps1 -ExpectedTier 3080ti_16gb`; the working TOE and
 local config remain ignored. The migration and audit reject 5090 project names.
+
+For a read-only host wiring/control report, use
+`validate_streamdiffusion_host.validate()` inside the live TD Python namespace.
+The mutating full Show Control audit now refuses **Follow Audio / Podcast
+Prompts = On** so it cannot silently overwrite generator prompts while testing
+scene controls. Turn follow off deliberately before that audit; native
+Load/Start/Stop/Offload buttons still need separate live acceptance. The report
+checker verifies all optional host value, pulse and status controls, including
+audio sync status, without calling any of those buttons. See
+[the host audit procedure](docs/STREAMDIFFUSION_HOST.md#install-and-validate).
 
 If F1 reports that
 `/project1/flexgpu/INSTALLATION_OUT/window1` is missing, run
