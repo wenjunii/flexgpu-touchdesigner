@@ -652,6 +652,13 @@ class PublicSyncPolicyTests(unittest.TestCase):
         self.assertIn("'push', '--no-follow-tags', $Remote", source)
         self.assertIn('"HEAD:refs/heads/$branch"', source)
 
+    def test_public_scanner_waits_for_windows_launcher_and_preserves_json(self) -> None:
+        source = (ROOT / 'scripts' / 'Test-PublicSync.ps1').read_text(encoding='utf-8')
+        self.assertIn('$scanOutput = $InputText | & $python.Executable @arguments | Out-String', source)
+        self.assertIn('$scanOutput = & $python.Executable @arguments | Out-String', source)
+        self.assertIn('Write-Output $scanOutput.TrimEnd()', source)
+        self.assertGreater(source.index('$exitCode = $LASTEXITCODE'), source.index('| Out-String'))
+
 
 if __name__ == "__main__":
     unittest.main()
