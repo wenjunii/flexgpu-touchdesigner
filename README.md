@@ -447,9 +447,14 @@ Native noise settings are preserved on reinstall. A separate, explicit backup-ga
 retirement helper removes the old duplicated generator branch without deleting
 podcast audio/sequencing or changing the 5090 working copy. Normal installation
 never deletes private components or resurrects an explicitly retired branch.
-**Offload Generator (Stop Server)** now requests the selected generator's public
+**Offload Generator (Stop / Optional Remove)** requests the selected generator's public
 shutdown control, handles a paused TD timeline, and reports confirmed versus
-unconfirmed shutdown while retaining the loaded `.tox`. Known public SDTD
+unconfirmed shutdown. Optional **Remove Component After Confirmed Offload**
+clears only the selected inactive slot component after checking an accepted
+saved rollback TOE; source `.tox` files and models are never deleted. Stop
+always retains the component. Removal defaults off and is enabled explicitly
+for this 3080 workflow, not other machines. Choose the next `.tox` and Load;
+the file selection survives Offload and deferred UI callbacks. Known public SDTD
 Start/Stop mappings are filled when empty; no unrelated process is force-killed.
 For audio-driven imagery, enable **Follow Audio / Podcast Prompts**. The host
 auto-detects public StreamDiffusionTD prompt/seed blocks, keeps both weighted

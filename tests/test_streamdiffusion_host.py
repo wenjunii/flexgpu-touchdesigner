@@ -51,6 +51,10 @@ class Node:
     def store(self, key, value):
         self.storage[key] = value
 
+    def destroy(self):
+        self._parent.children.remove(self)
+        self.destroyed = True
+
 
 class PromptTable(Node):
     def __init__(self, parent, rows):
@@ -346,6 +350,149 @@ class StreamDiffusionHostTests(unittest.TestCase):
             runtime.request_offload(host, payload)
         self.assertEqual(runtime.offload_state(host, payload, 121), 'offload_unconfirmed')
         self.assertTrue(payload.par.Serveractive.eval())
+
+    def removal_fixture(self, directory):
+        host, payload = self.controlled_fixture()
+        host.par.Payload.val = payload.name
+        host.par.Offloadremove = Parameter(True)
+        backup = Path(directory) / 'show-3080.45.toe'
+        backup.write_bytes(b'test rollback fixture' * 128)
+        host.par.Offloadbackup = Parameter(str(backup))
+        host.par.Toxfile = Parameter('new-selected.tox')
+        host.store('offload_backup_folder', str(directory))
+        host.store('offload_project_name', 'show-3080.45.toe')
+        return host, payload, backup
+
+    def test_offload_removes_only_selected_component_after_both_flags_off(self):
+        with tempfile.TemporaryDirectory() as directory:
+            host, payload, backup = self.removal_fixture(directory)
+            other = Node('user_component', parent=payload.parent())
+            with mock.patch.object(runtime, 'disarm'), mock.patch.object(runtime, '_wake_shutdown_callbacks'):
+                runtime.request_offload(host, payload)
+            request = runtime._state(host)['offload']
+            now = request['requested_at']
+            self.assertEqual(runtime.offload_state(host, payload, now + 1), 'offloading')
+            payload.par.Serveractive.val = False
+            self.assertEqual(runtime.offload_state(host, payload, now + 2), 'offloading')
+            payload.par.Streamactive.val = False
+            self.assertEqual(runtime.offload_state(host, payload, now + 3), 'offloaded_removed')
+            self.assertTrue(payload.destroyed)
+            self.assertIn(other, other.parent().children)
+            self.assertIsNone(runtime.selected_payload(host))  # Never fall back to another component.
+            self.assertEqual(host.par.Toxfile.eval(), 'new-selected.tox')
+            self.assertTrue(backup.is_file())
+            self.assertEqual(runtime.offload_state(host, None, now + 4), 'offloaded_removed')
+            with mock.patch.object(runtime, 'disarm'):
+                runtime.request_offload(host, None)  # Already empty is idempotent.
+
+    def test_removal_requires_same_machine_saved_rollback_before_stop(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for case in ('missing', 'wrong_machine', 'outside_folder'):
+                host, payload, backup = self.removal_fixture(directory)
+                if case == 'missing':
+                    host.par.Offloadbackup.val = str(Path(directory) / 'missing.toe')
+                elif case == 'wrong_machine':
+                    host.store('offload_project_name', 'show-5090.71.toe')
+                else:
+                    host.store('offload_backup_folder', str(Path(directory) / 'other'))
+                with mock.patch.object(runtime, 'disarm'), self.assertRaises(ValueError):
+                    runtime.request_offload(host, payload)
+                self.assertEqual(payload.par.Stopstream.pulses, 0)
+                self.assertIn(payload, payload.parent().children)
+
+    def test_unconfirmed_offload_never_removes_component(self):
+        with tempfile.TemporaryDirectory() as directory:
+            host, payload, _ = self.removal_fixture(directory)
+            with mock.patch.object(runtime, 'disarm'), mock.patch.object(runtime, '_wake_shutdown_callbacks'):
+                runtime.request_offload(host, payload)
+            when = runtime._state(host)['offload']['requested_at']
+            self.assertEqual(runtime.offload_state(host, payload, when + 21), 'offload_unconfirmed')
+            self.assertIn(payload, payload.parent().children)
+            payload.par.Serveractive.isToggle = False
+            with mock.patch.object(runtime, 'disarm'), self.assertRaises(ValueError):
+                runtime.request_offload(host, payload)
+
+    def test_removal_rechecks_backup_and_protects_wired_consumers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for case in ('backup_changed', 'wired'):
+                host, payload, _ = self.removal_fixture(directory)
+                payload.par.Serveractive.val = payload.par.Streamactive.val = False
+                with mock.patch.object(runtime, 'disarm'):
+                    runtime.request_offload(host, payload)
+                if case == 'backup_changed':
+                    host.par.Offloadbackup.val = ''
+                else:
+                    payload.outputs = [Node('user_consumer')]
+                with self.assertRaises(ValueError):
+                    runtime.offload_state(host, payload, 1)
+                self.assertIn(payload, payload.parent().children)
+
+    def test_stop_never_removes_even_when_offload_removal_is_enabled(self):
+        host, payload = self.controlled_fixture()
+        host.par.Offloadremove = Parameter(True)
+        with mock.patch.object(runtime, 'disarm'), mock.patch.object(runtime, 'tick'), \
+                mock.patch.object(runtime, 'request_offload') as request:
+            runtime.pulse(host, 'Stop')
+        request.assert_called_once_with(host, payload, remove_component=False)
+
+    def test_cold_start_cancels_saved_pending_removal(self):
+        host, payload = self.controlled_fixture()
+        runtime._state(host)['offload'] = {'remove_component':True, 'path':payload.path}
+        with mock.patch.object(runtime, 'disarm'):
+            runtime.on_start(host)
+        self.assertNotIn('offload', runtime._state(host))
+        self.assertIn(payload, payload.parent().children)
+
+    def test_saved_removal_cannot_run_before_cold_start_callback(self):
+        host, payload = self.controlled_fixture()
+        payload.par.Serveractive.val = payload.par.Streamactive.val = False
+        runtime._state(host)['offload'] = {
+            'remove_component':True,'path':payload.path,'runtime_session':'previous-module'}
+        self.assertIsNone(runtime.offload_state(host, payload, 1))
+        self.assertIn(payload, payload.parent().children)
+        self.assertNotIn('offload', runtime._state(host))
+
+    def mirror_fixture(self):
+        pipeline = Node('pipeline')
+        sources = Node('sources', parent=pipeline)
+        adapter = Node('adapter', parent=sources)
+        host = Node('host', parent=adapter)
+        slot = Node('PAYLOAD_SLOT', parent=host)
+        show = Node('SHOW_CONTROL', parent=pipeline)
+        for owner, name in ((host,'Toxfile'), (show,'Sdtoxfile')):
+            setattr(owner.par, name, Parameter('old.tox'))
+        host.par.Payload, host.par.Status = Parameter(''), Parameter('')
+        return host, show, slot
+
+    def test_frame_sync_preserves_file_selection_before_deferred_callback(self):
+        host, show, _ = self.mirror_fixture()
+        runtime._sync_show(host)
+        show.par.Sdtoxfile.val = 'new.tox'
+        runtime._accept_pending_show_edits(host)
+        runtime._sync_show(host)
+        self.assertEqual(host.par.Toxfile.eval(), 'new.tox')
+        self.assertEqual(show.par.Sdtoxfile.eval(), 'new.tox')
+        host.par.Toxfile.val = 'host-edit.tox'
+        runtime._accept_pending_show_edits(host)
+        runtime._sync_show(host)
+        self.assertEqual(show.par.Sdtoxfile.eval(), 'host-edit.tox')
+
+    def test_load_reads_clicked_panels_current_file_without_waiting_for_value_callback(self):
+        host, show, slot = self.mirror_fixture()
+        runtime._sync_show(host)
+        pulse = Parameter(pulse=True)
+        pulse.name = 'Sdloadtox'
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'new.tox'
+            path.write_bytes(b'fixture-not-a-real-tox')
+            show.par.Sdtoxfile.val = str(path)
+            slot.loadTox = mock.Mock(side_effect=lambda *a, **kw: Node('new_version', parent=slot))
+            with mock.patch.object(runtime, 'disarm'), mock.patch.object(runtime, 'reset'), \
+                    mock.patch.object(runtime, 'tick'):
+                runtime.control_changed(host, pulse, True)
+            slot.loadTox.assert_called_once_with(str(path.resolve()), unwired=True)
+            self.assertEqual(host.par.Payload.eval(), 'new_version')
+            self.assertEqual(runtime._state(host)['loaded_tox']['path'], str(path.resolve()))
 
     def test_offload_temporarily_runs_callbacks_and_restores_paused_frame(self):
         host, _ = self.fixture()

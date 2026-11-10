@@ -15,7 +15,7 @@ VALUE_CONTROLS = ('Sdsource', 'Sdsmoothenabled', 'Sdsmoothms', 'Sdtoxfile',
                   'Sdpayload', 'Sdrgboutput', 'Sdfollowpodcast', 'Sdpromptformat', 'Sdpromptparameter',
                   'Sdseedparameter', 'Sdstartparameter', 'Sdstopparameter',
                   'Sdstreamenabled', 'Sdnoiseenabled', 'Sdnoisewidth',
-                  'Sdnoiseheight', 'Sdnoiseseed')
+                  'Sdnoiseheight', 'Sdnoiseseed', 'Sdoffloadremove', 'Sdoffloadbackup')
 PULSE_CONTROLS = ('Sdreset', 'Sdloadtox', 'Sdstart', 'Sdstop', 'Sdopencontrols',
                   'Sdopenpreview', 'Sdopennoisecontrols', 'Sdopennoisepreview')
 PULSE_CONTROLS += ('Sdoffload',)
@@ -34,7 +34,7 @@ HOST_CALLBACKS = '''def onFrameStart(frame):
     return
 
 def onStart():
-    parent().op('host_runtime').module.disarm(parent(), 'project reopened')
+    parent().op('host_runtime').module.on_start(parent())
     return
 '''
 PARAM_CALLBACKS = '''def onValueChange(par, prev):
@@ -129,6 +129,10 @@ def install(root=None):
     report = rp.BuildReport()
     host = rp._ensure(adapter, 'baseCOMP', HOST_NAME, report)
     host.store('managed_owner', OWNER)
+    project = rp._symbol('project')
+    if project is not None:
+        host.store('offload_backup_folder', str(project.folder))
+        host.store('offload_project_name', str(project.name))
     right_edge = max((float(x.nodeX) + float(x.nodeWidth) for x in adapter.children if x != host), default=0)
     rp._style(host, right_edge + 300, 600, (0.15, 0.45, 0.55),
               'Stable RGB host; drop private tox in PAYLOAD_SLOT; smoothing defaults OFF', 300, 125)
@@ -151,7 +155,9 @@ def install(root=None):
         ('Str', 'Stopparameter', '', None, 'Public Stop Pulse Parameter'),
         ('Pulse', 'Start', False, None, '2. Start Generator (Mapped Pulse)'),
         ('Pulse', 'Stop', False, None, 'Stop Generator / Disconnect RGB'),
-        ('Pulse', 'Offload', False, None, 'Offload Generator (Stop Server)'),
+        ('Toggle', 'Offloadremove', False, None, 'Remove Component After Confirmed Offload'),
+        ('File', 'Offloadbackup', '', None, 'Saved TOE Rollback for Component Removal'),
+        ('Pulse', 'Offload', False, None, 'Offload Generator (Stop / Optional Remove)'),
         ('Str', 'Offloadstatus', 'not_requested', None, 'Offload Status'),
         ('Toggle', 'Streamenabled', False, None, '3. Send RGB to 3D'),
         ('Toggle', 'Smoothenabled', False, None, 'Temporal Smoothing'),
@@ -283,8 +289,11 @@ def install(root=None):
              'Noise Controls opens the real Noise TOP parameter window; all native '
              'settings are preserved on reinstall. Noise Input Preview opens OUT_INPUT.\n'
              'Offload disconnects delivery and requests the verified public Stop Server '
-             'pulse. The selected .tox remains loaded. A paused timeline is temporarily '
-             'advanced for shutdown callbacks, then restored. No process is force-killed.\n'
+             'pulse. Optional component removal requires both activity flags OFF and an '
+             'accepted saved TOE rollback in this project folder. It removes only the '
+             'selected inactive slot component, never the .tox file. Stop retains it. '
+             'A paused timeline is temporarily advanced for shutdown callbacks, then '
+             'restored. No process is force-killed; pending removals are cancelled on reopen.\n'
              'Drop a trusted private .tox inside PAYLOAD_SLOT. Select its direct child '
              'name and public RGB TOP (relative to that component).\n'
              'Load Selected Generator refuses an occupied slot and never deletes an existing version. '

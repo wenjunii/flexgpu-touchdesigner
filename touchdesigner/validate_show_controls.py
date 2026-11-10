@@ -29,7 +29,7 @@ SD_HOST_VALUE_CONTROLS = (
     "Sdsource", "Sdsmoothenabled", "Sdsmoothms", "Sdtoxfile", "Sdpayload",
     "Sdrgboutput", "Sdfollowpodcast", "Sdpromptformat", "Sdpromptparameter", "Sdseedparameter",
     "Sdstartparameter", "Sdstopparameter", "Sdstreamenabled", "Sdnoiseenabled",
-    "Sdnoisewidth", "Sdnoiseheight", "Sdnoiseseed",
+    "Sdnoisewidth", "Sdnoiseheight", "Sdnoiseseed", "Sdoffloadremove", "Sdoffloadbackup",
 )
 SD_HOST_PULSE_CONTROLS = ("Sdreset", "Sdloadtox", "Sdstart", "Sdstop", "Sdopencontrols",
                           "Sdopenpreview", "Sdopennoisecontrols", "Sdopennoisepreview")
