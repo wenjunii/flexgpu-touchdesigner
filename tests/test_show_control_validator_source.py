@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import json
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -195,6 +199,75 @@ class ShowControlValidatorSourceTests(unittest.TestCase):
             self.assertIn(marker, source)
         for forbidden in ("Stop-Process", "Start-Process", "git "):
             self.assertNotIn(forbidden, source)
+
+    def test_host_audit_keeps_status_inventory_and_untested_buttons_explicit(self) -> None:
+        source = REPORT_CHECKER_PATH.read_text(encoding="utf-8-sig")
+        for marker in ('streamdiffusion_host_status', 'Sdpromptstatus', 'Sdoffloadstatus',
+                       'streamdiffusion_host_structure', 'structure_pass_buttons_not_tested',
+                       'external_validation_required'):
+            self.assertIn(marker, source)
+        self.assertIn('"streamdiffusion_host_status": list(SD_HOST_STATUS_CONTROLS)', self.source)
+        self.assertIn('Turn off Follow Audio / Podcast Prompts', self.source)
+        self.assertLess(self.source.index('Turn off Follow Audio / Podcast Prompts'),
+                        self.source.index('snapshot = _snapshot(control, VALUE_CONTROLS)'))
+
+    def report_fixture(self, host=True):
+        vr_checks = ('Experience_vr_enabled','Experience_render_vr_enabled','Vrinputsource',
+                     'Vrhandenabled','Vrhandgain_shader','Vrleft_eye_dimensions',
+                     'Vrright_eye_dimensions','Resetvrheadpose_Vrheadxmetres',
+                     'Resetvrhands_Vrlefthandxmetres','Experience_installation_vr_disabled')
+        controls = {'value':list(self.module.VALUE_CONTROLS),
+                    'pulse':list(self.module.PULSE_CONTROLS),
+                    'status':list(self.module.STATUS_CONTROLS)}
+        for key, values in (('value',self.module.SD_HOST_VALUE_CONTROLS),
+                            ('pulse',self.module.SD_HOST_PULSE_CONTROLS),
+                            ('status',self.module.SD_HOST_STATUS_CONTROLS)):
+            controls['streamdiffusion_host_' + key] = list(values) if host else []
+        return {'version':'flexgpu-show-controls-validation/v2','profile':'3080ti_16gb',
+                'status':'pass','summary':{'pass':311,'fail':0,'restoration_failures':0},
+                'controls':controls,'checks':[{'name':n,'status':'pass'} for n in
+                    vr_checks + (('streamdiffusion_host_structure',) if host else ())],
+                'output_dimensions':{'status':'pass','wall_width':1920,'wall_height':1080},
+                'worker_buttons':{'status':'external_validation_required'},
+                'adapter_ui_buttons':{'status':'external_validation_required'},
+                'streamdiffusion_host':{'version':'flexgpu-streamdiffusion-host-validation/v1',
+                    'status':'pass','complete_live_acceptance':False,
+                    'generator_buttons':'external_validation_required'}}
+
+    def run_report_checker(self, report):
+        shell = shutil.which('pwsh') or shutil.which('powershell')
+        if shell is None:
+            self.skipTest('PowerShell is unavailable')
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'report.json'
+            path.write_text(json.dumps(report), encoding='utf-8')
+            return subprocess.run([shell, '-NoLogo', '-NoProfile', '-NonInteractive',
+                                   '-File', str(REPORT_CHECKER_PATH), '-Report', str(path)],
+                                  capture_output=True, text=True, timeout=30, check=False)
+
+    def test_report_checker_accepts_optional_host_and_legacy_without_host(self) -> None:
+        for installed in (True, False):
+            with self.subTest(host=installed):
+                result = self.run_report_checker(self.report_fixture(installed))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse(json.loads(result.stdout)['complete_live_acceptance'])
+
+    def test_report_checker_rejects_stale_host_inventory(self) -> None:
+        report = self.report_fixture()
+        report['controls'].pop('streamdiffusion_host_status')
+        result = self.run_report_checker(report)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('inventory is missing or stale', result.stderr)
+
+    def test_report_checker_rejects_failed_host_or_overclaimed_acceptance(self) -> None:
+        for field, value in (('status','fail'), ('complete_live_acceptance',True),
+                             ('generator_buttons','pass')):
+            with self.subTest(field=field):
+                report = self.report_fixture()
+                report['streamdiffusion_host'][field] = value
+                result = self.run_report_checker(report)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('structural gate failed', result.stderr)
 
 
 if __name__ == "__main__":

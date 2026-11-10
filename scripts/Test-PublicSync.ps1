@@ -78,13 +78,18 @@ if ($hadNativePreference) {
 }
 try {
     $ErrorActionPreference = 'Continue'
+    # An output pipeline waits for Windows GUI-subsystem Python launchers too.
+    # Keep JSON/text on the success stream for callers; Out-Host would lose it.
     if ($hasInputText) {
-        $InputText | & $python.Executable @arguments
+        $scanOutput = $InputText | & $python.Executable @arguments | Out-String
     }
     else {
-        & $python.Executable @arguments
+        $scanOutput = & $python.Executable @arguments | Out-String
     }
     $exitCode = $LASTEXITCODE
+    if (-not [string]::IsNullOrWhiteSpace($scanOutput)) {
+        Write-Output $scanOutput.TrimEnd()
+    }
 }
 finally {
     $ErrorActionPreference = $previousErrorActionPreference

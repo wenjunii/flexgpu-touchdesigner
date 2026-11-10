@@ -25,6 +25,21 @@ PIPELINE_PATH = ROOT_PATH + "/WORKING_PIPELINE"
 CONTROL_PATH = PIPELINE_PATH + "/SHOW_CONTROL"
 REPORT_VERSION = "flexgpu-show-controls-validation/v2"
 
+SD_HOST_VALUE_CONTROLS = (
+    "Sdsource", "Sdsmoothenabled", "Sdsmoothms", "Sdtoxfile", "Sdpayload",
+    "Sdrgboutput", "Sdfollowpodcast", "Sdpromptformat", "Sdpromptparameter", "Sdseedparameter",
+    "Sdstartparameter", "Sdstopparameter", "Sdstreamenabled", "Sdnoiseenabled",
+    "Sdnoisewidth", "Sdnoiseheight", "Sdnoiseseed",
+)
+SD_HOST_PULSE_CONTROLS = ("Sdreset", "Sdloadtox", "Sdstart", "Sdstop", "Sdopencontrols",
+                          "Sdopenpreview", "Sdopennoisecontrols", "Sdopennoisepreview")
+SD_HOST_PULSE_CONTROLS += ("Sdoffload",)
+SD_HOST_STATUS_CONTROLS = ("Sdstatus", "Sdstage", "Sdoffloadstatus", "Sdpromptstatus")
+RETIRED_ADAPTER_COLOR_CONTROLS = (
+    "Colorenabled", "Brightness", "Contrast", "Gamma", "Blacklevel", "Opacity",
+    "Hue", "Saturation", "Value", "Resetcolor",
+)
+
 OUTPUT_DIMENSION_TARGETS = (
     ("OUT_INSTALLATION", 1),
     ("OUT_TRIPLE_WRAP_LEFT", 1),
@@ -409,6 +424,13 @@ def validate(
     adapter = _assert_operator(
         pipeline.op("SOURCES/STREAMDIFFUSION_ADAPTER"),
         PIPELINE_PATH + "/SOURCES/STREAMDIFFUSION_ADAPTER")
+    host = adapter.op("STREAMDIFFUSION_HOST")
+    if host is not None and bool(_value(host, "Followpodcast", False)):
+        raise RuntimeError(
+            "Turn off Follow Audio / Podcast Prompts before the mutating "
+            "show-control audit; it can change scene tables and does not "
+            "restore generator prompts. Use validate_streamdiffusion_host "
+            "for a read-only audit during generation.")
     completion = _assert_operator(
         pipeline.op("COMPLETION"), PIPELINE_PATH + "/COMPLETION")
     sensor = _assert_operator(
@@ -498,6 +520,9 @@ def validate(
         custom_names = set(_custom_parameter_names(control))
         expected_names = set(
             VALUE_CONTROLS + PULSE_CONTROLS + STATUS_CONTROLS)
+        if adapter.op("STREAMDIFFUSION_HOST") is not None:
+            expected_names.update(SD_HOST_VALUE_CONTROLS + SD_HOST_PULSE_CONTROLS +
+                                  SD_HOST_STATUS_CONTROLS)
         _record(
             checks, "public_control_inventory",
             sorted(custom_names), sorted(expected_names),
@@ -546,6 +571,12 @@ def validate(
                     ("Hue", 0.08),
                     ("Saturation", 0.82),
                     ("Value", 0.93)):
+                source_host = adapter.op("STREAMDIFFUSION_HOST")
+                if (source_host is not None and source_host.fetch('legacy_retired', False)
+                        and name in RETIRED_ADAPTER_COLOR_CONTROLS):
+                    _record(checks, 'adapter_' + name + '_retired_disabled',
+                            not bool(_parameter(adapter_show_control, name).enable), True)
+                    continue
                 _set(adapter_show_control, name, test_value)
                 _record(
                     checks, "adapter_" + name,
@@ -1324,6 +1355,15 @@ def validate(
                 "actual_top_dimensions_are_authoritative": True,
             },
         )
+    host_report = {"status": "not_installed"}
+    if adapter.op("STREAMDIFFUSION_HOST") is not None:
+        try:
+            import validate_streamdiffusion_host as host_validation
+        except ImportError:
+            from touchdesigner import validate_streamdiffusion_host as host_validation
+        host_report = host_validation.validate(_operator(ROOT_PATH, operator_lookup))
+        _record(checks, "streamdiffusion_host_structure", host_report["status"], "pass",
+                details={"checks": host_report["checks"], "generator_pulses_sent": False})
     failures = [item for item in checks if item["status"] != "pass"]
     all_restoration_failures = (
         list(restoration_failures)
@@ -1349,7 +1389,14 @@ def validate(
             "status": list(STATUS_CONTROLS),
             "adapter_value": list(ADAPTER_VALUE_CONTROLS),
             "adapter_pulse": list(ADAPTER_PULSE_CONTROLS),
+            "streamdiffusion_host_value": list(SD_HOST_VALUE_CONTROLS)
+                if adapter.op("STREAMDIFFUSION_HOST") is not None else [],
+            "streamdiffusion_host_pulse": list(SD_HOST_PULSE_CONTROLS)
+                if adapter.op("STREAMDIFFUSION_HOST") is not None else [],
+            "streamdiffusion_host_status": list(SD_HOST_STATUS_CONTROLS)
+                if adapter.op("STREAMDIFFUSION_HOST") is not None else [],
         },
+        "streamdiffusion_host": host_report,
         "checks": checks,
         "restored": restored,
         "adapter_restored": adapter_restored,

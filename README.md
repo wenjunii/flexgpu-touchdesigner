@@ -248,7 +248,7 @@ cross-profile, or ambiguously named local files:
 # Run this separate pair only on the RTX 3080 workstation.
 .\scripts\Set-FlexShowLocalProject.ps1 `
   -Config .\config\local-moge2-3080.json `
-  -Project .\projects\FlexShow-moge2-embody-local-3080.27.toe `
+  -Project .\projects\FlexShow-moge2-embody-podcast-local-3080.45.toe `
   -ExpectedTier 3080ti_16gb `
   -WhatIf
 ```
@@ -425,6 +425,39 @@ replacement and feedback-reset sequence.
 
 For the lower-latency generated-world path, keep StreamDiffusionTD as the RGB
 producer and add the external MoGe-2 bridge to an ignored working `.toe`.
+
+The optional **single-generator front end** uses a clear sequence: select/load a
+trusted local StreamDiffusion `.tox`, configure/run it and preview `OUT_RAW`, then
+enable **Send RGB to 3D**. Only one selected generator is needed. Normal installs
+preserve previous components; the explicitly retired 3080 working copy removes
+the old dual branch and uses a saved TOE backup for rollback, not live A/B nodes.
+Delivery and temporal smoothing default off. Both geometry providers receive the
+same gated RGB. Pausing delivery keeps listeners available without sending
+placeholder frames, and old-connection results cannot revive. The
+**StreamDiffusion** Show Control tab exposes native generator controls, explicit
+Start/Stop mappings and pipeline stage/status. No model is downloaded or started
+by installation. See
+[docs/STREAMDIFFUSION_HOST.md](docs/STREAMDIFFUSION_HOST.md) for installation,
+drop-slot workflow, compatibility limits, and the separate live acceptance gate.
+The host also supplies a configurable Noise TOP to the generator's public TOP
+input zero, with `OUT_INPUT` preview. The StreamDiffusion tab has floating
+Generation Preview, native Noise Controls and Noise Input Preview buttons;
+previewing is independent of Send RGB to 3D and never starts generation.
+Native noise settings are preserved on reinstall. A separate, explicit backup-gated 3080
+retirement helper removes the old duplicated generator branch without deleting
+podcast audio/sequencing or changing the 5090 working copy. Normal installation
+never deletes private components or resurrects an explicitly retired branch.
+**Offload Generator (Stop Server)** now requests the selected generator's public
+shutdown control, handles a paused TD timeline, and reports confirmed versus
+unconfirmed shutdown while retaining the loaded `.tox`. Known public SDTD
+Start/Stop mappings are filled when empty; no unrelated process is force-killed.
+For audio-driven imagery, enable **Follow Audio / Podcast Prompts**. The host
+auto-detects public StreamDiffusionTD prompt/seed blocks, keeps both weighted
+audio-crossfade layers in the single generator, and reports **Audio Prompt Sync
+Status**. Forwarding also works before RGB delivery to 3D; it never starts the
+generator. Manual prompt mode remains available, and other versions can use
+explicit simple Prompt/Seed mappings.
+
 [docs/MOGE2_LIVE.md](docs/MOGE2_LIVE.md) gives the exact offline gate,
 default-off installer, local 3080 startup order, mock/real worker commands, and
 one-/two-GPU network settings. The worker never imports into TouchDesigner and
@@ -1055,14 +1088,33 @@ save the TOE, and rejects 5090 projects. Save an accepted result as a new
 3080-tagged checkpoint. The legacy updater refuses a playlist-equipped adapter
 to avoid restoring the historical two-path setup.
 
-The accepted local 3080 checkpoint is
-`FlexShow-moge2-embody-podcast-local-3080.43.toe`. A cold-reopen audit retained
+The playlist/control baseline was
+`FlexShow-moge2-embody-podcast-local-3080.43.toe`. Its cold-reopen audit retained
 the 136-story edition, passed 2,598 playlist checks and 311 FlexGPU control
 checks, and confirmed seven 1920x1080 wall TOPs plus two 5760x1080 mosaics.
 Generated-image, physical-sensor, headset and thermal acceptance remain
-separate. The local launcher should target this 3080 checkpoint with
+separate. The current single-generator 3080 front-end checkpoint is
+`FlexShow-moge2-embody-podcast-local-3080.45.toe`: one selected private `.tox`,
+native noise controls and previews, public Stop Server/offload, weighted audio
+prompt forwarding, and optional temporal smoothing. On November 10, live audio
+cue handoff and a 120-frame smoothing probe passed with no operator/shader
+errors; the probe preserved settings and was removed. Smoothing was on at
+50 ms, while RGB delivery to 3D remained off. A fresh two-provider/single/triple
+visual audit, physical sensor/headset test, and thermal soak are **not** implied
+by those front-end checks and were deferred for this source/GitHub sync.
+The local launcher should target the latest accepted 3080 checkpoint with
 `Set-FlexShowLocalProject.ps1 -ExpectedTier 3080ti_16gb`; the working TOE and
 local config remain ignored. The migration and audit reject 5090 project names.
+
+For a read-only host wiring/control report, use
+`validate_streamdiffusion_host.validate()` inside the live TD Python namespace.
+The mutating full Show Control audit now refuses **Follow Audio / Podcast
+Prompts = On** so it cannot silently overwrite generator prompts while testing
+scene controls. Turn follow off deliberately before that audit; native
+Load/Start/Stop/Offload buttons still need separate live acceptance. The report
+checker verifies all optional host value, pulse and status controls, including
+audio sync status, without calling any of those buttons. See
+[the host audit procedure](docs/STREAMDIFFUSION_HOST.md#install-and-validate).
 
 If F1 reports that
 `/project1/flexgpu/INSTALLATION_OUT/window1` is missing, run
