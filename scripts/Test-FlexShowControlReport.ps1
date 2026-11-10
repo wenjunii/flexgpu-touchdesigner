@@ -155,7 +155,8 @@ if (($hostValues + $hostPulses + $hostStatuses | Where-Object { $null -ne $_ }).
         'Sdsource','Sdsmoothenabled','Sdsmoothms','Sdtoxfile','Sdpayload',
         'Sdrgboutput','Sdfollowpodcast','Sdpromptformat','Sdpromptparameter',
         'Sdseedparameter','Sdstartparameter','Sdstopparameter','Sdstreamenabled',
-        'Sdnoiseenabled','Sdnoisewidth','Sdnoiseheight','Sdnoiseseed'
+        'Sdnoiseenabled','Sdnoisewidth','Sdnoiseheight','Sdnoiseseed',
+        'Sdoffloadremove','Sdoffloadbackup'
     )
     $expectedHostPulses = @(
         'Sdreset','Sdloadtox','Sdstart','Sdstop','Sdopencontrols',

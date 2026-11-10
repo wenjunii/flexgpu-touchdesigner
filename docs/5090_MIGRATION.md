@@ -1,5 +1,11 @@
 # 5090 workstation migration
 
+For an **existing** 4090/5090 installation receiving the new single-generator
+host, follow [the targeted host upgrade](STREAMDIFFUSION_HOST_UPGRADE.md).
+Preserve the destination's latest local TOE and settings; do not replace them
+with the 3080 `.46` or rerun workstation initialization. The checklist below is
+for original/new-workstation bootstrap; dated checkpoint records are historical.
+
 This checklist moves an accepted FlexGPU working project to an RTX 5090 PC
 without publishing private components, credentials, model weights, captures,
 or machine-specific runtime state.
@@ -68,12 +74,11 @@ on the 5090; upgrade one layer at a time after it passes.
 git clone https://github.com/wenjunii/flexgpu-touchdesigner.git
 cd .\flexgpu-touchdesigner
 git fetch --all --prune
-git checkout codex/v1-2-production-foundation
-git pull --ff-only
+git switch main
+git pull --ff-only origin main
 ```
 
-If the publication branch has been merged, check out the repository's default
-branch instead. Verify the public tree before adding private files:
+Use the merged public default branch. Verify the public tree before adding private files:
 
 ```powershell
 .\scripts\Test-PublicSync.ps1 -Scope Both -SelfTest -ExitWithCode

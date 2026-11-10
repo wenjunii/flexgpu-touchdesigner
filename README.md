@@ -248,7 +248,7 @@ cross-profile, or ambiguously named local files:
 # Run this separate pair only on the RTX 3080 workstation.
 .\scripts\Set-FlexShowLocalProject.ps1 `
   -Config .\config\local-moge2-3080.json `
-  -Project .\projects\FlexShow-moge2-embody-podcast-local-3080.45.toe `
+  -Project .\projects\FlexShow-moge2-embody-podcast-local-3080.46.toe `
   -ExpectedTier 3080ti_16gb `
   -WhatIf
 ```
@@ -262,7 +262,7 @@ Stop the old managed runtime before retargeting when its manifest still owns a
 live TouchDesigner process. Preview `Start-FlexShow.ps1` afterward and confirm
 the selected GPU, tier, TouchDesigner build, and TOE before adding `-Start`.
 
-### Keep 3080 and 5090 work separate
+### Keep 3080, 4090 and 5090 work separate
 
 The tracked branch is shared source code, not a machine image. Each computer
 must keep a different ignored configuration, working TOE name, GPU UUID, and
@@ -271,6 +271,7 @@ runtime directory. A safe naming convention is:
 | Computer | Worker profile | Ignored configuration | Ignored working TOE pattern |
 | --- | --- | --- | --- |
 | 3080 Ti Laptop 16 GB | `3080ti_16gb` | `config/local-3080*.json` | `projects/*-3080*.toe` |
+| RTX 4090 24 GB | `4090` | `config/local-4090*.json` | `projects/*-4090*.toe` |
 | RTX 5090 32 GB | `5090` | `config/local-5090*.json` | `projects/*-5090*.toe` |
 
 Generate each local configuration on its own computer. Never copy or commit
@@ -278,13 +279,21 @@ either local JSON file because it contains that computer's absolute project
 path and GPU UUID. Never open the 3080 working TOE as the 5090 save target, or
 vice versa. Git intentionally ignores all of these local files.
 
-The currently identified private checkpoints are
-`FlexShow-moge2-embody-local-3080.28.toe` on the 3080 and
-`FlexShow-moge2-embody-podcast-local-5090.71.toe` on the 5090. They are
-independent working files, not Git artifacts or interchangeable release
-versions. The 5090 checkpoint combines the FlexGPU and podcast networks and
-has the licensed private StreamDiffusionTD component connected; the component,
-audio media, and its licence remain local and untracked.
+The current clean 3080 checkpoint is
+`FlexShow-moge2-embody-podcast-local-3080.46.toe`, with an empty/offloaded
+single-generator slot. Historical 5090 checkpoints such as `.71` do not identify
+the latest file on another PC. Use each destination's own latest accepted TOE.
+These files are not Git artifacts or interchangeable release versions; private
+components, audio media and licences remain local and untracked.
+
+To bring the new host, TOX selection, previews, smoothing, audio prompt routing
+and confirmed offload controls to an existing destination, follow the
+[cross-machine host upgrade](docs/STREAMDIFFUSION_HOST_UPGRADE.md). Its read-only
+PowerShell preflight and default-dry-run TD helper check all three identities.
+Only the optional host is installed; no full world rebuild, model-environment
+upgrade, private-component deletion or automatic save is performed. The 4090
+and 5090 upgrade/visual steps remain destination-local and have not been run
+from this 3080 checkout.
 
 The generated-geometry worker profile is mandatory and checked against the
 selected physical GPU before a real worker starts. The start wrappers also
@@ -447,9 +456,14 @@ Native noise settings are preserved on reinstall. A separate, explicit backup-ga
 retirement helper removes the old duplicated generator branch without deleting
 podcast audio/sequencing or changing the 5090 working copy. Normal installation
 never deletes private components or resurrects an explicitly retired branch.
-**Offload Generator (Stop Server)** now requests the selected generator's public
+**Offload Generator (Stop / Optional Remove)** requests the selected generator's public
 shutdown control, handles a paused TD timeline, and reports confirmed versus
-unconfirmed shutdown while retaining the loaded `.tox`. Known public SDTD
+unconfirmed shutdown. Optional **Remove Component After Confirmed Offload**
+clears only the selected inactive slot component after checking an accepted
+saved rollback TOE; source `.tox` files and models are never deleted. Stop
+always retains the component. Removal defaults off and is enabled explicitly
+for this 3080 workflow, not other machines. Choose the next `.tox` and Load;
+the file selection survives Offload and deferred UI callbacks. Known public SDTD
 Start/Stop mappings are filled when empty; no unrelated process is force-killed.
 For audio-driven imagery, enable **Follow Audio / Podcast Prompts**. The host
 auto-detects public StreamDiffusionTD prompt/seed blocks, keeps both weighted

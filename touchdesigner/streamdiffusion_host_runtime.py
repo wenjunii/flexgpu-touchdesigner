@@ -12,6 +12,12 @@ import time
 import uuid
 
 
+# Never replay a serialized removal request, even if a parameter callback runs
+# before onStart during project loading. Each module compilation gets a fresh
+# token; a serialized request can only retain the old value.
+RUNTIME_SESSION = uuid.uuid4().hex
+
+
 CONTROL_MAP = {
     "Sdsource": "Source", "Sdsmoothenabled": "Smoothenabled",
     "Sdsmoothms": "Smoothms", "Sdtoxfile": "Toxfile",
@@ -23,6 +29,7 @@ CONTROL_MAP = {
     "Sdstreamenabled": "Streamenabled",
     "Sdnoiseenabled": "Noiseenabled", "Sdnoisewidth": "Noisewidth",
     "Sdnoiseheight": "Noiseheight", "Sdnoiseseed": "Noiseseed",
+    "Sdoffloadremove": "Offloadremove", "Sdoffloadbackup": "Offloadbackup",
 }
 PULSE_MAP = {"Sdreset": "Reset", "Sdloadtox": "Loadtox",
              "Sdstart": "Start", "Sdstop": "Stop", "Sdopencontrols": "Opencontrols",
@@ -81,6 +88,8 @@ def selected_payload(host):
         return None
     name = str(_get(host, 'Payload', '')).strip()
     candidates = [x for x in slot.children if x.family == 'COMP']
+    if not name and host.fetch('slot_selection_cleared', False):
+        return None
     if not name and len(candidates) == 1:
         return candidates[0]
     if name and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', name):
@@ -207,6 +216,16 @@ def disarm(host, reason='disconnected'):
     reset(host, reason)
 
 
+def on_start(host):
+    """A saved in-flight removal is never replayed on project reopen."""
+    state = _state(host)
+    state.pop('offload', None)
+    state.pop('control_mirrors', None)
+    state['ticking'] = False
+    host.store('offload_wake_timeline', False)
+    disarm(host, 'project reopened')
+
+
 def route_state(mode, payload_present, rgb_present, requested):
     """Public routing state; never infer that a private model is generating."""
     if mode not in ('slot', 'existing'):
@@ -302,6 +321,15 @@ def offload_state(host, payload, now):
     request = _state(host).get('offload')
     if request is None:
         return None
+    if request.get('runtime_session') != RUNTIME_SESSION:
+        _state(host).pop('offload', None)
+        host.store('offload_wake_timeline', False)
+        return None
+    if request.get('removed'):
+        if payload is None:
+            return 'offloaded_removed'
+        _state(host).pop('offload', None)
+        return None
     if payload is None or payload.path != request['path']:
         _restore_shutdown_callbacks(host, request)
         _state(host).pop('offload', None)
@@ -310,6 +338,9 @@ def offload_state(host, payload, now):
     if flags == (False, False):
         request['confirmed'] = True
         _restore_shutdown_callbacks(host, request)
+        if request.get('remove_component'):
+            _remove_confirmed_payload(host, payload, request)
+            return 'offloaded_removed'
         return 'offloaded'
     if request.get('confirmed') and flags is not None and flags[0]:
         # The user explicitly restarted in native controls. Keep delivery off,
@@ -322,10 +353,81 @@ def offload_state(host, payload, now):
     return 'offloading'
 
 
-def request_offload(host, payload):
+def machine_tag(filename):
+    """Require exactly one delimited GPU identity; never infer one from a path."""
+    tokens = re.split(r'[-_.]', re.split(r'[\\/]', str(filename))[-1].lower())
+    tags = set('3080' if token == '3080ti' else token for token in tokens
+               if token in ('3080', '3080ti', '4090', '5090'))
+    if len(tags) != 1:
+        raise ValueError('TOE filename needs one unambiguous 3080, 4090 or 5090 machine tag')
+    return next(iter(tags))
+
+
+def _project_identity(host):
+    # Prefer the live identity after Save As or a machine transfer. Stored
+    # installer metadata must not authorize removal in a different project.
+    import builtins
+    current = globals().get('project', getattr(builtins, 'project', None))
+    if current is None:
+        try:
+            import td
+            current = getattr(td, 'project', None)
+        except ImportError:
+            pass
+    if current is not None:
+        return str(current.name), str(current.folder)
+    return (str(host.fetch('offload_project_name', '')),
+            str(host.fetch('offload_backup_folder', '')))
+
+
+def _removal_backup(host):
+    path = os.path.realpath(os.path.expanduser(str(_get(host, 'Offloadbackup', ''))))
+    project_name, folder = _project_identity(host)
+    if (not folder or os.path.normcase(os.path.dirname(path)) != os.path.normcase(os.path.realpath(folder))
+            or not path.lower().endswith('.toe') or not os.path.isfile(path) or os.path.getsize(path) < 1024):
+        raise ValueError('Removal requires an accepted saved TOE rollback in this project folder')
+    if machine_tag(project_name) != machine_tag(path):
+        raise ValueError('Rollback TOE must match this machine; keep 3080, 4090 and 5090 separate')
+    return path
+
+
+def _remove_confirmed_payload(host, payload, request):
+    slot = host.op('PAYLOAD_SLOT')
+    if (payload is None or payload != selected_payload(host) or payload.parent() != slot
+            or payload.family != 'COMP' or payload.path != request['path']
+            or server_flags(payload) != (False, False)):
+        raise ValueError('Selected generator identity or confirmed shutdown changed; component retained')
+    if _removal_backup(host) != request['backup']:
+        raise ValueError('Rollback changed during shutdown; component retained')
+    if getattr(payload, 'outputs', ()):
+        raise ValueError('Generator has wired consumers; preserve them before removal')
+    watcher = host.op('generator_state_callbacks')
+    if watcher is not None:
+        _set(watcher, 'active', False)
+        _set(watcher, 'op', host.path)
+    selected = host.op('PAYLOAD_RGB')
+    blocked = host.op('DISCONNECTED')
+    if selected is not None and blocked is not None:
+        _set(selected, 'top', blocked.path)
+    # Only this explicitly selected, inactive root is removed. No private
+    # descendants are inspected, files deleted, or unrelated processes killed.
+    payload.destroy()
+    host.store('slot_selection_cleared', True)
+    _set(host, 'Payload', '')
+    request['removed'] = True
+    _state(host)['command'] = 'Generator stopped and removed from memory; selected .tox path preserved'
+
+
+def request_offload(host, payload, remove_component=None):
     disarm(host, 'offload requested')
     if payload is None:
+        if _state(host).get('offload', {}).get('removed'):
+            return
         raise ValueError('No selected generator is loaded')
+    remove = bool(_get(host, 'Offloadremove', False)) if remove_component is None else bool(remove_component)
+    backup = _removal_backup(host) if remove else None
+    if remove and server_flags(payload) is None:
+        raise ValueError('Removal requires documented public Server Active and Stream Active flags')
     bind_public_controls(host, payload)
     p = _mapped_parameter(payload, _get(host, 'Stopparameter', ''))
     if not getattr(p, 'isPulse', False):
@@ -333,7 +435,8 @@ def request_offload(host, payload):
     prior = _state(host).get('offload')
     if prior is not None:
         _restore_shutdown_callbacks(host, prior)
-    request = {'path': payload.path, 'requested_at': time.perf_counter(), 'confirmed': False}
+    request = {'path': payload.path, 'requested_at': time.perf_counter(), 'confirmed': False,
+               'remove_component': remove, 'backup': backup, 'runtime_session': RUNTIME_SESSION}
     _state(host)['offload'] = request
     if server_flags(payload) != (False, False):
         _wake_shutdown_callbacks(host, request)
@@ -343,7 +446,8 @@ def request_offload(host, payload):
             _restore_shutdown_callbacks(host, request)
             _state(host).pop('offload', None)
             raise
-    _state(host)['command'] = 'Offload requested through public Stop Server; component retained'
+    _state(host)['command'] = ('Offload requested; remove only after confirmed shutdown' if remove else
+                              'Stop requested through public Stop Server; component retained')
 
 
 def forward_value(host, field, value):
@@ -519,11 +623,31 @@ def sync_audio_prompts(host, payload, selected=True):
             _set(host, 'Promptstatus', 'Audio prompt error: ' + str(exc))
 
 
-def _sync_show(host):
+def _show_control(host):
     owner = host
     for _ in range(3):
         owner = owner.parent() if owner is not None else None
-    show = owner.op('SHOW_CONTROL') if owner is not None else None
+    return owner.op('SHOW_CONTROL') if owner is not None else None
+
+
+def _accept_pending_show_edits(host):
+    """Do not overwrite a UI edit before its deferred Parameter Execute callback."""
+    show = _show_control(host)
+    if show is None:
+        return
+    mirrors = _state(host).get('control_mirrors', {})
+    for mirror, source in CONTROL_MAP.items():
+        if mirror not in mirrors:
+            continue
+        old, actual, edited = mirrors[mirror], _get(host, source), _get(show, mirror)
+        if edited != old and actual == old:
+            _set(host, source, edited)
+            if source in NOISE_QUICK_MAP:
+                _apply_noise_quick(host, source, edited)
+
+
+def _sync_show(host):
+    show = _show_control(host)
     if show is None:
         return
     state = _state(host)
@@ -531,6 +655,7 @@ def _sync_show(host):
     try:
         for target, source in CONTROL_MAP.items():
             _set(show, target, _get(host, source))
+            state.setdefault('control_mirrors', {})[target] = _get(show, target)
         _set(show, 'Sdstatus', str(_get(host, 'Status', '')))
         _set(show, 'Sdstage', str(_get(host, 'Stage', '')))
         _set(show, 'Sdoffloadstatus', str(_get(host, 'Offloadstatus', 'not_requested')))
@@ -596,6 +721,7 @@ def tick(host):
         return
     state['ticking'] = True
     try:
+        _accept_pending_show_edits(host)
         _sync_noise(host)
         now = time.perf_counter()
         mode = str(_get(host, 'Source', 'slot'))
@@ -625,6 +751,8 @@ def tick(host):
         stage, ready, connected = route_state(mode, payload is not None, rgb is not None,
                                              bool(_get(host, 'Streamenabled', False)))
         shutdown = offload_state(host, payload, now)
+        if shutdown == 'offloaded_removed':
+            payload, rgb = None, None
         if shutdown is not None:
             stage, ready, connected = shutdown, False, False
         _set(host, 'Offloadstatus', shutdown or 'not_requested')
@@ -660,6 +788,7 @@ def tick(host):
             'invalid_source': 'Invalid source; delivery is disconnected',
             'offloading': 'Stopping selected generator server; RGB delivery disconnected',
             'offloaded': 'Public server/stream flags are inactive; generator .tox retained for restart',
+            'offloaded_removed': 'Generator stopped and removed; select a trusted .tox and Load Selected Generator',
             'offload_unconfirmed': 'Stop requested but shutdown is not confirmed; check native Stop Server controls',
         }[stage]
         if mode == 'existing':
@@ -706,15 +835,24 @@ def pulse(host, name):
         if name == 'Reset':
             reset(host)
         elif name == 'Loadtox':
+            _accept_pending_show_edits(host)
             disarm(host, 'load requested')
-            path = os.path.abspath(os.path.expanduser(str(_get(host, 'Toxfile', ''))))
+            path = os.path.expanduser(str(_get(host, 'Toxfile', '')).strip())
+            if not os.path.isabs(path):
+                path = os.path.join(str(host.fetch('offload_backup_folder', os.getcwd())), path)
+            path = os.path.realpath(path)
             if not path.lower().endswith('.tox') or not os.path.isfile(path):
                 raise ValueError('Choose an existing trusted local .tox file')
             slot = host.op('PAYLOAD_SLOT')
             if slot_occupied(slot):
-                raise ValueError('Drop slot is occupied; preserve/stop the old version before loading another')
+                raise ValueError('Drop slot is occupied; Offload with removal enabled before loading another .tox')
             candidate = slot.loadTox(path, unwired=True)
+            if candidate is None or candidate.parent() != slot or candidate.family != 'COMP':
+                raise ValueError('Selected .tox did not load as a direct slot component; check the slot')
             _set(host, 'Payload', candidate.name)
+            host.store('slot_selection_cleared', False)
+            _state(host)['loaded_tox'] = {'payload': candidate.path, 'path': path}
+            _state(host)['command'] = 'Loaded selected .tox: ' + os.path.basename(path) + '; no Start pulse sent'
             reset(host, 'component loaded; no start command sent')
         elif name == 'Opencontrols':
             payload = selected_payload(host)
@@ -741,7 +879,7 @@ def pulse(host, name):
                 raise ValueError('Select a component in PAYLOAD_SLOT first')
             compatible = bind_public_controls(host, payload)
             if name == 'Stop' and compatible and _get(host, 'Stopparameter', '') == 'Stopstream':
-                request_offload(host, payload)
+                request_offload(host, payload, remove_component=False)
                 tick(host)
                 return
             if name == 'Start' and compatible and server_flags(payload)[0]:
@@ -778,6 +916,12 @@ def control_changed(host, parameter, is_pulse=False):
         return
     name = str(parameter.name)
     if is_pulse and name in PULSE_MAP:
+        if name == 'Sdloadtox':
+            # The clicked panel's current file selection wins even when its
+            # value callback has not been delivered yet (including paused TD).
+            show = _show_control(host)
+            if show is not None:
+                _set(host, 'Toxfile', _get(show, 'Sdtoxfile', ''))
         pulse(host, PULSE_MAP[name])
     elif name in CONTROL_MAP:
         target, value = CONTROL_MAP[name], parameter.eval()

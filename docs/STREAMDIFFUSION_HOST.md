@@ -5,6 +5,12 @@ Normal installation preserves the previous components, but the 3080 working
 copy has now explicitly retired that old branch. Its saved pre-deletion TOE is
 the rollback. Neither old generator is required for the new route.
 
+For an existing 4090/5090 project, use the
+[targeted cross-machine upgrade](STREAMDIFFUSION_HOST_UPGRADE.md), not the 3080
+TOE or a full world rebuild. The clean 3080 `.46` checkpoint has an empty,
+offloaded slot. Shared code supports all three machine identities; their
+private working files and live acceptance stay separate.
+
 ```text
 choose trusted .tox -> load -> configure / generate / preview OUT_RAW
                                               |
@@ -57,12 +63,36 @@ Changing source, file selection, payload or RGB mapping disconnects delivery.
 Cold reopen also starts disconnected. Explicitly reconnect after previewing.
 This does not automatically launch or stop geometry workers.
 
-**Offload Generator (Stop Server)** disconnects RGB, requests the selected
+**Offload Generator (Stop / Optional Remove)** disconnects RGB, requests the selected
 generator's public Stop Server pulse, and waits asynchronously for its public
-Server Active and Stream Active flags to turn off. The `.tox`, its settings,
-noise input and files stay loaded for restarting. It does not delete the
-component, force-kill a process, stop either geometry worker, or start a model.
+Server Active and Stream Active flags to turn off. With **Remove Component After
+Confirmed Offload** off (the hardware-neutral default), the component stays
+loaded for restarting. The regular **Stop Generator** button always retains it.
+No process is force-killed, geometry worker stopped, or model started.
 Offload on an already-inactive server is harmless and sends no extra stop pulse.
+
+To switch versions without keeping two generators, save an accepted rollback
+TOE first, set **Saved TOE Rollback for Component Removal** to that file in the
+current project folder, and enable **Remove Component After Confirmed Offload**.
+Then Offload removes only the selected inactive component from the open network;
+it never deletes the `.tox` file, models, or rollback TOE. Unsaved changes inside
+that component are discarded, so save first. An unknown activity contract,
+unconfirmed stop, missing/mismatched rollback, changed selection, or wired
+consumer prevents removal. Pending removal requests are cancelled on reopen.
+This option is enabled explicitly for the current 3080 workflow, not copied to
+4090/5090 local settings. `offloaded_removed` means the slot selection is empty.
+Removal requires exactly one matching delimited 3080, 4090 or 5090 tag in the
+live TOE name and rollback filename; ambiguous/untagged names fail closed.
+The live project identity takes precedence over stale installer metadata after
+Save As or a machine transfer.
+
+Choose the next trusted `.tox`, then **Load Selected Generator**. The selected
+file is preserved across Offload; Load snapshots the clicked panel's current
+selection, including when its deferred value-change callback has not run.
+Frame mirroring no longer overwrites a pending Show Control file edit. Loading
+still refuses a genuinely occupied slot and never silently replaces a component.
+The newly loaded component's own startup code can run, but the host never sends
+Start automatically. Preview it and reconnect RGB to 3D deliberately.
 
 The host recognizes the verified public StreamDiffusionTD contract
 (`Startstream` / Start Stream, `Stopstream` / Stop Server, and the two custom
@@ -76,13 +106,13 @@ callbacks, then restores the prior paused playback/frame after confirmation or
 a 20-second confirmation timeout. It does not block TD's main thread while
 waiting. **Offload Status** distinguishes `offloading`, `offloaded` and
 `offload_unconfirmed`; missing activity flags or an unsuccessful stop never
-produce a false success claim. Offloaded means the public flags report inactive,
+produce a false success claim. `offloaded` means the public flags report inactive,
 not an independent VRAM measurement. Delivery stays blocked and the generation
-preview goes blank until restart; the Noise Input Preview remains available.
+preview goes blank until restart or a new load; the Noise Input Preview remains available.
 
 A deliberate standalone Start resumes TD playback for video callbacks, while
 leaving RGB-to-3D delivery off. Native manual restart is also recognized after a
-confirmed offload. Podcast playback/audio are not automatically started.
+confirmed stop-only offload. Podcast playback/audio are not automatically started.
 Disconnection or RGB selection alone does not unload a model or free its VRAM;
 use Stop Server before another version on the 16 GB GPU. Unsupported mappings
 report an error rather than deleting the component or terminating unrelated
