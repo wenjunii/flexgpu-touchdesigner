@@ -6595,6 +6595,15 @@ def install_color_adjustment_controls(root=None):
     return control
 
 
+def install_streamdiffusion_host(root=None):
+    """Install the isolated RGB host without replacing private components."""
+    try:
+        from streamdiffusion_host import install
+    except ImportError:
+        from touchdesigner.streamdiffusion_host import install
+    return install(root)
+
+
 def install_output_framing_controls(root=None):
     """Add adjustable wall resolution, provider framing and worker buttons.
 
@@ -7242,6 +7251,11 @@ def build(root=None):
     triple = _build_triple_display(pipeline, report)
     stereo = _build_stereo(pipeline, report)
     _build_show_control(pipeline, report)
+
+    # Preserve the optional host when rebuilding an already-upgraded project.
+    # Fresh synthetic projects retain their original default-off source layout.
+    if sources.op("STREAMDIFFUSION_ADAPTER/STREAMDIFFUSION_HOST") is not None:
+        install_streamdiffusion_host(root)
 
     # These wires are owned by the builder and are repaired on every rebuild.
     # This migrates older 1.0.0 networks whose connectors fell back to

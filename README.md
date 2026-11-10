@@ -425,6 +425,17 @@ replacement and feedback-reset sequence.
 
 For the lower-latency generated-world path, keep StreamDiffusionTD as the RGB
 producer and add the external MoGe-2 bridge to an ignored working `.toe`.
+
+An optional, bounded StreamDiffusion host now keeps component-version swaps and
+temporal RGB smoothing outside both generated-geometry workers. It preserves the
+existing podcast/private components, defaults to the accepted existing RGB with
+smoothing off, and feeds the same processed frame into MoGe-2 and Depth Anything.
+The **StreamDiffusion** Show Control tab exposes source, smoothing response/reset,
+trusted local `.tox` loading, public RGB/parameter mappings, and explicit mapped
+start/stop pulses. No model is downloaded or started by the installer. See
+[docs/STREAMDIFFUSION_HOST.md](docs/STREAMDIFFUSION_HOST.md) for installation,
+drop-slot workflow, compatibility limits, and the separate live acceptance gate.
+
 [docs/MOGE2_LIVE.md](docs/MOGE2_LIVE.md) gives the exact offline gate,
 default-off installer, local 3080 startup order, mock/real worker commands, and
 one-/two-GPU network settings. The worker never imports into TouchDesigner and

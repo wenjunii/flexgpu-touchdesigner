@@ -17,6 +17,10 @@ INITIALIZER_SCRIPT_PATH = ROOT / "scripts" / "Initialize-FlexShow.ps1"
 
 
 class ReleaseScriptSourceTests(unittest.TestCase):
+    def test_python_checks_wait_for_windows_launcher_completion(self) -> None:
+        source = SCRIPT_PATH.read_text(encoding="utf-8")
+        self.assertIn("& $python.Executable @commandArguments | Out-Host", source)
+
     def test_release_script_composes_the_complete_source_gate(self) -> None:
         source = SCRIPT_PATH.read_text(encoding="utf-8")
         for marker in (

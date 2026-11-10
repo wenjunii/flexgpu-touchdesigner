@@ -25,6 +25,14 @@ PIPELINE_PATH = ROOT_PATH + "/WORKING_PIPELINE"
 CONTROL_PATH = PIPELINE_PATH + "/SHOW_CONTROL"
 REPORT_VERSION = "flexgpu-show-controls-validation/v2"
 
+SD_HOST_VALUE_CONTROLS = (
+    "Sdsource", "Sdsmoothenabled", "Sdsmoothms", "Sdtoxfile", "Sdpayload",
+    "Sdrgboutput", "Sdfollowpodcast", "Sdpromptparameter", "Sdseedparameter",
+    "Sdstartparameter", "Sdstopparameter",
+)
+SD_HOST_PULSE_CONTROLS = ("Sdreset", "Sdloadtox", "Sdstart", "Sdstop")
+SD_HOST_STATUS_CONTROLS = ("Sdstatus",)
+
 OUTPUT_DIMENSION_TARGETS = (
     ("OUT_INSTALLATION", 1),
     ("OUT_TRIPLE_WRAP_LEFT", 1),
@@ -498,6 +506,9 @@ def validate(
         custom_names = set(_custom_parameter_names(control))
         expected_names = set(
             VALUE_CONTROLS + PULSE_CONTROLS + STATUS_CONTROLS)
+        if adapter.op("STREAMDIFFUSION_HOST") is not None:
+            expected_names.update(SD_HOST_VALUE_CONTROLS + SD_HOST_PULSE_CONTROLS +
+                                  SD_HOST_STATUS_CONTROLS)
         _record(
             checks, "public_control_inventory",
             sorted(custom_names), sorted(expected_names),
@@ -1349,6 +1360,10 @@ def validate(
             "status": list(STATUS_CONTROLS),
             "adapter_value": list(ADAPTER_VALUE_CONTROLS),
             "adapter_pulse": list(ADAPTER_PULSE_CONTROLS),
+            "streamdiffusion_host_value": list(SD_HOST_VALUE_CONTROLS)
+                if adapter.op("STREAMDIFFUSION_HOST") is not None else [],
+            "streamdiffusion_host_pulse": list(SD_HOST_PULSE_CONTROLS)
+                if adapter.op("STREAMDIFFUSION_HOST") is not None else [],
         },
         "checks": checks,
         "restored": restored,

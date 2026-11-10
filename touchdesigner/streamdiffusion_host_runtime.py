@@ -1,0 +1,256 @@
+"""Standalone runtime embedded in the public StreamDiffusion host DAT.
+
+No private component code is inspected. Only explicitly selected public TOPs
+and top-level custom parameters are used. Importing this module does nothing.
+"""
+from __future__ import print_function
+
+import math
+import os
+import re
+import time
+
+
+CONTROL_MAP = {
+    "Sdsource": "Source", "Sdsmoothenabled": "Smoothenabled",
+    "Sdsmoothms": "Smoothms", "Sdtoxfile": "Toxfile",
+    "Sdpayload": "Payload", "Sdrgboutput": "Rgboutput",
+    "Sdfollowpodcast": "Followpodcast", "Sdpromptparameter": "Promptparameter",
+    "Sdseedparameter": "Seedparameter", "Sdstartparameter": "Startparameter",
+    "Sdstopparameter": "Stopparameter",
+}
+PULSE_MAP = {"Sdreset": "Reset", "Sdloadtox": "Loadtox",
+             "Sdstart": "Start", "Sdstop": "Stop"}
+
+
+def history_weight(elapsed, response_ms, enabled=True):
+    """Frame-rate independent exponential history retention (not interpolation)."""
+    if not enabled:
+        return 0.0
+    dt, ms = float(elapsed), float(response_ms)
+    if not math.isfinite(dt) or not math.isfinite(ms) or dt <= 0 or ms <= 0:
+        return 0.0
+    return min(0.98, math.exp(-min(dt, 1.0) / (min(ms, 250.0) / 1000.0)))
+
+
+def filter_elapsed(state, cook_frame, now):
+    """Measure actual filter cook cadence, not the UI callback frequency."""
+    if state.get('cook_frame') != cook_frame:
+        state['filter_time'] = state.get('last_time')
+        state['cook_frame'] = cook_frame
+    previous = state.get('filter_time')
+    state['last_time'] = now
+    return 0.0 if previous is None else max(0.0, now - previous)
+
+
+def _get(owner, name, default=None):
+    try:
+        value = getattr(owner.par, name).eval()
+        return default if value is None else value
+    except Exception:
+        return default
+
+
+def _set(owner, name, value):
+    p = getattr(owner.par, name, None)
+    if p is not None and p.eval() != value:
+        p.val = value
+
+
+def _state(host):
+    state = host.fetch('_sd_host_state', None)
+    if state is None:
+        state = {'last_time': None, 'key': None, 'resets': 0, 'last_status': 0,
+                 'message': '', 'syncing': False, 'error': ''}
+        host.store('_sd_host_state', state)
+    return state
+
+
+def selected_payload(host):
+    """Select only a direct child of the drop slot, never arbitrary network code."""
+    slot = host.op('PAYLOAD_SLOT')
+    name = str(_get(host, 'Payload', '')).strip()
+    candidates = [x for x in slot.children if x.family == 'COMP']
+    if not name and len(candidates) == 1:
+        return candidates[0]
+    if name and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', name):
+        node = slot.op(name)
+        if node is not None and node.family == 'COMP' and node.parent() == slot:
+            return node
+    return None
+
+
+def public_rgb(payload, relative_path):
+    """Resolve one explicitly named public RGB TOP, without enumerating internals."""
+    path = str(relative_path).strip()
+    if not path or path.startswith('/') or '..' in path.split('/'):
+        return None
+    node = payload.op(path)
+    if node is not None and node.family == 'TOP' and (
+            node.path.startswith(payload.path + '/')):
+        return node
+    return None
+
+
+def reset(host, reason='manual'):
+    host.op('HISTORY').par.resetpulse.pulse()
+    host.op('SMOOTH').par.vec0valuex = 0.0
+    state = _state(host)
+    state['resets'] += 1
+    state['message'] = 'History reset: ' + str(reason)
+    state['last_time'] = None
+    state['filter_time'] = None
+    state['cook_frame'] = None
+
+
+def _scene_token(host):
+    # Weights interpolate continuously; only scene/seed identity resets history.
+    dat = host.parent().op('prompt_out') if host.parent() is not None else None
+    if dat is None or dat.numRows < 2:
+        return ()
+    header = [str(dat[0, col]) for col in range(dat.numCols)]
+    fields = [header.index(x) for x in ('scene_id', 'seed') if x in header]
+    return tuple(str(dat[row, col]) for row in range(1, dat.numRows) for col in fields)
+
+
+def _mapped_parameter(payload, name):
+    if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_]*', str(name)):
+        raise ValueError('Configure a top-level public parameter name first')
+    p = getattr(payload.par, str(name), None)
+    if p is None or not getattr(p, 'isCustom', False):
+        raise ValueError('The selected version does not expose that custom parameter')
+    return p
+
+
+def forward_value(host, field, value):
+    payload = selected_payload(host)
+    if payload is None:
+        raise ValueError('Select a component in PAYLOAD_SLOT first')
+    parameter = _mapped_parameter(payload, _get(host, field + 'parameter', ''))
+    if parameter.eval() != value:
+        parameter.val = value
+
+
+def _follow_podcast(host, payload):
+    dat = host.parent().op('prompt_out')
+    if payload is None or dat is None or dat.numRows < 2:
+        return
+    header = [str(dat[0, col]) for col in range(dat.numCols)]
+    if not all(x in header for x in ('concept', 'seed', 'weight')):
+        raise ValueError('Podcast prompt_out has an unsupported public schema')
+    row = max(range(1, dat.numRows), key=lambda i: float(dat[i, header.index('weight')]))
+    forward_value(host, 'Prompt', str(dat[row, header.index('concept')]))
+    forward_value(host, 'Seed', int(float(str(dat[row, header.index('seed')]))))
+
+
+def _sync_show(host):
+    owner = host
+    for _ in range(3):
+        owner = owner.parent() if owner is not None else None
+    show = owner.op('SHOW_CONTROL') if owner is not None else None
+    if show is None:
+        return
+    state = _state(host)
+    state['syncing'] = True
+    try:
+        for target, source in CONTROL_MAP.items():
+            _set(show, target, _get(host, source))
+        _set(show, 'Sdstatus', str(_get(host, 'Status', '')))
+    finally:
+        state['syncing'] = False
+
+
+def tick(host):
+    state = _state(host)
+    if state.get('ticking'):
+        return
+    state['ticking'] = True
+    try:
+        now = time.perf_counter()
+        mode = str(_get(host, 'Source', 'existing'))
+        payload = selected_payload(host)
+        rgb = public_rgb(payload, _get(host, 'Rgboutput', 'out1')) if payload else None
+        ready = mode == 'existing' or rgb is not None
+        # Missing/incompatible candidates keep the accepted source alive visibly.
+        target = rgb if mode == 'slot' and rgb is not None else host.op('EXISTING_RGB')
+        _set(host.op('PAYLOAD_RGB'), 'top', target.path)
+        _set(host.op('RAW_RGB'), 'index', 1 if mode == 'slot' and rgb else 0)
+        raw = host.op('RAW_RGB')
+        key = (mode, target.path, int(raw.width), int(raw.height), _scene_token(host),
+               bool(_get(host, 'Smoothenabled', False)), float(_get(host, 'Smoothms', 50)))
+        if state['key'] != key:
+            reset(host, 'source / scene / resolution / smoothing change')
+            state['key'] = key
+        dt = filter_elapsed(state, int(host.op('SMOOTH').cookAbsFrame), now)
+        weight = history_weight(dt, _get(host, 'Smoothms', 50), _get(host, 'Smoothenabled', False))
+        _set(host.op('SMOOTH'), 'vec0valuex', weight)
+        _set(host.op('OUTPUT_ROUTE'), 'index', 1 if _get(host, 'Smoothenabled', False) else 0)
+        message = ('Existing RGB passthrough' if mode == 'existing' else
+                   ('Hosted public RGB ready' if ready else
+                    'Payload/RGB missing: using existing source (not ready)'))
+        if mode == 'slot' and ready and _get(host, 'Followpodcast', False):
+            _follow_podcast(host, payload)
+        if state.get('error'):
+            message += ' | ' + state['error']
+        _set(host, 'Ready', ready)
+        _set(host, 'Status', message)
+        _sync_show(host)
+        if now - state['last_status'] >= 0.5:
+            dat = host.op('STATUS')
+            dat.clear()
+            for key, value in [('metric', 'value'), ('source', mode), ('ready', ready),
+                               ('smoothing_enabled', _get(host, 'Smoothenabled', False)),
+                               ('response_ms', _get(host, 'Smoothms', 50)),
+                               ('history_weight', round(weight, 6)), ('resets', state['resets']),
+                               ('width', raw.width), ('height', raw.height), ('detail', message),
+                               ('note', 'Routing state only; geometry bridges own frame freshness')]:
+                dat.appendRow([str(key), str(value)])
+            state['last_status'] = now
+    except Exception as exc:
+        _set(host, 'Ready', False)
+        _set(host, 'Status', type(exc).__name__ + ': ' + str(exc))
+        _sync_show(host)
+    finally:
+        state['ticking'] = False
+
+
+def pulse(host, name):
+    try:
+        _state(host)['error'] = ''
+        if name == 'Reset':
+            reset(host)
+        elif name == 'Loadtox':
+            path = os.path.abspath(os.path.expanduser(str(_get(host, 'Toxfile', ''))))
+            if not path.lower().endswith('.tox') or not os.path.isfile(path):
+                raise ValueError('Choose an existing trusted local .tox file')
+            slot = host.op('PAYLOAD_SLOT')
+            if slot.children:
+                raise ValueError('Drop slot is occupied; preserve/stop the old version before loading another')
+            candidate = slot.loadTox(path, unwired=True)
+            _set(host, 'Payload', candidate.name)
+            reset(host, 'component loaded; no start command sent')
+        elif name in ('Start', 'Stop'):
+            payload = selected_payload(host)
+            if payload is None:
+                raise ValueError('Select a component in PAYLOAD_SLOT first')
+            parameter = _mapped_parameter(payload, _get(host, name + 'parameter', ''))
+            if not getattr(parameter, 'isPulse', False):
+                raise ValueError('Start/Stop mappings must name custom Pulse parameters')
+            parameter.pulse()
+            reset(host, name.lower())
+        tick(host)
+    except Exception as exc:
+        _state(host)['error'] = type(exc).__name__ + ': ' + str(exc)
+        _set(host, 'Status', _state(host)['error'])
+        _sync_show(host)
+
+
+def control_changed(host, parameter, is_pulse=False):
+    if _state(host)['syncing']:
+        return
+    name = str(parameter.name)
+    if is_pulse and name in PULSE_MAP:
+        pulse(host, PULSE_MAP[name])
+    elif name in CONTROL_MAP:
+        _set(host, CONTROL_MAP[name], parameter.eval())
+        tick(host)

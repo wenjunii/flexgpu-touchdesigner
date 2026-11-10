@@ -109,7 +109,10 @@ function Invoke-CheckedPython {
             # unittest writes normal progress to stderr. Do not promote it to a
             # terminating PowerShell error; the native exit code is authoritative.
             $ErrorActionPreference = 'Continue'
-            & $python.Executable @commandArguments
+            # A pipeline also waits for GUI-subsystem Python launchers on
+            # Windows; otherwise a child can outlive this check and its temp
+            # directory, producing a premature pass or missing benchmark file.
+            & $python.Executable @commandArguments | Out-Host
             $exitCode = $LASTEXITCODE
         }
         finally {
