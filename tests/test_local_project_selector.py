@@ -206,6 +206,44 @@ class LocalProjectSelectorTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("is not ignored by Git", result.stderr)
 
+    def _upgrade_preflight(self, tier: str, project: Path, backup: Path):
+        script = ROOT / 'scripts' / 'Test-StreamDiffusionHostUpgrade.ps1'
+        shutil.copy2(script, self.repository / 'scripts' / script.name)
+        return subprocess.run(
+            [self.powershell, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+             str(self.repository / 'scripts' / script.name), '-Config', str(self.config),
+             '-Project', str(project), '-Backup', str(backup), '-ExpectedTier', tier],
+            cwd=self.repository, capture_output=True, text=True,
+        )
+
+    def test_host_upgrade_preflight_is_read_only_for_all_three_machines(self):
+        for machine, tier in (('3080', '3080ti_16gb'), ('4090', '4090'), ('5090', '5090')):
+            self.config = self.repository / 'config' / ('local-%s.json' % machine)
+            project = self.repository / 'projects' / ('Show-%s.current.toe' % machine)
+            backup = self.repository / 'projects' / ('Show-%s.rollback.toe' % machine)
+            for path in (project, backup):
+                path.write_bytes(b'test saved TOE fixture' * 100)
+            self._write_config(tier, project)
+            before = {path: path.read_bytes() for path in (self.config, project, backup)}
+            result = self._upgrade_preflight(tier, project, backup)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('preflight_pass', result.stdout)
+            for path, value in before.items():
+                self.assertEqual(path.read_bytes(), value)
+
+    def test_host_upgrade_preflight_rejects_unsafe_backup_and_stale_config(self):
+        project = self.new_project
+        project.write_bytes(b'x' * 2048)
+        backup = self.repository / 'projects' / 'Show-5090.rollback.toe'
+        backup.write_bytes(b'y' * 2048)
+        self.assertNotEqual(self._upgrade_preflight('3080ti_16gb', project, backup).returncode, 0)
+        self.assertNotEqual(self._upgrade_preflight('3080ti_16gb', project, project).returncode, 0)
+        backup = self.repository / 'projects' / 'Show-3080.rollback.toe'
+        backup.write_bytes(b'y' * 2048)
+        stale = self._upgrade_preflight('3080ti_16gb', project, backup)
+        self.assertNotEqual(stale.returncode, 0)
+        self.assertIn('Config must already point', stale.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

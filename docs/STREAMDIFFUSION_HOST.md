@@ -5,6 +5,12 @@ Normal installation preserves the previous components, but the 3080 working
 copy has now explicitly retired that old branch. Its saved pre-deletion TOE is
 the rollback. Neither old generator is required for the new route.
 
+For an existing 4090/5090 project, use the
+[targeted cross-machine upgrade](STREAMDIFFUSION_HOST_UPGRADE.md), not the 3080
+TOE or a full world rebuild. The clean 3080 `.46` checkpoint has an empty,
+offloaded slot. Shared code supports all three machine identities; their
+private working files and live acceptance stay separate.
+
 ```text
 choose trusted .tox -> load -> configure / generate / preview OUT_RAW
                                               |
@@ -74,7 +80,11 @@ that component are discarded, so save first. An unknown activity contract,
 unconfirmed stop, missing/mismatched rollback, changed selection, or wired
 consumer prevents removal. Pending removal requests are cancelled on reopen.
 This option is enabled explicitly for the current 3080 workflow, not copied to
-5090 local settings. `offloaded_removed` means the slot selection is empty.
+4090/5090 local settings. `offloaded_removed` means the slot selection is empty.
+Removal requires exactly one matching delimited 3080, 4090 or 5090 tag in the
+live TOE name and rollback filename; ambiguous/untagged names fail closed.
+The live project identity takes precedence over stale installer metadata after
+Save As or a machine transfer.
 
 Choose the next trusted `.tox`, then **Load Selected Generator**. The selected
 file is preserved across Offload; Load snapshots the clicked panel's current

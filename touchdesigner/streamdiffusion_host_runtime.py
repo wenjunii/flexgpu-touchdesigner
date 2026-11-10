@@ -353,16 +353,41 @@ def offload_state(host, payload, now):
     return 'offloading'
 
 
+def machine_tag(filename):
+    """Require exactly one delimited GPU identity; never infer one from a path."""
+    tokens = re.split(r'[-_.]', re.split(r'[\\/]', str(filename))[-1].lower())
+    tags = set('3080' if token == '3080ti' else token for token in tokens
+               if token in ('3080', '3080ti', '4090', '5090'))
+    if len(tags) != 1:
+        raise ValueError('TOE filename needs one unambiguous 3080, 4090 or 5090 machine tag')
+    return next(iter(tags))
+
+
+def _project_identity(host):
+    # Prefer the live identity after Save As or a machine transfer. Stored
+    # installer metadata must not authorize removal in a different project.
+    import builtins
+    current = globals().get('project', getattr(builtins, 'project', None))
+    if current is None:
+        try:
+            import td
+            current = getattr(td, 'project', None)
+        except ImportError:
+            pass
+    if current is not None:
+        return str(current.name), str(current.folder)
+    return (str(host.fetch('offload_project_name', '')),
+            str(host.fetch('offload_backup_folder', '')))
+
+
 def _removal_backup(host):
     path = os.path.realpath(os.path.expanduser(str(_get(host, 'Offloadbackup', ''))))
-    folder = str(host.fetch('offload_backup_folder', ''))
+    project_name, folder = _project_identity(host)
     if (not folder or os.path.normcase(os.path.dirname(path)) != os.path.normcase(os.path.realpath(folder))
             or not path.lower().endswith('.toe') or not os.path.isfile(path) or os.path.getsize(path) < 1024):
         raise ValueError('Removal requires an accepted saved TOE rollback in this project folder')
-    project_name = str(host.fetch('offload_project_name', '')).lower()
-    for own, other in (('3080', '5090'), ('5090', '3080')):
-        if own in project_name and (own not in os.path.basename(path).lower() or other in os.path.basename(path).lower()):
-            raise ValueError('Rollback TOE must match this machine; keep 3080 and 5090 separate')
+    if machine_tag(project_name) != machine_tag(path):
+        raise ValueError('Rollback TOE must match this machine; keep 3080, 4090 and 5090 separate')
     return path
 
 
