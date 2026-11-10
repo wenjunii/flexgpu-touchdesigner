@@ -33,7 +33,8 @@ SD_HOST_VALUE_CONTROLS = (
 )
 SD_HOST_PULSE_CONTROLS = ("Sdreset", "Sdloadtox", "Sdstart", "Sdstop", "Sdopencontrols",
                           "Sdopenpreview", "Sdopennoisecontrols", "Sdopennoisepreview")
-SD_HOST_STATUS_CONTROLS = ("Sdstatus", "Sdstage")
+SD_HOST_PULSE_CONTROLS += ("Sdoffload",)
+SD_HOST_STATUS_CONTROLS = ("Sdstatus", "Sdstage", "Sdoffloadstatus")
 RETIRED_ADAPTER_COLOR_CONTROLS = (
     "Colorenabled", "Brightness", "Contrast", "Gamma", "Blacklevel", "Opacity",
     "Hue", "Saturation", "Value", "Resetcolor",

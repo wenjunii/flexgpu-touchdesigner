@@ -57,11 +57,37 @@ Changing source, file selection, payload or RGB mapping disconnects delivery.
 Cold reopen also starts disconnected. Explicitly reconnect after previewing.
 This does not automatically launch or stop geometry workers.
 
-**Stop Generator / Disconnect RGB** disconnects first, even if its Stop mapping
-is missing or invalid. Only a successful mapped pulse requests the generator to
-stop. Disconnection, RGB selection and disabling TD cooking do not unload an
-external model or free its VRAM. Stop/unload old servers before running another
-version on the 16 GB GPU.
+**Offload Generator (Stop Server)** disconnects RGB, requests the selected
+generator's public Stop Server pulse, and waits asynchronously for its public
+Server Active and Stream Active flags to turn off. The `.tox`, its settings,
+noise input and files stay loaded for restarting. It does not delete the
+component, force-kill a process, stop either geometry worker, or start a model.
+Offload on an already-inactive server is harmless and sends no extra stop pulse.
+
+The host recognizes the verified public StreamDiffusionTD contract
+(`Startstream` / Start Stream, `Stopstream` / Stop Server, and the two custom
+activity toggles) and fills only empty Start/Stop mappings. Explicit manual
+mappings are preserved; unrelated/unknown versions are not guessed. The regular
+Stop button uses the same offload path for this known contract. For another
+version, configure its public Stop Server mapping deliberately.
+
+If TD is paused, shutdown callbacks may not execute. Offload temporarily runs
+callbacks, then restores the prior paused playback/frame after confirmation or
+a 20-second confirmation timeout. It does not block TD's main thread while
+waiting. **Offload Status** distinguishes `offloading`, `offloaded` and
+`offload_unconfirmed`; missing activity flags or an unsuccessful stop never
+produce a false success claim. Offloaded means the public flags report inactive,
+not an independent VRAM measurement. Delivery stays blocked and the generation
+preview goes blank until restart; the Noise Input Preview remains available.
+
+A deliberate standalone Start resumes TD playback for video callbacks, while
+leaving RGB-to-3D delivery off. Native manual restart is also recognized after a
+confirmed offload. Podcast playback/audio are not automatically started.
+Disconnection or RGB selection alone does not unload a model or free its VRAM;
+use Stop Server before another version on the 16 GB GPU. Unsupported mappings
+report an error rather than deleting the component or terminating unrelated
+processes. Public control reference:
+[StreamDiffusionTD parameters](https://dotsimulate.com/docs/streamdiffusiontd/parameters).
 
 ## Version replacement and rollback
 
@@ -109,6 +135,10 @@ hooks stop targeting the removed two renderers; obsolete per-source color
 controls are disabled. Use the main Show Control Color Adjustment tab for the
 point cloud. Original external home-podcast files and all 5090 local files are
 unchanged. The saved pre-deletion TOE is the rollback, not hidden live generators.
+Controller construction also adapts the exact reviewed public two-TOP startup
+check so cold construction does not demand the removed rig. A changed/unknown
+constructor is refused for review; scene-execution and human-visual approval
+checks are retained and tested. No placeholder rig is recreated to fake readiness.
 
 `PAYLOAD_SLOT` starts empty and loads one trusted TOX. Directly dropping a COMP
 is also supported; a sole child is selected automatically. An explicit component

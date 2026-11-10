@@ -26,7 +26,7 @@ CONTROL_MAP = {
 PULSE_MAP = {"Sdreset": "Reset", "Sdloadtox": "Loadtox",
              "Sdstart": "Start", "Sdstop": "Stop", "Sdopencontrols": "Opencontrols",
              "Sdopenpreview": "Openpreview", "Sdopennoisecontrols": "Opennoisecontrols",
-             "Sdopennoisepreview": "Opennoisepreview"}
+             "Sdopennoisepreview": "Opennoisepreview", "Sdoffload": "Offload"}
 NOISE_QUICK_MAP = {'Noisewidth': 'resolutionw', 'Noiseheight': 'resolutionh', 'Noiseseed': 'seed'}
 
 
@@ -142,6 +142,49 @@ def attach_podcast_controller(host, controller):
     return controller
 
 
+def construct_podcast_controller(host, controller_type, owner):
+    """Retain approved sequencing without constructing the retired dual rig.
+
+    The reviewed public five-second shim's inherited __init__ checks only for
+    the two deleted semantic TOPs, then delegates to its base. Skip that one
+    obsolete constructor, not its scene-approval loader or other MRO behavior.
+    No external class/module or private component implementation is modified.
+    """
+    if not host.fetch('legacy_retired', False):
+        return controller_type(owner)
+    initializer = controller_type.__init__
+    code = getattr(initializer, '__code__', None)
+    obsolete_guard = None
+    if code is not None and os.path.basename(code.co_filename) == 'five_second_td_controller.py':
+        def literals(item):
+            if isinstance(item, str):
+                return {item}
+            items = getattr(item, 'co_consts', item if isinstance(item, tuple) else ())
+            return set().union(*(literals(x) for x in items)) if items else set()
+        expected = {'Semanticneutralready', 'Semanticneutralmix', 'semantic_neutral_output_',
+                    'Native semantic-neutral output rig is not installed/verified; do not use the staged controller in .34'}
+        if (literals(code) != expected or set(code.co_names) !=
+                {'getattr', 'par', 'eval', 'any', 'RuntimeError', 'super', '__init__'}):
+            raise RuntimeError('The public legacy-rig constructor changed; review before adapting it')
+        obsolete_guard = next((c for c in controller_type.__mro__
+                               if c.__dict__.get('__init__') is initializer), None)
+
+    class SingleGeneratorPodcastController(controller_type):
+        def _write_streamdiffusion(self, *args, **kwargs):
+            return 'single_generator_host'
+
+        def _write_color_controls(self, *args, **kwargs):
+            return 'point_cloud_color_controls'
+
+    if obsolete_guard is not None:
+        def initialize_single(instance, owner_comp):
+            super(obsolete_guard, instance).__init__(owner_comp)
+        SingleGeneratorPodcastController.__init__ = initialize_single
+    result = SingleGeneratorPodcastController(owner)
+    result._flexgpu_single_source = True
+    return result
+
+
 def reset(host, reason='manual'):
     host.op('HISTORY').par.resetpulse.pulse()
     host.op('SMOOTH').par.vec0valuex = 0.0
@@ -192,6 +235,116 @@ def _mapped_parameter(payload, name):
     return p
 
 
+def server_flags(payload):
+    if payload is None:
+        return None
+    flags = []
+    for name in ('Serveractive', 'Streamactive'):
+        p = getattr(payload.par, name, None)
+        if p is None or not getattr(p, 'isCustom', False) or not getattr(p, 'isToggle', False):
+            return None
+        flags.append(bool(p.eval()))
+    return tuple(flags)
+
+
+def bind_public_controls(host, payload):
+    """Recognize the documented SDTD public contract, not guessed internals."""
+    state = _state(host)
+    previous = state.get('auto_controls')
+    path = payload.path if payload is not None else ''
+    if previous and previous['path'] != path:
+        for field, old in previous['fields'].items():
+            if _get(host, field, '') == old:
+                _set(host, field, '')
+        state.pop('auto_controls', None)
+    if payload is None or server_flags(payload) is None:
+        return False
+    for name, label in (('Startstream', 'Start Stream'), ('Stopstream', 'Stop Server')):
+        p = getattr(payload.par, name, None)
+        if (p is None or not getattr(p, 'isCustom', False) or not getattr(p, 'isPulse', False)
+                or str(getattr(p, 'label', '')).strip().casefold() != label.casefold()):
+            return False
+    fields = dict(state.get('auto_controls', {}).get('fields', {}))
+    for field, name in (('Startparameter', 'Startstream'), ('Stopparameter', 'Stopstream')):
+        if not str(_get(host, field, '')).strip():
+            _set(host, field, name)
+            fields[field] = name
+    state['auto_controls'] = {'path': path, 'fields': fields}
+    return True
+
+
+def _wake_shutdown_callbacks(host, request):
+    time_comp = host.op('/local/time')
+    if time_comp is None or bool(_get(time_comp, 'play', True)):
+        return
+    request['restore_paused'] = True
+    root = host.op('/project1')
+    if root is not None:
+        request['paused_frame'] = float(root.time.frame)
+    host.store('offload_wake_timeline', True)
+    _set(time_comp, 'play', True)
+
+
+def _restore_shutdown_callbacks(host, request):
+    if request.pop('restore_paused', False):
+        time_comp = host.op('/local/time')
+        if time_comp is not None:
+            _set(time_comp, 'play', False)
+        root = host.op('/project1')
+        if root is not None and 'paused_frame' in request:
+            root.time.frame = request['paused_frame']
+    if host.fetch('offload_wake_timeline', False):
+        host.store('offload_wake_timeline', False)
+
+
+def offload_state(host, payload, now):
+    request = _state(host).get('offload')
+    if request is None:
+        return None
+    if payload is None or payload.path != request['path']:
+        _restore_shutdown_callbacks(host, request)
+        _state(host).pop('offload', None)
+        return None
+    flags = server_flags(payload)
+    if flags == (False, False):
+        request['confirmed'] = True
+        _restore_shutdown_callbacks(host, request)
+        return 'offloaded'
+    if request.get('confirmed') and flags is not None and flags[0]:
+        # The user explicitly restarted in native controls. Keep delivery off,
+        # but allow preview/reconnection again without a stale offload lock.
+        _state(host).pop('offload', None)
+        return None
+    if now - request['requested_at'] >= 20.0:
+        _restore_shutdown_callbacks(host, request)
+        return 'offload_unconfirmed'
+    return 'offloading'
+
+
+def request_offload(host, payload):
+    disarm(host, 'offload requested')
+    if payload is None:
+        raise ValueError('No selected generator is loaded')
+    bind_public_controls(host, payload)
+    p = _mapped_parameter(payload, _get(host, 'Stopparameter', ''))
+    if not getattr(p, 'isPulse', False):
+        raise ValueError('Configure a public Stop Server Pulse parameter for this version')
+    prior = _state(host).get('offload')
+    if prior is not None:
+        _restore_shutdown_callbacks(host, prior)
+    request = {'path': payload.path, 'requested_at': time.perf_counter(), 'confirmed': False}
+    _state(host)['offload'] = request
+    if server_flags(payload) != (False, False):
+        _wake_shutdown_callbacks(host, request)
+        try:
+            p.pulse()
+        except Exception:
+            _restore_shutdown_callbacks(host, request)
+            _state(host).pop('offload', None)
+            raise
+    _state(host)['command'] = 'Offload requested through public Stop Server; component retained'
+
+
 def forward_value(host, field, value):
     payload = selected_payload(host)
     if payload is None:
@@ -227,6 +380,7 @@ def _sync_show(host):
             _set(show, target, _get(host, source))
         _set(show, 'Sdstatus', str(_get(host, 'Status', '')))
         _set(show, 'Sdstage', str(_get(host, 'Stage', '')))
+        _set(show, 'Sdoffloadstatus', str(_get(host, 'Offloadstatus', 'not_requested')))
     finally:
         state['syncing'] = False
 
@@ -296,6 +450,14 @@ def tick(host):
             _set(host, 'Source', 'slot')
             mode = 'slot'
         payload = selected_payload(host)
+        compatible = bind_public_controls(host, payload)
+        watcher = host.op('generator_state_callbacks')
+        if watcher is not None:
+            if payload is not None and server_flags(payload) is not None:
+                _set(watcher, 'op', payload.path)
+                _set(watcher, 'active', True)
+            else:
+                _set(watcher, 'active', False)
         noise_boundary = host.op('PAYLOAD_SLOT/INPUT_FROM_HOST')
         if payload is not None and noise_boundary is not None:
             wire_noise(payload, noise_boundary, bool(_get(host, 'Noiseenabled', True)))
@@ -308,6 +470,10 @@ def tick(host):
             state['command'] = ''
         stage, ready, connected = route_state(mode, payload is not None, rgb is not None,
                                              bool(_get(host, 'Streamenabled', False)))
+        shutdown = offload_state(host, payload, now)
+        if shutdown is not None:
+            stage, ready, connected = shutdown, False, False
+        _set(host, 'Offloadstatus', shutdown or 'not_requested')
         if state.get('connected') != connected:
             host.store('stream_epoch', uuid.uuid4().hex[:16])
             reset(host, 'RGB delivery connection changed')
@@ -316,7 +482,7 @@ def tick(host):
             _set(host, 'Streamenabled', False)
         # No automatic legacy fallback: a missing generator must not masquerade
         # as its still-cached predecessor. Legacy is an explicit rollback source.
-        target = rgb if mode == 'slot' and rgb is not None else (
+        target = rgb if mode == 'slot' and rgb is not None and shutdown is None else (
             host.op('EXISTING_RGB') if mode == 'existing' else host.op('DISCONNECTED'))
         _set(host.op('PAYLOAD_RGB'), 'top', target.path)
         _set(host.op('RAW_RGB'), 'index', 0 if retired or mode == 'existing' else 1)
@@ -338,6 +504,9 @@ def tick(host):
             'preview': '2. Run generation in Generator Controls, inspect OUT_RAW, then 3. Send RGB to 3D',
             'connected': 'RGB delivery connected; geometry bridge status confirms fresh synchronized results',
             'invalid_source': 'Invalid source; delivery is disconnected',
+            'offloading': 'Stopping selected generator server; RGB delivery disconnected',
+            'offloaded': 'Public server/stream flags are inactive; generator .tox retained for restart',
+            'offload_unconfirmed': 'Stop requested but shutdown is not confirmed; check native Stop Server controls',
         }[stage]
         if mode == 'existing':
             message = 'Legacy rollback: ' + message
@@ -356,6 +525,8 @@ def tick(host):
             dat.clear()
             for key, value in [('metric', 'value'), ('source', mode), ('stage', stage),
                                ('ready', ready), ('stream_connected', connected),
+                               ('offload_state', shutdown or 'not_requested'),
+                               ('public_control_contract', compatible),
                                ('smoothing_enabled', _get(host, 'Smoothenabled', False)),
                                ('response_ms', _get(host, 'Smoothms', 50)),
                                ('history_weight', round(weight, 6)), ('resets', state['resets']),
@@ -404,18 +575,38 @@ def pulse(host, name):
             if noise is None:
                 raise ValueError('Noise TOP is unavailable; reinstall the public host')
             noise.openParameters()
+        elif name == 'Offload':
+            request_offload(host, selected_payload(host))
         elif name in ('Start', 'Stop'):
             # Closing delivery must succeed even if a version has no Stop API.
             disarm(host, name.lower() + ' requested')
             payload = selected_payload(host)
             if payload is None:
                 raise ValueError('Select a component in PAYLOAD_SLOT first')
+            compatible = bind_public_controls(host, payload)
+            if name == 'Stop' and compatible and _get(host, 'Stopparameter', '') == 'Stopstream':
+                request_offload(host, payload)
+                tick(host)
+                return
+            if name == 'Start' and compatible and server_flags(payload)[0]:
+                raise ValueError('Selected generator server is already active; Offload it before another start')
             noise_boundary = host.op('PAYLOAD_SLOT/INPUT_FROM_HOST')
             if name == 'Start' and noise_boundary is not None:
                 wire_noise(payload, noise_boundary, bool(_get(host, 'Noiseenabled', True)))
             parameter = _mapped_parameter(payload, _get(host, name + 'parameter', ''))
             if not getattr(parameter, 'isPulse', False):
                 raise ValueError('Start/Stop mappings must name custom Pulse parameters')
+            if name == 'Start':
+                previous = _state(host).pop('offload', None)
+                if previous is not None:
+                    _restore_shutdown_callbacks(host, previous)
+                # A deliberate standalone Start needs running callbacks/video.
+                # Do not start podcast playback/audio on the user's behalf.
+                if (str(_get(host, 'Source', 'slot')) == 'slot'
+                        and not bool(_get(host, 'Followpodcast', False))):
+                    time_comp = host.op('/local/time')
+                    if time_comp is not None:
+                        _set(time_comp, 'play', True)
             parameter.pulse()
             _state(host)['command'] = name + ' pulse sent; confirm in generator controls'
             reset(host, name.lower())

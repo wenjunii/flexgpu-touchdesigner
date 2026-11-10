@@ -18,7 +18,8 @@ VALUE_CONTROLS = ('Sdsource', 'Sdsmoothenabled', 'Sdsmoothms', 'Sdtoxfile',
                   'Sdnoiseheight', 'Sdnoiseseed')
 PULSE_CONTROLS = ('Sdreset', 'Sdloadtox', 'Sdstart', 'Sdstop', 'Sdopencontrols',
                   'Sdopenpreview', 'Sdopennoisecontrols', 'Sdopennoisepreview')
-STATUS_CONTROLS = ('Sdstatus', 'Sdstage')
+PULSE_CONTROLS += ('Sdoffload',)
+STATUS_CONTROLS = ('Sdstatus', 'Sdstage', 'Sdoffloadstatus')
 PIXEL = '''uniform float uHistory;
 out vec4 fragColor;
 void main() {
@@ -64,6 +65,11 @@ def podcast_timeline_guard(source):
     """Keep the old podcast Play switch from pausing a standalone generator."""
     marker = '# FLEXGPU_SINGLE_GENERATOR_TIMELINE'
     if marker in source:
+        old = '    if play_parameter is not None and podcast_owns_timeline:\n'
+        if old in source:
+            return source.replace(old,
+                '    if (play_parameter is not None and podcast_owns_timeline\n'
+                '            and not (host and host.fetch("offload_wake_timeline", False))):\n', 1)
         return source
     needle = '    if play_parameter is not None:\n'
     if source.count(needle) != 1:
@@ -73,7 +79,8 @@ def podcast_timeline_guard(source):
         '    host = owner.op("STREAMDIFFUSION_HOST")\n'
         '    podcast_owns_timeline = (host is None or host.par.Source.eval() == "existing"\n'
         '                             or bool(host.par.Followpodcast.eval()))\n'
-        '    if play_parameter is not None and podcast_owns_timeline:\n', 1)
+        '    if (play_parameter is not None and podcast_owns_timeline\n'
+        '            and not (host and host.fetch("offload_wake_timeline", False))):\n', 1)
 
 
 def install(root=None):
@@ -104,6 +111,12 @@ def install(root=None):
     if host is not None and host.fetch('managed_owner', None) != OWNER:
         raise RuntimeError('Refusing to overwrite an unrecognized host')
     retired = host is not None and bool(host.fetch('legacy_retired', False))
+    if retired and guarded_podcast is not None:
+        try:
+            from retire_legacy_streamdiffusion import controller_guard
+        except ImportError:
+            from touchdesigner.retire_legacy_streamdiffusion import controller_guard
+        guarded_podcast = controller_guard(guarded_podcast)
     if host is not None:
         source = rp._first_input(host)
     else:
@@ -138,6 +151,8 @@ def install(root=None):
         ('Str', 'Stopparameter', '', None, 'Public Stop Pulse Parameter'),
         ('Pulse', 'Start', False, None, '2. Start Generator (Mapped Pulse)'),
         ('Pulse', 'Stop', False, None, 'Stop Generator / Disconnect RGB'),
+        ('Pulse', 'Offload', False, None, 'Offload Generator (Stop Server)'),
+        ('Str', 'Offloadstatus', 'not_requested', None, 'Offload Status'),
         ('Toggle', 'Streamenabled', False, None, '3. Send RGB to 3D'),
         ('Toggle', 'Smoothenabled', False, None, 'Temporal Smoothing'),
         ('Float', 'Smoothms', 50.0, None, 'Smoothing Response (ms)'),
@@ -161,7 +176,7 @@ def install(root=None):
     source_labels = ['Selected Generator'] + ([] if retired else ['Legacy Podcast (Rollback)'])
     rp._par(host, 'Source').menuLabels = source_labels
     rp._par(host, 'Source').readOnly = retired
-    for name in ('Ready', 'Status', 'Stage'):
+    for name in ('Ready', 'Status', 'Stage', 'Offloadstatus'):
         rp._par(host, name).readOnly = True
     existing = None if retired else rp._in_top(host, 'EXISTING_RGB', 0, report)
     noise_is_new = host.op('INPUT_NOISE') is None
@@ -248,6 +263,12 @@ def install(root=None):
     rp._set(noise_params, 'pars', 'resolutionw resolutionh seed')
     rp._set(noise_params, 'valuechange', True)
     rp._set(noise_params, 'active', True)
+    server_params = rp._ensure(host, 'parameterexecuteDAT', 'generator_state_callbacks', report)
+    server_params.text = NOISE_CALLBACKS
+    rp._set(server_params, 'op', host.path)
+    rp._set(server_params, 'pars', 'Serveractive Streamactive')
+    rp._set(server_params, 'valuechange', True)
+    rp._set(server_params, 'active', False)  # Runtime binds only a verified public surface.
     rp._text(host, 'README_FIRST',
              'STREAMDIFFUSION HOST\n\n'
              'ONE selected generator. 1: choose trusted .tox and Load. '
@@ -259,6 +280,9 @@ def install(root=None):
              'Generation Preview opens OUT_RAW even with Send RGB to 3D OFF. '
              'Noise Controls opens the real Noise TOP parameter window; all native '
              'settings are preserved on reinstall. Noise Input Preview opens OUT_INPUT.\n'
+             'Offload disconnects delivery and requests the verified public Stop Server '
+             'pulse. The selected .tox remains loaded. A paused timeline is temporarily '
+             'advanced for shutdown callbacks, then restored. No process is force-killed.\n'
              'Drop a trusted private .tox inside PAYLOAD_SLOT. Select its direct child '
              'name and public RGB TOP (relative to that component).\n'
              'Load Selected Generator refuses an occupied slot and never deletes an existing version. '
@@ -283,6 +307,7 @@ def install(root=None):
         'host_callbacks': (-220, -350), 'host_parameter_callbacks': (110, -350),
         'README_FIRST': (-550, -600),
         'noise_parameter_callbacks': (440, -350),
+        'generator_state_callbacks': (770, -350),
         'INPUT_NOISE': (-1100, 560), 'GENERATOR_INPUT': (-820, 560), 'OUT_INPUT': (-550, 560),
     }
     for name, (x, y) in positions.items():

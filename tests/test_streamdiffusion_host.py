@@ -14,10 +14,12 @@ from touchdesigner import retire_legacy_streamdiffusion as retirement
 
 
 class Parameter:
-    def __init__(self, value=None, custom=True, pulse=False):
+    def __init__(self, value=None, custom=True, pulse=False, toggle=False, label=''):
         self.val = value
         self.isCustom = custom
         self.isPulse = pulse
+        self.isToggle = toggle
+        self.label = label
         self.pulses = 0
 
     def eval(self):
@@ -123,6 +125,81 @@ class StreamDiffusionHostTests(unittest.TestCase):
         self.assertEqual(payload.par.Stop.pulses, 1)
         self.assertIn('custom Pulse', host.fetch('_sd_host_state', {})['error'])
         self.assertEqual(disarm.call_count, 3)
+
+    def controlled_fixture(self):
+        host, slot = self.fixture()
+        payload = Node('generator', parent=slot)
+        host.par.Startparameter = Parameter('')
+        host.par.Stopparameter = Parameter('')
+        payload.par.Startstream = Parameter(pulse=True, label='Start Stream')
+        payload.par.Stopstream = Parameter(pulse=True, label='Stop Server')
+        payload.par.Serveractive = Parameter(True, toggle=True)
+        payload.par.Streamactive = Parameter(True, toggle=True)
+        return host, payload
+
+    def test_known_public_controls_bind_without_overriding_manual_mappings(self):
+        host, payload = self.controlled_fixture()
+        self.assertTrue(runtime.bind_public_controls(host, payload))
+        self.assertEqual(host.par.Startparameter.eval(), 'Startstream')
+        self.assertEqual(host.par.Stopparameter.eval(), 'Stopstream')
+        host.par.Stopparameter.val = 'Manualstop'
+        runtime.bind_public_controls(host, payload)
+        self.assertEqual(host.par.Stopparameter.eval(), 'Manualstop')
+        other = Node('another_version', parent=payload.parent())
+        runtime.bind_public_controls(host, other)
+        self.assertEqual(host.par.Startparameter.eval(), '')
+        self.assertEqual(host.par.Stopparameter.eval(), 'Manualstop')
+
+    def test_stop_stream_label_is_not_assumed_to_be_stop_server(self):
+        host, payload = self.controlled_fixture()
+        payload.par.Stopstream.label = 'Stop Stream'
+        self.assertFalse(runtime.bind_public_controls(host, payload))
+        self.assertEqual(host.par.Stopparameter.eval(), '')
+
+    def test_offload_waits_for_public_flags_and_keeps_component_loaded(self):
+        host, payload = self.controlled_fixture()
+        with mock.patch.object(runtime, 'disarm'), \
+                mock.patch.object(runtime, '_wake_shutdown_callbacks'), \
+                mock.patch.object(runtime.time, 'perf_counter', return_value=100):
+            runtime.request_offload(host, payload)
+        self.assertEqual(payload.par.Stopstream.pulses, 1)
+        self.assertEqual(runtime.offload_state(host, payload, 101), 'offloading')
+        payload.par.Serveractive.val = False
+        payload.par.Streamactive.val = False
+        self.assertEqual(runtime.offload_state(host, payload, 102), 'offloaded')
+        self.assertIn(payload, payload.parent().children)
+        with mock.patch.object(runtime, 'disarm'):
+            runtime.request_offload(host, payload)
+        self.assertEqual(payload.par.Stopstream.pulses, 1)  # Already inactive is idempotent.
+        runtime.offload_state(host, payload, 103)
+        payload.par.Serveractive.val = True
+        payload.par.Streamactive.val = True
+        self.assertIsNone(runtime.offload_state(host, payload, 104))
+
+    def test_offload_timeout_does_not_claim_a_server_stopped(self):
+        host, payload = self.controlled_fixture()
+        with mock.patch.object(runtime, 'disarm'), \
+                mock.patch.object(runtime, '_wake_shutdown_callbacks'), \
+                mock.patch.object(runtime.time, 'perf_counter', return_value=100):
+            runtime.request_offload(host, payload)
+        self.assertEqual(runtime.offload_state(host, payload, 121), 'offload_unconfirmed')
+        self.assertTrue(payload.par.Serveractive.eval())
+
+    def test_offload_temporarily_runs_callbacks_and_restores_paused_frame(self):
+        host, _ = self.fixture()
+        clock = Node('/local/time', parent=host)
+        clock.par.play = Parameter(False)
+        project = Node('/project1', parent=host)
+        project.time = SimpleNamespace(frame=1719)
+        request = {}
+        runtime._wake_shutdown_callbacks(host, request)
+        self.assertTrue(clock.par.play.eval())
+        self.assertTrue(host.fetch('offload_wake_timeline', False))
+        project.time.frame = 1740
+        runtime._restore_shutdown_callbacks(host, request)
+        self.assertFalse(clock.par.play.eval())
+        self.assertEqual(project.time.frame, 1719)
+        self.assertFalse(host.fetch('offload_wake_timeline', False))
 
     def test_loading_never_replaces_an_occupied_slot(self):
         host, slot = self.fixture()
@@ -272,10 +349,44 @@ class StreamDiffusionHostTests(unittest.TestCase):
         self.assertEqual(controller._write_streamdiffusion(None), 'single_generator_host')
         self.assertEqual(controller._write_color_controls(), 'point_cloud_color_controls')
         controller.update.assert_not_called()
-        source = 'def get_controller():\n    if cached:\n        return _CONTROLLER\n    return _CONTROLLER\n'
+        source = ('def get_controller():\n    if cached:\n        return _CONTROLLER\n'
+                  '    _CONTROLLER = module.PodcastVisualController(owner)\n    return _CONTROLLER\n')
         patched = retirement.controller_guard(source)
         self.assertEqual(retirement.controller_guard(patched), patched)
         compile(patched, '<retired public controller>', 'exec')
+
+    def test_single_controller_skips_only_retired_rig_check_and_keeps_approval(self):
+        host, _ = self.fixture()
+        host.store('legacy_retired', True)
+        class Base:
+            def __init__(self, owner):
+                self.owner_comp = owner
+                self._load_scene()
+                self.render_state = self._write_streamdiffusion()
+            def _load_scene(self):
+                return True
+            def _write_streamdiffusion(self):
+                raise AssertionError('Retired renderer must not be targeted')
+        class OldRigGuard(Base):
+            def __init__(self, owner):
+                ready = getattr(owner.par, 'Semanticneutralready', None)
+                mix = getattr(owner.par, 'Semanticneutralmix', None)
+                if (ready is None or not ready.eval() or mix is None or
+                        any(owner.op('semantic_neutral_output_' + str(i)) is None for i in (1, 2))):
+                    raise RuntimeError('Native semantic-neutral output rig is not installed/verified; do not use the staged controller in .34')
+                super().__init__(owner)
+            def _load_scene(self):
+                if not self.owner_comp.approved:
+                    raise RuntimeError('User approval is required')
+                return super()._load_scene()
+        OldRigGuard.__init__.__code__ = OldRigGuard.__init__.__code__.replace(
+            co_filename='five_second_td_controller.py')
+        class Latest(OldRigGuard):
+            pass
+        result = runtime.construct_podcast_controller(host, Latest, SimpleNamespace(approved=True))
+        self.assertEqual(result.render_state, 'single_generator_host')
+        with self.assertRaisesRegex(RuntimeError, 'User approval'):
+            runtime.construct_podcast_controller(host, Latest, SimpleNamespace(approved=False))
 
     def test_retirement_requires_explicit_confirmation_backup_and_3080_scope(self):
         arguments = dict(backup_path='missing.toe', project_folder='.', project_name='3080.44.toe')

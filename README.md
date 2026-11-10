@@ -447,6 +447,10 @@ Native noise settings are preserved on reinstall. A separate, explicit backup-ga
 retirement helper removes the old duplicated generator branch without deleting
 podcast audio/sequencing or changing the 5090 working copy. Normal installation
 never deletes private components or resurrects an explicitly retired branch.
+**Offload Generator (Stop Server)** now requests the selected generator's public
+shutdown control, handles a paused TD timeline, and reports confirmed versus
+unconfirmed shutdown while retaining the loaded `.tox`. Known public SDTD
+Start/Stop mappings are filled when empty; no unrelated process is force-killed.
 
 [docs/MOGE2_LIVE.md](docs/MOGE2_LIVE.md) gives the exact offline gate,
 default-off installer, local 3080 startup order, mock/real worker commands, and

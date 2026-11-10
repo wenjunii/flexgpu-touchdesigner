@@ -32,6 +32,19 @@ RETIRED_COLOR_CONTROLS = (
 
 def controller_guard(source):
     marker = '# FLEXGPU_RETIRED_DUAL_GENERATOR'
+    construction_marker = '# FLEXGPU_SINGLE_CONTROLLER_CONSTRUCTION'
+    if construction_marker not in source:
+        needle = '    _CONTROLLER = module.PodcastVisualController(owner)\n'
+        if source.count(needle) != 1:
+            raise RuntimeError('Unrecognized public controller constructor; review before retirement')
+        source = source.replace(needle,
+            '    ' + construction_marker + '\n'
+            '    host = owner.op("STREAMDIFFUSION_HOST")\n'
+            '    if host is not None and host.fetch("legacy_retired", False):\n'
+            '        _CONTROLLER = host.op("host_runtime").module.construct_podcast_controller(\n'
+            '            host, module.PodcastVisualController, owner)\n'
+            '    else:\n'
+            '        _CONTROLLER = module.PodcastVisualController(owner)\n', 1)
     if marker in source:
         return source
     if source.count('return _CONTROLLER') != 2:
