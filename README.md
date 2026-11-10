@@ -451,6 +451,12 @@ never deletes private components or resurrects an explicitly retired branch.
 shutdown control, handles a paused TD timeline, and reports confirmed versus
 unconfirmed shutdown while retaining the loaded `.tox`. Known public SDTD
 Start/Stop mappings are filled when empty; no unrelated process is force-killed.
+For audio-driven imagery, enable **Follow Audio / Podcast Prompts**. The host
+auto-detects public StreamDiffusionTD prompt/seed blocks, keeps both weighted
+audio-crossfade layers in the single generator, and reports **Audio Prompt Sync
+Status**. Forwarding also works before RGB delivery to 3D; it never starts the
+generator. Manual prompt mode remains available, and other versions can use
+explicit simple Prompt/Seed mappings.
 
 [docs/MOGE2_LIVE.md](docs/MOGE2_LIVE.md) gives the exact offline gate,
 default-off installer, local 3080 startup order, mock/real worker commands, and

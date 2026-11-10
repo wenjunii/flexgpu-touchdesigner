@@ -157,10 +157,24 @@ a cached old image. Existing generators and the dual-stream podcast compositor
 are preserved but bypassed in Selected Generator mode. Selecting another route
 does not automatically stop their external servers.
 
-Optional **Follow Podcast Dominant Prompt / Seed** forwards public `prompt_out`
-data to explicitly mapped custom parameters on the single generator. It chooses
-the row with greatest weight; it does not reproduce the old two-generator
-crossfade. Leave it off for manual prompts or native controls.
+Enable **Follow Audio / Podcast Prompts** to forward the adapter's public
+`prompt_out` table to the selected generator. **Public Prompt Format = auto**
+detects the documented StreamDiffusionTD `Promptdict` / `Seeddict` sequences and
+writes both audio-crossfade layers, their normalized weights and paired seeds
+into that **one** generator. Native prompt-weight normalization/interpolation
+settings are preserved. This blends prompt embeddings, not two rendered videos.
+Other generator versions can use **simple** format with explicitly mapped
+custom Prompt / Seed fields; that fallback uses only the greatest-weight layer.
+
+**Audio Prompt Sync Status** confirms the handoff or explains a missing public
+parameter/schema. Forwarding works during generation preview, independently of
+**Send RGB to 3D**, and never starts or restarts generation. Follow defaults off
+for manual prompts. Invalid tables or all-zero weights hold the previous safe
+prompt; active updates are read back, with rollback on write failure. At most
+two layers are accepted. Seeds use the existing signed-Int-compatible mapping
+(`-1` remains random; nonnegative seeds are reduced modulo 2147483647).
+No prompt text is written to validation logs. This route does not modify Noise
+TOP seed, audio playback, scene selection, or any 5090 local profile.
 
 ## Smoothing and performance
 

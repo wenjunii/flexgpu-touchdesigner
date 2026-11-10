@@ -33,6 +33,8 @@ def validate(root):
                                                   ('StreamDiffusionTD', 'StreamDiffusionTD4', 'null1', 'null2'))
         checks['legacy_source_removed'] = list(host.par.Source.menuNames) == ['slot']
     checks['single_generator_workflow'] = host.fetch('workflow_version', 0) == 2
+    checks['audio_prompt_controls'] = all(hasattr(host.par, n) for n in
+                                         ('Followpodcast', 'Promptformat', 'Promptstatus'))
     checks['explicit_delivery_gate'] = list(host.op('OUT_RGB').inputs) == [host.op('STREAM_GATE')]
     checks['bridge_source_gates'] = all(
         hasattr(adapter.op(name).par, 'Sourceactive') and
@@ -44,4 +46,5 @@ def validate(root):
             'ready': host.par.Ready.eval(), 'detail': host.par.Status.eval(),
             'stage': host.par.Stage.eval(), 'stream_connected': host.par.Streamenabled.eval(),
             'legacy_retired': retired, 'noise_enabled': host.par.Noiseenabled.eval(),
+            'audio_prompt_status': host.par.Promptstatus.eval(),
             'live_visual_acceptance': 'separate; requires fresh generated geometry'}

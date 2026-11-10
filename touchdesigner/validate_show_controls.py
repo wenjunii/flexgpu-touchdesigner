@@ -27,14 +27,14 @@ REPORT_VERSION = "flexgpu-show-controls-validation/v2"
 
 SD_HOST_VALUE_CONTROLS = (
     "Sdsource", "Sdsmoothenabled", "Sdsmoothms", "Sdtoxfile", "Sdpayload",
-    "Sdrgboutput", "Sdfollowpodcast", "Sdpromptparameter", "Sdseedparameter",
+    "Sdrgboutput", "Sdfollowpodcast", "Sdpromptformat", "Sdpromptparameter", "Sdseedparameter",
     "Sdstartparameter", "Sdstopparameter", "Sdstreamenabled", "Sdnoiseenabled",
     "Sdnoisewidth", "Sdnoiseheight", "Sdnoiseseed",
 )
 SD_HOST_PULSE_CONTROLS = ("Sdreset", "Sdloadtox", "Sdstart", "Sdstop", "Sdopencontrols",
                           "Sdopenpreview", "Sdopennoisecontrols", "Sdopennoisepreview")
 SD_HOST_PULSE_CONTROLS += ("Sdoffload",)
-SD_HOST_STATUS_CONTROLS = ("Sdstatus", "Sdstage", "Sdoffloadstatus")
+SD_HOST_STATUS_CONTROLS = ("Sdstatus", "Sdstage", "Sdoffloadstatus", "Sdpromptstatus")
 RETIRED_ADAPTER_COLOR_CONTROLS = (
     "Colorenabled", "Brightness", "Contrast", "Gamma", "Blacklevel", "Opacity",
     "Hue", "Saturation", "Value", "Resetcolor",

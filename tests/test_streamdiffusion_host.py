@@ -52,6 +52,46 @@ class Node:
         self.storage[key] = value
 
 
+class PromptTable(Node):
+    def __init__(self, parent, rows):
+        super().__init__('prompt_out', family='DAT', parent=parent)
+        self.rows = [['concept', 'weight', 'seed']] + rows
+
+    @property
+    def numRows(self):
+        return len(self.rows)
+
+    @property
+    def numCols(self):
+        return len(self.rows[0])
+
+    def __getitem__(self, item):
+        row, col = item
+        return self.rows[row][col]
+
+
+class BlockSequence:
+    def __init__(self, fields):
+        self.fields, self.blocks = fields, []
+        self.numBlocks = 1
+
+    @property
+    def numBlocks(self):
+        return len(self.blocks)
+
+    @numBlocks.setter
+    def numBlocks(self, value):
+        while len(self.blocks) < value:
+            block = Node('block')
+            for field in self.fields:
+                setattr(block.par, field, Parameter('previous' if field == 'Concept' else 1))
+            self.blocks.append(block)
+        self.blocks = self.blocks[:value]
+
+    def __getitem__(self, index):
+        return self.blocks[index]
+
+
 class StreamDiffusionHostTests(unittest.TestCase):
     def fixture(self):
         host = Node('host')
@@ -108,6 +148,128 @@ class StreamDiffusionHostTests(unittest.TestCase):
         host.par.Promptparameter.val = '__dict__.value'
         with self.assertRaises(ValueError):
             runtime.forward_value(host, 'Prompt', 'unsafe')
+
+    def audio_fixture(self, rows=None):
+        adapter = Node('adapter')
+        host = Node('host', parent=adapter)
+        slot = Node('PAYLOAD_SLOT', parent=host)
+        payload = Node('generator', parent=slot)
+        host.par.Payload = Parameter('generator')
+        host.par.Followpodcast = Parameter(True)
+        host.par.Promptformat = Parameter('auto')
+        host.par.Promptstatus = Parameter('')
+        host.par.Streamenabled = Parameter(False)
+        payload.par.Promptdict = Parameter()
+        payload.par.Promptdict.sequence = BlockSequence(('Concept', 'Weight'))
+        payload.par.Seeddict = Parameter()
+        payload.par.Seeddict.sequence = BlockSequence(('Seedval', 'Seedweight'))
+        table = PromptTable(adapter, rows or [['layer A', 0.75, 123], ['layer B', 0.25, 456]])
+        return host, payload, table
+
+    def test_audio_uses_two_public_blocks_before_3d_delivery(self):
+        host, payload, table = self.audio_fixture([['layer A', 3, 2147483648], ['layer B', 1, -1]])
+        runtime.sync_audio_prompts(host, payload)
+        self.assertFalse(host.par.Streamenabled.eval())
+        self.assertEqual(runtime._block_values(payload.par.Promptdict.sequence, ('Concept', 'Weight')),
+                         (('layer A', 0.75), ('layer B', 0.25)))
+        self.assertEqual(runtime._block_values(payload.par.Seeddict.sequence, ('Seedval', 'Seedweight')),
+                         ((1, 0.75), (-1, 0.25)))
+        self.assertEqual(runtime._state(host)['prompt_updates'], 1)
+        self.assertIn('2 prompt/seed block(s)', host.par.Promptstatus.eval())
+        # The same table causes no repeated parameter writes or update count.
+        with mock.patch.object(runtime, '_write_blocks', wraps=runtime._write_blocks) as write:
+            runtime.sync_audio_prompts(host, payload)
+            write.assert_not_called()
+        self.assertEqual(runtime._state(host)['prompt_updates'], 1)
+        table.rows[1][1], table.rows[2][1] = 1, 3
+        runtime.sync_audio_prompts(host, payload)
+        self.assertEqual(payload.par.Promptdict.sequence[0].par.Weight.eval(), 0.25)
+        self.assertEqual(runtime._state(host)['prompt_updates'], 2)
+
+    def test_zero_weight_transition_block_is_kept_but_all_zero_holds(self):
+        host, payload, table = self.audio_fixture([['layer A', 1, 1], ['layer B', 0, 2]])
+        runtime.sync_audio_prompts(host, payload)
+        self.assertEqual(payload.par.Promptdict.sequence.numBlocks, 2)
+        table.rows[1][1] = 0
+        runtime.sync_audio_prompts(host, payload)
+        self.assertEqual(payload.par.Promptdict.sequence[0].par.Weight.eval(), 1)
+        self.assertIn('holding previous', host.par.Promptstatus.eval())
+        table.rows = [table.rows[0], ['layer B', 1, 2]]
+        runtime.sync_audio_prompts(host, payload)
+        self.assertEqual(payload.par.Promptdict.sequence.numBlocks, 1)
+        self.assertEqual(payload.par.Seeddict.sequence.numBlocks, 1)
+        self.assertEqual(payload.par.Promptdict.sequence[0].par.Concept.eval(), 'layer B')
+
+    def test_invalid_audio_table_does_not_partially_write_or_disconnect_rgb(self):
+        for bad in ([['', 1, 1]], [['x', -1, 1]], [['x', math.nan, 1]],
+                    [['x', math.inf, 1]], [['x', 1, 1.5]], [['x', 1, -2]],
+                    [['a', 1, 1], ['b', 1, 2], ['c', 1, 3]]):
+            with self.subTest(rows=bad):
+                host, payload, _ = self.audio_fixture(bad)
+                host.par.Streamenabled.val = True
+                runtime.sync_audio_prompts(host, payload)
+                self.assertTrue(host.par.Streamenabled.eval())
+                self.assertEqual(payload.par.Promptdict.sequence[0].par.Concept.eval(), 'previous')
+                self.assertIn('Audio prompt error:', host.par.Promptstatus.eval())
+
+    def test_missing_or_duplicate_table_schema_is_rejected(self):
+        host, payload, table = self.audio_fixture()
+        for header in (['text', 'weight', 'seed'], ['concept', 'concept', 'seed']):
+            table.rows[0] = header
+            runtime.sync_audio_prompts(host, payload)
+            self.assertIn('unsupported public schema', host.par.Promptstatus.eval())
+            self.assertEqual(payload.par.Promptdict.sequence.numBlocks, 1)
+
+    def test_incomplete_block_contract_does_not_fall_back_silently(self):
+        host, payload, _ = self.audio_fixture()
+        del payload.par.Seeddict
+        payload.par.Prompt = Parameter('manual')
+        runtime.sync_audio_prompts(host, payload)
+        self.assertIn('Audio prompt error:', host.par.Promptstatus.eval())
+        self.assertEqual(payload.par.Promptdict.sequence[0].par.Concept.eval(), 'previous')
+
+    def test_audio_block_failure_restores_both_sequences_and_counts(self):
+        host, payload, _ = self.audio_fixture()
+        original = runtime._write_blocks
+        calls = []
+
+        def fail_seed_once(sequence, fields, values):
+            calls.append(fields)
+            if len(calls) == 2:
+                sequence.numBlocks = len(values)
+                raise RuntimeError('simulated public seed setter failure')
+            return original(sequence, fields, values)
+
+        with mock.patch.object(runtime, '_write_blocks', side_effect=fail_seed_once):
+            runtime.sync_audio_prompts(host, payload)
+        self.assertEqual(payload.par.Promptdict.sequence.numBlocks, 1)
+        self.assertEqual(payload.par.Seeddict.sequence.numBlocks, 1)
+        self.assertEqual(payload.par.Promptdict.sequence[0].par.Concept.eval(), 'previous')
+        self.assertIn('previous values restored', host.par.Promptstatus.eval())
+
+    def test_manual_audio_off_does_not_modify_native_prompt(self):
+        host, payload, _ = self.audio_fixture()
+        host.par.Followpodcast.val = False
+        runtime.sync_audio_prompts(host, payload)
+        self.assertEqual(payload.par.Promptdict.sequence[0].par.Concept.eval(), 'previous')
+        self.assertIn('audio follow off', host.par.Promptstatus.eval())
+        host.par.Followpodcast.val = True
+        runtime.sync_audio_prompts(host, None)
+        self.assertEqual(host.par.Promptstatus.eval(), 'Waiting for selected generator')
+
+    def test_auto_simple_fallback_and_explicit_simple_select_dominant_layer(self):
+        host, payload, _ = self.audio_fixture()
+        payload.par.Prompt = Parameter('manual')
+        payload.par.Seed = Parameter(0)
+        host.par.Promptparameter, host.par.Seedparameter = Parameter('Prompt'), Parameter('Seed')
+        host.par.Promptformat.val = 'simple'
+        runtime.sync_audio_prompts(host, payload)
+        self.assertEqual((payload.par.Prompt.val, payload.par.Seed.val), ('layer A', 123))
+        self.assertEqual(payload.par.Promptdict.sequence[0].par.Concept.val, 'previous')
+        del payload.par.Promptdict, payload.par.Seeddict
+        host.par.Promptformat.val = 'auto'
+        runtime.sync_audio_prompts(host, payload)
+        self.assertIn('dominant layer', host.par.Promptstatus.eval())
 
     def test_start_stop_dispatch_only_explicit_mapped_custom_pulses(self):
         host, slot = self.fixture()

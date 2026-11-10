@@ -12,14 +12,14 @@ except ImportError:
 HOST_NAME = 'STREAMDIFFUSION_HOST'
 OWNER = 'flexgpu-streamdiffusion-host/v1'
 VALUE_CONTROLS = ('Sdsource', 'Sdsmoothenabled', 'Sdsmoothms', 'Sdtoxfile',
-                  'Sdpayload', 'Sdrgboutput', 'Sdfollowpodcast', 'Sdpromptparameter',
+                  'Sdpayload', 'Sdrgboutput', 'Sdfollowpodcast', 'Sdpromptformat', 'Sdpromptparameter',
                   'Sdseedparameter', 'Sdstartparameter', 'Sdstopparameter',
                   'Sdstreamenabled', 'Sdnoiseenabled', 'Sdnoisewidth',
                   'Sdnoiseheight', 'Sdnoiseseed')
 PULSE_CONTROLS = ('Sdreset', 'Sdloadtox', 'Sdstart', 'Sdstop', 'Sdopencontrols',
                   'Sdopenpreview', 'Sdopennoisecontrols', 'Sdopennoisepreview')
 PULSE_CONTROLS += ('Sdoffload',)
-STATUS_CONTROLS = ('Sdstatus', 'Sdstage', 'Sdoffloadstatus')
+STATUS_CONTROLS = ('Sdstatus', 'Sdstage', 'Sdoffloadstatus', 'Sdpromptstatus')
 PIXEL = '''uniform float uHistory;
 out vec4 fragColor;
 void main() {
@@ -157,7 +157,9 @@ def install(root=None):
         ('Toggle', 'Smoothenabled', False, None, 'Temporal Smoothing'),
         ('Float', 'Smoothms', 50.0, None, 'Smoothing Response (ms)'),
         ('Pulse', 'Reset', False, None, 'Reset History'),
-        ('Toggle', 'Followpodcast', False, None, 'Follow Podcast Dominant Prompt / Seed'),
+        ('Toggle', 'Followpodcast', False, None, 'Follow Audio / Podcast Prompts'),
+        ('Menu', 'Promptformat', 'auto', ('auto', 'sdtd_blocks', 'simple'), 'Public Prompt Format'),
+        ('Str', 'Promptstatus', 'Manual prompts (audio follow off)', None, 'Audio Prompt Sync Status'),
         ('Str', 'Promptparameter', 'Prompt', None, 'Public Prompt Parameter'),
         ('Str', 'Seedparameter', 'Seed', None, 'Public Seed Parameter'),
         ('Toggle', 'Ready', False, None, 'Public RGB Route Configured'),
@@ -176,7 +178,7 @@ def install(root=None):
     source_labels = ['Selected Generator'] + ([] if retired else ['Legacy Podcast (Rollback)'])
     rp._par(host, 'Source').menuLabels = source_labels
     rp._par(host, 'Source').readOnly = retired
-    for name in ('Ready', 'Status', 'Stage', 'Offloadstatus'):
+    for name in ('Ready', 'Status', 'Stage', 'Offloadstatus', 'Promptstatus'):
         rp._par(host, name).readOnly = True
     existing = None if retired else rp._in_top(host, 'EXISTING_RGB', 0, report)
     noise_is_new = host.op('INPUT_NOISE') is None
@@ -288,9 +290,12 @@ def install(root=None):
              'Load Selected Generator refuses an occupied slot and never deletes an existing version. '
              'Loading a trusted tox executes its own code; stop/unload other model '
              'servers first on a 16 GB GPU. The host never sends Start automatically.\n'
-             'Prompt/Seed and Start/Stop mappings target only top-level custom '
-             'parameters. Podcast dominant-prompt forwarding is optional and is '
-             'not the original dual-stream transition compositor.\n'
+             'Follow Audio / Podcast Prompts forwards prompt_out to documented '
+             'public Promptdict/Seeddict blocks, preserving two-layer crossfade weights '
+             'in one generator. Auto detects blocks; other versions may use explicitly '
+             'mapped simple Prompt/Seed parameters (dominant layer only). All-zero '
+             'weights hold the last safe prompt. Sync Status confirms the handoff; '
+             'it works before RGB is sent to 3D and never starts generation.\n'
              'Stop always disconnects RGB first, even if Stop mapping is missing. '
              'Disconnection does not itself unload an external model server. '
              'Cold reopen and generator/output changes require explicit reconnection. '

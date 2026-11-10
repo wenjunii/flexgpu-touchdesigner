@@ -16,7 +16,8 @@ CONTROL_MAP = {
     "Sdsource": "Source", "Sdsmoothenabled": "Smoothenabled",
     "Sdsmoothms": "Smoothms", "Sdtoxfile": "Toxfile",
     "Sdpayload": "Payload", "Sdrgboutput": "Rgboutput",
-    "Sdfollowpodcast": "Followpodcast", "Sdpromptparameter": "Promptparameter",
+    "Sdfollowpodcast": "Followpodcast", "Sdpromptformat": "Promptformat",
+    "Sdpromptparameter": "Promptparameter",
     "Sdseedparameter": "Seedparameter", "Sdstartparameter": "Startparameter",
     "Sdstopparameter": "Stopparameter",
     "Sdstreamenabled": "Streamenabled",
@@ -354,16 +355,168 @@ def forward_value(host, field, value):
         parameter.val = value
 
 
-def _follow_podcast(host, payload):
-    dat = host.parent().op('prompt_out')
-    if payload is None or dat is None or dat.numRows < 2:
-        return
+def prompt_layers(dat):
+    """Validate the public two-layer audio table without mutating the generator."""
+    if dat is None or dat.numRows < 2:
+        return ()
     header = [str(dat[0, col]) for col in range(dat.numCols)]
-    if not all(x in header for x in ('concept', 'seed', 'weight')):
+    if not all(header.count(x) == 1 for x in ('concept', 'seed', 'weight')):
         raise ValueError('Podcast prompt_out has an unsupported public schema')
-    row = max(range(1, dat.numRows), key=lambda i: float(dat[i, header.index('weight')]))
-    forward_value(host, 'Prompt', str(dat[row, header.index('concept')]))
-    forward_value(host, 'Seed', int(float(str(dat[row, header.index('seed')]))))
+    layers = []
+    for row in range(1, dat.numRows):
+        text = str(dat[row, header.index('concept')]).strip()
+        try:
+            weight = float(str(dat[row, header.index('weight')]))
+        except (ValueError, OverflowError):
+            raise ValueError('Audio prompt weight must be finite and nonnegative') from None
+        if not math.isfinite(weight) or weight < 0:
+            raise ValueError('Audio prompt weight must be finite and nonnegative')
+        if not text and weight == 0:
+            continue
+        if not text:
+            raise ValueError('Active audio prompt text is empty')
+        seed_text = str(dat[row, header.index('seed')]).strip()
+        try:
+            seed = int(seed_text)
+        except ValueError:
+            try:
+                numeric = float(seed_text)
+                if not math.isfinite(numeric) or not numeric.is_integer():
+                    raise ValueError()
+                seed = int(numeric)
+            except (ValueError, OverflowError):
+                raise ValueError('Audio prompt seed must be an integer') from None
+        if seed < -1:
+            raise ValueError('Audio prompt seed must be -1 or nonnegative')
+        layers.append((text, weight, -1 if seed == -1 else seed % 2147483647))
+    if len(layers) > 2:
+        raise ValueError('Audio prompt table exceeds the supported two-layer crossfade')
+    total = sum(x[1] for x in layers)
+    if not math.isfinite(total):
+        raise ValueError('Audio prompt weight total is not finite')
+    # Never pass all-zero weights to the native prompt/seed interpolators.
+    return tuple((text, weight / total, seed) for text, weight, seed in layers) if total > 0 else ()
+
+
+def _block_sequence(payload, name, fields):
+    p = _mapped_parameter(payload, name)
+    sequence = getattr(p, 'sequence', None)
+    if sequence is None or not 1 <= sequence.numBlocks <= 64:
+        raise ValueError('Unsupported public ' + name + ' sequence')
+    for i in range(sequence.numBlocks):
+        for field in fields:
+            _mapped_parameter(sequence[i], field)
+    return sequence
+
+
+def _block_values(sequence, fields):
+    return tuple(tuple(getattr(sequence[i].par, f).eval() for f in fields)
+                 for i in range(sequence.numBlocks))
+
+
+def _same_values(actual, expected):
+    if len(actual) != len(expected):
+        return False
+    return all((math.isclose(a, b, rel_tol=1e-6, abs_tol=1e-6)
+                if isinstance(b, float) else a == b)
+               for old, new in zip(actual, expected) for a, b in zip(old, new))
+
+
+def _write_blocks(sequence, fields, values):
+    if sequence.numBlocks != len(values):
+        sequence.numBlocks = len(values)
+    for i, row in enumerate(values):
+        for field, value in zip(fields, row):
+            parameter = _mapped_parameter(sequence[i], field)
+            if not _same_values(((parameter.eval(),),), ((value,),)):
+                parameter.val = value
+
+
+def _apply_prompt_blocks(payload, layers):
+    prompt_fields, seed_fields = ('Concept', 'Weight'), ('Seedval', 'Seedweight')
+    prompts = _block_sequence(payload, 'Promptdict', prompt_fields)
+    seeds = _block_sequence(payload, 'Seeddict', seed_fields)
+    before = (_block_values(prompts, prompt_fields), _block_values(seeds, seed_fields))
+    desired = (tuple((x[0], x[1]) for x in layers), tuple((x[2], x[1]) for x in layers))
+    if all(_same_values(a, b) for a, b in zip(before, desired)):
+        return False
+    try:
+        _write_blocks(prompts, prompt_fields, desired[0])
+        _write_blocks(seeds, seed_fields, desired[1])
+        if not (_same_values(_block_values(prompts, prompt_fields), desired[0]) and
+                _same_values(_block_values(seeds, seed_fields), desired[1])):
+            raise ValueError('Public block readback did not match')
+    except Exception:
+        restored = True
+        for sequence, fields, values in ((prompts, prompt_fields, before[0]),
+                                         (seeds, seed_fields, before[1])):
+            try:
+                _write_blocks(sequence, fields, values)
+                restored = restored and _same_values(_block_values(sequence, fields), values)
+            except Exception:
+                restored = False
+        raise ValueError('Public prompt block update failed; ' +
+                         ('previous values restored' if restored else 'check native controls: restoration failed')) from None
+    return True
+
+
+def _apply_simple_prompt(host, payload, layers):
+    text, _, seed = max(layers, key=lambda x: x[1])
+    prompt = _mapped_parameter(payload, _get(host, 'Promptparameter', ''))
+    seed_parameter = _mapped_parameter(payload, _get(host, 'Seedparameter', ''))
+    before = (prompt.eval(), seed_parameter.eval())
+    if before == (text, seed):
+        return False
+    try:
+        prompt.val, seed_parameter.val = text, seed
+        if (prompt.eval(), seed_parameter.eval()) != (text, seed):
+            raise ValueError()
+    except Exception:
+        try:
+            prompt.val, seed_parameter.val = before
+        except Exception:
+            raise ValueError('Simple prompt update failed; check native controls: restoration failed') from None
+        raise ValueError('Simple prompt update failed; previous values restored') from None
+    return True
+
+
+def _follow_podcast(host, payload):
+    """Only the documented public block API or explicitly mapped custom fields."""
+    layers = prompt_layers(host.parent().op('prompt_out'))
+    if not layers:
+        _set(host, 'Promptstatus', 'Waiting for active audio prompts; holding previous values')
+        return
+    mode = str(_get(host, 'Promptformat', 'auto'))
+    if mode == 'auto':
+        mode = 'sdtd_blocks' if any(getattr(payload.par, n, None) is not None
+                                    for n in ('Promptdict', 'Seeddict')) else 'simple'
+    if mode == 'sdtd_blocks':
+        changed = _apply_prompt_blocks(payload, layers)
+        detail = 'Audio synced: %d prompt/seed block(s)' % len(layers)
+    elif mode == 'simple':
+        changed = _apply_simple_prompt(host, payload, layers)
+        detail = 'Audio synced: dominant layer via mapped Prompt / Seed'
+    else:
+        raise ValueError('Unsupported public audio prompt format')
+    state = _state(host)
+    if changed:
+        state['prompt_updates'] = state.get('prompt_updates', 0) + 1
+    state['prompt_format'] = mode
+    state['prompt_layers'] = len(layers)
+    _set(host, 'Promptstatus', detail)
+
+
+def sync_audio_prompts(host, payload, selected=True):
+    # Prompt failure holds the previous prompt, not the unrelated RGB/3D gate.
+    if not _get(host, 'Followpodcast', False):
+        _set(host, 'Promptstatus', 'Manual prompts (audio follow off)')
+    elif not selected or payload is None:
+        _set(host, 'Promptstatus', 'Waiting for selected generator')
+    else:
+        try:
+            _follow_podcast(host, payload)
+        except Exception as exc:
+            _set(host, 'Promptstatus', 'Audio prompt error: ' + str(exc))
 
 
 def _sync_show(host):
@@ -381,6 +534,7 @@ def _sync_show(host):
         _set(show, 'Sdstatus', str(_get(host, 'Status', '')))
         _set(show, 'Sdstage', str(_get(host, 'Stage', '')))
         _set(show, 'Sdoffloadstatus', str(_get(host, 'Offloadstatus', 'not_requested')))
+        _set(show, 'Sdpromptstatus', str(_get(host, 'Promptstatus', '')))
     finally:
         state['syncing'] = False
 
@@ -510,8 +664,7 @@ def tick(host):
         }[stage]
         if mode == 'existing':
             message = 'Legacy rollback: ' + message
-        if mode == 'slot' and ready and _get(host, 'Followpodcast', False):
-            _follow_podcast(host, payload)
+        sync_audio_prompts(host, payload, selected=mode == 'slot')
         if state.get('command'):
             message += ' | ' + state['command']
         if state.get('error'):
@@ -527,6 +680,9 @@ def tick(host):
                                ('ready', ready), ('stream_connected', connected),
                                ('offload_state', shutdown or 'not_requested'),
                                ('public_control_contract', compatible),
+                               ('audio_prompt_status', _get(host, 'Promptstatus', '')),
+                               ('audio_prompt_format', state.get('prompt_format', 'none')),
+                               ('audio_prompt_updates', state.get('prompt_updates', 0)),
                                ('smoothing_enabled', _get(host, 'Smoothenabled', False)),
                                ('response_ms', _get(host, 'Smoothms', 50)),
                                ('history_weight', round(weight, 6)), ('resets', state['resets']),
