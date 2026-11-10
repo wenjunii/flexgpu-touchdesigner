@@ -28,10 +28,10 @@ REPORT_VERSION = "flexgpu-show-controls-validation/v2"
 SD_HOST_VALUE_CONTROLS = (
     "Sdsource", "Sdsmoothenabled", "Sdsmoothms", "Sdtoxfile", "Sdpayload",
     "Sdrgboutput", "Sdfollowpodcast", "Sdpromptparameter", "Sdseedparameter",
-    "Sdstartparameter", "Sdstopparameter",
+    "Sdstartparameter", "Sdstopparameter", "Sdstreamenabled",
 )
-SD_HOST_PULSE_CONTROLS = ("Sdreset", "Sdloadtox", "Sdstart", "Sdstop")
-SD_HOST_STATUS_CONTROLS = ("Sdstatus",)
+SD_HOST_PULSE_CONTROLS = ("Sdreset", "Sdloadtox", "Sdstart", "Sdstop", "Sdopencontrols")
+SD_HOST_STATUS_CONTROLS = ("Sdstatus", "Sdstage")
 
 OUTPUT_DIMENSION_TARGETS = (
     ("OUT_INSTALLATION", 1),

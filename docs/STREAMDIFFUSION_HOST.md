@@ -1,31 +1,106 @@
-# StreamDiffusion host and optional RGB smoothing
+# Single-generator StreamDiffusion front end
 
-This is an optional source-side upgrade, not a new geometry provider or inference
-engine. Its public builders are `touchdesigner/streamdiffusion_host.py` and
-`touchdesigner/streamdiffusion_host_runtime.py`; the latter is embedded in a DAT
-and has no repository imports, allowing a saved local TOE to reopen cold.
+The new route needs **one selected generator**, not the old two-generator test.
+The previous podcast/private components remain untouched as an explicit rollback
+source; they are not required for the new route.
 
 ```text
-accepted RGB / selected private payload public RGB TOP
-                         |
-              optional temporal smoothing
-                         |
-          +--------------+--------------+
-          |                             |
-       MoGe-2                    Depth Anything geometry
-          +--------------+--------------+
-            existing synchronized RGB/depth routes
+choose trusted .tox -> load -> configure / generate / preview OUT_RAW
+                                              |
+                                   enable Send RGB to 3D
+                                              |
+                                    optional RGB smoothing
+                                              |
+                           MoGe-2 OR Depth Anything geometry
+                                              |
+                            synchronized RGB / depth / mask
+                                              |
+                         existing point world and wall outputs
 ```
 
-Both workers receive the exact same host output. The adapter's `OUT_RGB`,
-`OUT_DEPTH`, confidence/mask routes, worker ports, reconstruction, interaction,
-single wall, six triple-surface feeds and desktop stereo are not replaced.
-The host never applies RGB-only smoothing after depth inference.
+## Operator workflow
 
-## Install in a saved working copy
+Use the **StreamDiffusion** tab of the main `SHOW_CONTROL`:
 
-Keep the machine's saved 3080 or 5090 TOE/profile separate. Make an ignored local
-backup first, then run inside TouchDesigner using that checkout's public source:
+Run the TouchDesigner timeline for frame callbacks and dynamic feedback. In the
+standalone selected-generator route, the old podcast Play switch no longer
+forces the global timeline to pause. Legacy mode or Follow Podcast retains the
+podcast's original timeline ownership; audio controls remain unchanged.
+
+1. Keep **Pipeline Source = Selected Generator**. Choose **Trusted Local
+   StreamDiffusion .tox**, then press **Load Selected Generator**. Selecting a
+   filename alone does not load it. Loading a TOX executes its own code and may
+   trigger that version's startup behavior: use trusted local files only.
+2. Press **Open Generator Controls**, configure that version and run generation
+   there. Set **Public RGB TOP Relative to Component** to its documented output
+   (for example `out1`) and inspect `STREAMDIFFUSION_HOST/OUT_RAW`.
+   Alternatively, map its top-level custom Start/Stop pulse parameter names and
+   use the host's buttons. Names are version-specific; no private API is guessed
+   or inspected. Start dispatch does not itself connect the stream.
+3. After the preview is good, enable **Send RGB to 3D** and start your selected
+   geometry worker using the existing worker controls. Both geometry bridges
+   share the same RGB boundary; only the chosen provider is needed.
+
+**Pipeline Stage** distinguishes `select_generator`, `configure_rgb`, `preview`
+and `connected`. Connected means RGB delivery is enabled, not that model
+inference is proven healthy. Check the geometry bridge for fresh synchronized
+results. The host does not fabricate source FPS or model-server readiness.
+
+Turning delivery off closes the RGB gate. Geometry listeners remain available,
+but capture/publication is paused; black placeholder frames are not sent for
+inference. Results from a previous connection cannot become valid on reconnect.
+Changing source, file selection, payload or RGB mapping disconnects delivery.
+Cold reopen also starts disconnected. Explicitly reconnect after previewing.
+This does not automatically launch or stop geometry workers.
+
+**Stop Generator / Disconnect RGB** disconnects first, even if its Stop mapping
+is missing or invalid. Only a successful mapped pulse requests the generator to
+stop. Disconnection, RGB selection and disabling TD cooking do not unload an
+external model or free its VRAM. Stop/unload old servers before running another
+version on the 16 GB GPU.
+
+## Version replacement and rollback
+
+`PAYLOAD_SLOT` starts empty and loads one trusted TOX. Directly dropping a COMP
+is also supported; a sole child is selected automatically. An explicit component
+name must resolve to a direct child of this slot; the RGB mapping must stay
+inside it. The host does not enumerate private internals.
+
+The loader refuses an occupied slot: stop and preserve/remove the previous
+version deliberately before loading another. It never silently replaces or
+deletes private contents. This is a single active-generator workflow, not an
+automatic A/B switcher.
+
+**Legacy Podcast (Rollback)** selects the original accepted RGB source and also
+requires **Send RGB to 3D**. A missing replacement never silently falls back to
+a cached old image. Existing generators and the dual-stream podcast compositor
+are preserved but bypassed in Selected Generator mode. Selecting another route
+does not automatically stop their external servers.
+
+Optional **Follow Podcast Dominant Prompt / Seed** forwards public `prompt_out`
+data to explicitly mapped custom parameters on the single generator. It chooses
+the row with greatest weight; it does not reproduce the old two-generator
+crossfade. Leave it off for manual prompts or native controls.
+
+## Smoothing and performance
+
+Smoothing defaults off. The native-resolution RGBA16F feedback blend uses a
+50 ms response adjustable from 0–250 ms. History resets on source/scene/seed,
+dimensions, delivery connection and smoothing changes. Timing follows actual
+filter cooks; extra inference frames are not forced. Both providers see the
+same filtered RGB before depth estimation, never color-only smoothing after it.
+
+This can reduce flicker, but does not increase generation throughput or create
+true intermediate motion. Strong settings blur details, ghost moving subjects
+and add delay. No Engine COMP is installed. Engine can isolate blocking CPU/TD
+work but does not add GPU compute or VRAM; benchmark the exact component first.
+
+## Install and validate
+
+Public source: `touchdesigner/streamdiffusion_host.py`, its import-free embedded
+runtime `touchdesigner/streamdiffusion_host_runtime.py`, and the optional source
+gate in `touchdesigner/moge2_bridge_runtime.py`. Keep 3080 and 5090 local
+TOEs/profiles separate. Back up the saved working copy, then run inside TD:
 
 ```python
 from pathlib import Path
@@ -37,121 +112,39 @@ importlib.reload(host)
 host.install(op('/project1/flexgpu'))
 ```
 
-This bounded installer creates
-`/project1/flexgpu/WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER/STREAMDIFFUSION_HOST`
-and a **StreamDiffusion** tab on the main `SHOW_CONTROL`. Both existing geometry
-bridges must share one RGB source; installation fails rather than choosing
-between divergent inputs. The accepted source is connected to `EXISTING_RGB`.
-Both bridges are then connected to host output zero (`OUT_RGB`). Output one is
-`OUT_RAW`, useful for comparison. No private component is moved, inspected,
-externalized, deleted, loaded, or started by installation. It does not save a TOE.
-Re-running the installer preserves user parameter values and the drop slot.
-
-The main builder repairs host routing when rebuilding an already-upgraded
-project. Fresh synthetic projects retain the original source layout until this
-optional installer is explicitly run. Do not rebuild the whole working project
-just to install this feature.
-
-## Use an existing or replacement version
-
-1. Leave **RGB Source = Existing** to retain the current podcast pipeline and all
-   existing StreamDiffusion controls unchanged.
-2. Stop/unload the old model server before starting another on a 16 GB GPU.
-   Merely switching RGB selection or disabling cooking does not free external
-   model VRAM. The host does not guess how a private version stops its server.
-3. Drop a trusted private `.tox` inside `PAYLOAD_SLOT`, or choose its local file
-   and pulse **Load into Empty Drop Slot**. The button refuses an occupied slot
-   and never replaces/deletes its previous contents. Loading executes the
-   component's own code, which may have its own startup behavior; use only a
-   trusted component. The host itself sends no Start command automatically.
-4. Set **Selected Drop-Slot Component Name** if several candidates exist. A sole
-   child COMP is selected automatically. Selection is limited to direct children
-   of this slot; arbitrary network paths are rejected.
-5. Set **Public RGB TOP Relative to Component**, for example `out1`, to that
-   version's documented public output TOP. No private DAT or internal operator
-   discovery is used. Choose **RGB Source = Slot** after checking the preview.
-6. Map public top-level custom parameter names for Prompt/Seed and optional
-   Start/Stop pulses. An absent/unmapped parameter reports a status error rather
-   than evaluating code or changing a guessed built-in parameter. Pulses require
-   a deliberately configured mapping. Actual inference-server behavior remains
-   version-specific and must be tested with the user's component.
-
-If the selected payload or RGB output is missing, **Ready** turns off, the status
-explicitly reports fallback, and the accepted existing RGB remains connected.
-This is not a claim that the requested replacement is running.
-
-The host accepts RGB output; an image-to-image input, if required by a particular
-version, still needs its documented input connection. The current private
-components and podcast paths are preserved. **Follow Podcast Dominant Prompt /
-Seed** is an optional explicit mapping from public `prompt_out` columns
-`concept`, `seed`, and `weight`; it chooses the dominant row. It does not recreate
-the podcast's dual-generator transition compositor. Leave it off to manage the
-replacement version yourself. Existing-source mode retains the original full
-podcast workflow.
-
-## Temporal smoothing
-
-- Default: off; bypass is pixel-identical to the existing RGB boundary.
-- Response: default 50 ms, bounded 0–250 ms. Zero has no temporal retention.
-- Uses a native-input-resolution RGBA16F feedback blend, not another AI model.
-- History resets on source, payload/output, scene/seed identity, input dimensions,
-  smoothing setting changes, or **Reset History**.
-- Response timing follows actual filter cooks, not merely callback frequency.
-  No extra source cooks or geometry inference are forced to manufacture frames.
-- The host reports routing/readiness, not fabricated source FPS or freshness;
-  geometry bridges retain ownership of synchronized frame validity and age.
-
-Start low and compare raw/processed output. This reduces temporal flicker but
-does not increase generation throughput or synthesize true intermediate motion.
-Large values can blur details, trail moving subjects, increase perceived delay,
-and make monocular depth harder to estimate. The point world already has its own
-temporal persistence; avoid stacking strong smoothing at both stages. Run the
-timeline normally for dynamic feedback and callback/button testing.
-
-## Engine COMP remains a measured follow-up
-
-No Engine COMP is created or launched by this feature. A later independent
-producer can feed the same existing RGB boundary, without replacing depth or
-rendering. Engine can isolate blocking CPU/TD work, but does not create more GPU
-compute or VRAM. It also changes initialization callbacks, path handling,
-parameter support, and buffering. Benchmark with the exact private component
-and identical generation/depth/display settings before selecting it.
-
-References: [Feedback TOP](https://derivative.ca/UserGuide/Feedback_TOP) and
-[Engine COMP](https://derivative.ca/UserGuide/Engine_COMP).
-
-## Validation and current acceptance
+The installer preserves the legacy input and redirects the two geometry input
+wires through `STREAMDIFFUSION_HOST/OUT_RGB`. It adds bridge source gates and
+refreshes only their public runtime DATs, preserving provider ports/profiles,
+renderer, interaction and synchronized adapter outputs. A narrow public podcast
+callback guard removes its timeline authority only in standalone generator mode;
+the original callback is retained in host storage for rollback. First migration selects
+the new generator route with delivery off. Reinstallation preserves values and
+loaded payloads. No private component is loaded, moved, deleted, externalized or
+started by installation, and no TOE is saved. The main builder repairs an
+already-installed host; fresh synthetic builds retain the original layout until
+this optional upgrade is requested.
 
 ```powershell
-& $env:FLEXSHOW_PYTHON -m unittest tests.test_streamdiffusion_host -v
+& $env:FLEXSHOW_PYTHON -m unittest tests.test_streamdiffusion_host tests.test_moge2_bridge_runtime -v
 .\scripts\Test-FlexShowRelease.ps1
 ```
 
-Set `FLEXSHOW_PYTHON` to a separate approved source-test interpreter containing
-the exact pins in `requirements-test.txt`; do not upgrade an active AI worker's
-environment to run this gate. The verification wrapper pipes Python output so
-Windows GUI-subsystem launchers are waited for before checking exit status or
-deleting temporary files.
-
-Inside TD, the read-only structural gate is:
+Use an approved source-test interpreter with the exact `requirements-test.txt`
+pins, not an active AI-worker environment. Read-only TD structural gate:
 
 ```python
 import validate_streamdiffusion_host as validation
 print(validation.validate(op('/project1/flexgpu')))
 ```
 
-The main Show Control validator accepts and inventories this optional tab.
-Structural/synthetic checks cover bypass identity, shader compilation, both
-square/wide dimensions, reset behavior, safe missing-output fallback, explicit
-public prompt/seed mapping, occupied-slot refusal, idempotence, and unmodified
-downstream RGB/depth routing. Disposable fixtures are removed after checking.
+Tests cover explicit delivery, safe mapped pulses, cold-start disconnection,
+missing-output blocking, epoch isolation, listener preservation, square/wide
+dimensions, smoothing and unchanged downstream routes. Structural or synthetic
+success is not real-imagery acceptance. The user deferred real generation for
+this upgrade. Native Start/Stop behavior, dynamic smoothing, both providers,
+single/triple walls, stereo, FPS/latency and thermal soak remain live gates.
+Desktop stereo does not prove headset VR readiness.
 
-Real imagery and model inference were explicitly deferred. Fresh provider frames,
-dynamic smoothing quality, real version-specific Start/Stop, every single/triple
-and stereo visual, source/depth orientation, FPS/latency comparison and thermal
-soak remain separate live acceptance gates. A stale/black wall is not a visual
-pass. No claim of headset VR acceptance is made. Save a new incremented local TOE
-only after reviewing the installed controls; do not overwrite the saved baseline.
-
-All private TOX/TOE files, local paths/settings, model weights, captures, runtime
-state and credentials remain ignored and must never be included in GitHub sync.
+Review and save a new incremented local TOE when accepted. Do not overwrite the
+saved baseline. Private TOX/TOE files, models, local settings, paths, captures,
+runtime state and credentials remain ignored and must never enter GitHub.

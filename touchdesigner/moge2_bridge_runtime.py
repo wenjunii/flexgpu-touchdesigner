@@ -1426,7 +1426,27 @@ def tick(bridge_comp: object) -> dict[str, Any]:
             _GLOBAL_STAGED_RESULT = None
         runtime = _GLOBAL_RUNTIME
     assert runtime is not None
+    source_active = bool(_parameter_value(bridge_comp, "Sourceactive", True))
+    source_epoch = str(_parameter_value(bridge_comp, "Sourceepoch", ""))
+    if not source_active:
+        # Keep loopback listeners alive while the generator is configured or
+        # previewed. No black placeholder frames are sent to inference.
+        with _GLOBAL_LOCK:
+            _GLOBAL_STAGED_RESULT = None
+            _GLOBAL_UPLOADED_KEY = None
+            _GLOBAL_PUBLISHED_KEY = None
+        _set_parameter(bridge_comp, "Resultvalid", False)
+        paused = dict(runtime.status())
+        paused.update(state="source_paused", result_fresh=False,
+                      latest_source_frame_id=-1, latest_result_frame_id=-1,
+                      detail="RGB source disconnected; enable Send RGB to 3D after preview")
+        status_dat = _child(bridge_comp, "STATUS")
+        if status_dat is not None:
+            _write_status(status_dat, paused)
+        return paused
     generation_id = str(_parameter_value(bridge_comp, "Generationid", "streamdiffusion"))
+    if source_epoch:
+        generation_id = "sd-" + source_epoch
     if runtime.capture_due():
         input_top = _child(bridge_comp, "IN_RGB")
         if input_top is None:
@@ -1439,6 +1459,12 @@ def tick(bridge_comp: object) -> dict[str, Any]:
             except (BridgeRuntimeError, ValueError, TypeError):
                 runtime._record_error("capture_failed")
     result = runtime.latest_result()
+    # An in-flight result from the previous generator/connection must never
+    # become valid again when delivery resumes. Existing no-host flows have no
+    # epoch and retain their original correlation behavior.
+    epoch_mismatch = result is not None and source_epoch and result.generation_id != generation_id
+    if epoch_mismatch:
+        result = None
     if result is None:
         with _GLOBAL_LOCK:
             if runtime is _GLOBAL_RUNTIME:
@@ -1531,6 +1557,10 @@ def tick(bridge_comp: object) -> dict[str, Any]:
     _set_parameter(bridge_comp, "Resultvalid", published)
     current = runtime.status()
     current["detail"] = _runtime_detail(published=published, current=current)
+    if epoch_mismatch:
+        current.update(result_fresh=False, latest_source_frame_id=-1,
+                       latest_result_frame_id=-1,
+                       detail="waiting for a synchronized result from the current RGB connection")
     status_dat = _child(bridge_comp, "STATUS")
     if status_dat is not None:
         _write_status(status_dat, current)
@@ -1546,6 +1576,9 @@ def on_script_top_cook(script_op: object) -> bool:
         staged = _GLOBAL_STAGED_RESULT
         bridge_comp = _GLOBAL_BRIDGE_COMP
     if runtime is None or staged is None:
+        return False
+    if bridge_comp is not None and not bool(_parameter_value(bridge_comp, "Sourceactive", True)):
+        _set_parameter(bridge_comp, "Resultvalid", False)
         return False
     try:
         copied = bool(runtime.upload_result_to_top(script_op, staged))

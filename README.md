@@ -426,13 +426,16 @@ replacement and feedback-reset sequence.
 For the lower-latency generated-world path, keep StreamDiffusionTD as the RGB
 producer and add the external MoGe-2 bridge to an ignored working `.toe`.
 
-An optional, bounded StreamDiffusion host now keeps component-version swaps and
-temporal RGB smoothing outside both generated-geometry workers. It preserves the
-existing podcast/private components, defaults to the accepted existing RGB with
-smoothing off, and feeds the same processed frame into MoGe-2 and Depth Anything.
-The **StreamDiffusion** Show Control tab exposes source, smoothing response/reset,
-trusted local `.tox` loading, public RGB/parameter mappings, and explicit mapped
-start/stop pulses. No model is downloaded or started by the installer. See
+The optional **single-generator front end** uses a clear sequence: select/load a
+trusted local StreamDiffusion `.tox`, configure/run it and preview `OUT_RAW`, then
+enable **Send RGB to 3D**. Only one selected generator is needed. Previous podcast
+generators remain untouched as explicit legacy rollback, not an A/B requirement.
+Delivery and temporal smoothing default off. Both geometry providers receive the
+same gated RGB. Pausing delivery keeps listeners available without sending
+placeholder frames, and old-connection results cannot revive. The
+**StreamDiffusion** Show Control tab exposes native generator controls, explicit
+Start/Stop mappings and pipeline stage/status. No model is downloaded or started
+by installation. See
 [docs/STREAMDIFFUSION_HOST.md](docs/STREAMDIFFUSION_HOST.md) for installation,
 drop-slot workflow, compatibility limits, and the separate live acceptance gate.
 

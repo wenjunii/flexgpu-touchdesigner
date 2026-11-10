@@ -13,9 +13,10 @@ HOST_NAME = 'STREAMDIFFUSION_HOST'
 OWNER = 'flexgpu-streamdiffusion-host/v1'
 VALUE_CONTROLS = ('Sdsource', 'Sdsmoothenabled', 'Sdsmoothms', 'Sdtoxfile',
                   'Sdpayload', 'Sdrgboutput', 'Sdfollowpodcast', 'Sdpromptparameter',
-                  'Sdseedparameter', 'Sdstartparameter', 'Sdstopparameter')
-PULSE_CONTROLS = ('Sdreset', 'Sdloadtox', 'Sdstart', 'Sdstop')
-STATUS_CONTROLS = ('Sdstatus',)
+                  'Sdseedparameter', 'Sdstartparameter', 'Sdstopparameter',
+                  'Sdstreamenabled')
+PULSE_CONTROLS = ('Sdreset', 'Sdloadtox', 'Sdstart', 'Sdstop', 'Sdopencontrols')
+STATUS_CONTROLS = ('Sdstatus', 'Sdstage')
 PIXEL = '''uniform float uHistory;
 out vec4 fragColor;
 void main() {
@@ -27,6 +28,10 @@ void main() {
 '''
 HOST_CALLBACKS = '''def onFrameStart(frame):
     parent().op('host_runtime').module.tick(parent())
+    return
+
+def onStart():
+    parent().op('host_runtime').module.disarm(parent(), 'project reopened')
     return
 '''
 PARAM_CALLBACKS = '''def onValueChange(par, prev):
@@ -49,6 +54,22 @@ def onPulse(par):
 '''
 
 
+def podcast_timeline_guard(source):
+    """Keep the old podcast Play switch from pausing a standalone generator."""
+    marker = '# FLEXGPU_SINGLE_GENERATOR_TIMELINE'
+    if marker in source:
+        return source
+    needle = '    if play_parameter is not None:\n'
+    if source.count(needle) != 1:
+        raise RuntimeError('Unrecognized public podcast timeline callback; review before installing')
+    return source.replace(needle,
+        '    ' + marker + '\n'
+        '    host = owner.op("STREAMDIFFUSION_HOST")\n'
+        '    podcast_owns_timeline = (host is None or host.par.Source.eval() == "existing"\n'
+        '                             or bool(host.par.Followpodcast.eval()))\n'
+        '    if play_parameter is not None and podcast_owns_timeline:\n', 1)
+
+
 def install(root=None):
     """Preserve private/podcast nodes, ports, workers, and RGB/depth outputs.
 
@@ -64,6 +85,12 @@ def install(root=None):
     adapter = pipeline.op('SOURCES/STREAMDIFFUSION_ADAPTER')
     if adapter is None:
         raise RuntimeError('STREAMDIFFUSION_ADAPTER is missing')
+    podcast_callbacks = adapter.op('execute_callbacks')
+    guarded_podcast = None
+    if podcast_callbacks is not None:
+        if bool(rp._value(podcast_callbacks, 'syncfile', False)):
+            raise RuntimeError('Public podcast callback is file-synced; review its source before installing')
+        guarded_podcast = podcast_timeline_guard(podcast_callbacks.text)
     bridges = [adapter.op(x) for x in ('MOGE2_BRIDGE', 'DEPTH_ANYTHING_GEOMETRY_BRIDGE')]
     if any(x is None for x in bridges):
         raise RuntimeError('Both generated-geometry bridges must be installed first')
@@ -87,29 +114,35 @@ def install(root=None):
               'Stable RGB host; drop private tox in PAYLOAD_SLOT; smoothing defaults OFF', 300, 125)
     page = rp._page(host, 'StreamDiffusion Host')
     specs = [
-        ('Menu', 'Source', 'existing', ('existing', 'slot'), 'RGB Source'),
+        ('Menu', 'Source', 'slot', ('slot', 'existing'), 'Pipeline Source'),
+        ('File', 'Toxfile', '', None, '1. Trusted Local StreamDiffusion .tox'),
+        ('Pulse', 'Loadtox', False, None, '1. Load Selected Generator'),
+        ('Pulse', 'Opencontrols', False, None, '2. Open Generator Controls'),
+        ('Str', 'Payload', '', None, 'Selected Drop-Slot Component Name'),
+        ('Str', 'Rgboutput', 'out1', None, 'Public RGB TOP Relative to Component'),
+        ('Str', 'Startparameter', '', None, 'Public Start Pulse Parameter'),
+        ('Str', 'Stopparameter', '', None, 'Public Stop Pulse Parameter'),
+        ('Pulse', 'Start', False, None, '2. Start Generator (Mapped Pulse)'),
+        ('Pulse', 'Stop', False, None, 'Stop Generator / Disconnect RGB'),
+        ('Toggle', 'Streamenabled', False, None, '3. Send RGB to 3D'),
         ('Toggle', 'Smoothenabled', False, None, 'Temporal Smoothing'),
         ('Float', 'Smoothms', 50.0, None, 'Smoothing Response (ms)'),
         ('Pulse', 'Reset', False, None, 'Reset History'),
-        ('File', 'Toxfile', '', None, 'Trusted Local StreamDiffusion .tox'),
-        ('Pulse', 'Loadtox', False, None, 'Load into Empty Drop Slot'),
-        ('Str', 'Payload', '', None, 'Selected Drop-Slot Component Name'),
-        ('Str', 'Rgboutput', 'out1', None, 'Public RGB TOP Relative to Component'),
         ('Toggle', 'Followpodcast', False, None, 'Follow Podcast Dominant Prompt / Seed'),
         ('Str', 'Promptparameter', 'Prompt', None, 'Public Prompt Parameter'),
         ('Str', 'Seedparameter', 'Seed', None, 'Public Seed Parameter'),
-        ('Str', 'Startparameter', '', None, 'Public Start Pulse Parameter'),
-        ('Str', 'Stopparameter', '', None, 'Public Stop Pulse Parameter'),
-        ('Pulse', 'Start', False, None, 'Start Selected Payload (Explicit)'),
-        ('Pulse', 'Stop', False, None, 'Stop Selected Payload (Explicit)'),
-        ('Toggle', 'Ready', True, None, 'Selected Source Ready'),
-        ('Str', 'Status', 'Existing RGB passthrough', None, 'Host Status'),
+        ('Toggle', 'Ready', False, None, 'Public RGB Route Configured'),
+        ('Str', 'Stage', 'select_generator', None, 'Pipeline Stage'),
+        ('Str', 'Status', 'Select and load one generator', None, 'Host Status'),
     ]
-    for kind, name, default, menu, label in specs:
+    for order, (kind, name, default, menu, label) in enumerate(specs):
         rp._custom(host, page, kind, name, default, menu, label,
                    minimum=0 if name == 'Smoothms' else None,
                    maximum=250 if name == 'Smoothms' else None)
-    for name in ('Ready', 'Status'):
+        rp._par(host, name).order = order
+        rp._par(host, name).label = label
+    rp._par(host, 'Source').menuLabels = ['Selected Generator', 'Legacy Podcast (Rollback)']
+    for name in ('Ready', 'Status', 'Stage'):
         rp._par(host, name).readOnly = True
     existing = rp._in_top(host, 'EXISTING_RGB', 0, report)
     slot = rp._ensure(host, 'baseCOMP', 'PAYLOAD_SLOT', report)
@@ -134,13 +167,22 @@ def install(root=None):
     route = rp._ensure(host, 'switchTOP', 'OUTPUT_ROUTE', report)
     rp._connect(raw, route, 0, report=report, replace=True)
     rp._connect(smooth, route, 1, report=report, replace=True)
-    rp._out_top(host, 'OUT_RGB', route, 0, report)
+    blocked = rp._ensure(host, 'constantTOP', 'DISCONNECTED', report)
+    for channel in ('colorr', 'colorg', 'colorb'):
+        rp._set(blocked, channel, 0.0)
+    rp._set(blocked, 'colora', 0.0)
+    rp._set_resolution(blocked, 1, 1)
+    gate = rp._ensure(host, 'switchTOP', 'STREAM_GATE', report)
+    rp._connect(blocked, gate, 0, report=report, replace=True)
+    rp._connect(route, gate, 1, report=report, replace=True)
+    rp._out_top(host, 'OUT_RGB', gate, 0, report)
     rp._out_top(host, 'OUT_RAW', raw, 1, report)
     rp._table(host, 'STATUS', [('metric', 'value')], report)
     runtime = rp._text(host, 'host_runtime', Path(__file__).with_name('streamdiffusion_host_runtime.py').read_text(encoding='utf-8'), report)
     execute = rp._ensure(host, 'executeDAT', 'host_callbacks', report)
     execute.text = HOST_CALLBACKS
     rp._set(execute, 'framestart', True)
+    rp._set(execute, 'start', True)
     rp._set(execute, 'active', True)
     params = rp._ensure(host, 'parameterexecuteDAT', 'host_parameter_callbacks', report)
     params.text = PARAM_CALLBACKS
@@ -152,22 +194,29 @@ def install(root=None):
     rp._set(params, 'active', True)
     rp._text(host, 'README_FIRST',
              'STREAMDIFFUSION HOST\n\n'
-             'Existing source is preserved and temporal smoothing defaults OFF.\n'
+             'ONE selected generator. 1: choose trusted .tox and Load. '
+             '2: Open Generator Controls, configure and run it (or map Start). '
+             'Preview OUT_RAW. 3: enable Send RGB to 3D.\n'
              'Drop a trusted private .tox inside PAYLOAD_SLOT. Select its direct child '
-             'name and public RGB TOP (relative to that component), then choose Slot.\n'
-             'Load into Empty Drop Slot never replaces or deletes an existing version. '
+             'name and public RGB TOP (relative to that component).\n'
+             'Load Selected Generator refuses an occupied slot and never deletes an existing version. '
              'Loading a trusted tox executes its own code; stop/unload other model '
              'servers first on a 16 GB GPU. The host never sends Start automatically.\n'
              'Prompt/Seed and Start/Stop mappings target only top-level custom '
              'parameters. Podcast dominant-prompt forwarding is optional and is '
              'not the original dual-stream transition compositor.\n'
-             'MoGe-2 and Depth Anything consume the same OUT_RGB. Do not change '
+             'Stop always disconnects RGB first, even if Stop mapping is missing. '
+             'Disconnection does not itself unload an external model server. '
+             'Cold reopen and generator/output changes require explicit reconnection. '
+             'Legacy is rollback only; there is no A/B generator requirement.\n'
+             'MoGe-2 and Depth Anything consume the same gated OUT_RGB. Do not change '
              'their downstream RGB/depth routes. Engine is not enabled by this installer.', report)
     positions = {
         'EXISTING_RGB': (-550, 300), 'PAYLOAD_SLOT': (-700, -50),
         'PAYLOAD_RGB': (-300, 0), 'RAW_RGB': (-50, 300),
         'HISTORY': (-50, 0), 'SMOOTH': (220, 150), 'SMOOTH_PIXEL': (220, -80),
-        'OUTPUT_ROUTE': (490, 300), 'OUT_RGB': (760, 300), 'OUT_RAW': (220, 440),
+        'OUTPUT_ROUTE': (490, 300), 'STREAM_GATE': (760, 300),
+        'DISCONNECTED': (490, 40), 'OUT_RGB': (1030, 300), 'OUT_RAW': (220, 440),
         'STATUS': (760, 0), 'host_runtime': (-550, -350),
         'host_callbacks': (-220, -350), 'host_parameter_callbacks': (110, -350),
         'README_FIRST': (-550, -600),
@@ -178,13 +227,17 @@ def install(root=None):
     show = pipeline.op('SHOW_CONTROL')
     if show is not None:
         show_page = rp._page(show, 'StreamDiffusion')
-        for kind, name, default, menu, label in specs:
+        for order, (kind, name, default, menu, label) in enumerate(specs):
             key = 'Sd' + name.lower()
             if key in VALUE_CONTROLS + PULSE_CONTROLS + STATUS_CONTROLS:
                 rp._custom(show, show_page, kind, key, rp._value(host, name, default), menu, label,
                            minimum=0 if name == 'Smoothms' else None,
                            maximum=250 if name == 'Smoothms' else None)
-        rp._par(show, 'Sdstatus').readOnly = True
+                rp._par(show, key).order = order
+                rp._par(show, key).label = label
+        rp._par(show, 'Sdsource').menuLabels = ['Selected Generator', 'Legacy Podcast (Rollback)']
+        for name in STATUS_CONTROLS:
+            rp._par(show, name).readOnly = True
         show_dat = rp._ensure(show, 'parameterexecuteDAT', 'streamdiffusion_callbacks', report)
         show_dat.text = SHOW_CALLBACKS
         rp._set(show_dat, 'op', show.path)
@@ -199,9 +252,29 @@ def install(root=None):
     for bridge in bridges:
         if not rp._connect(host, bridge, report=report, replace=True):
             raise RuntimeError('Could not connect the shared hosted RGB to geometry')
+        bridge_page = rp._page(bridge, 'Source Gate')
+        rp._custom(bridge, bridge_page, 'Toggle', 'Sourceactive', True,
+                   label='Source Stream Connected')
+        rp._custom(bridge, bridge_page, 'Str', 'Sourceepoch', '',
+                   label='Source Connection Epoch')
+        rp._expr(bridge, 'Sourceactive', "bool(op(%r).par.Streamenabled and op(%r).par.Ready)" %
+                 (host.path, host.path))
+        rp._expr(bridge, 'Sourceepoch', "op(%r).fetch('stream_epoch', '')" % host.path)
+        rp._par(bridge, 'Sourceactive').readOnly = True
+        rp._par(bridge, 'Sourceepoch').readOnly = True
+        # Refresh only the public generated-geometry runtime, not provider settings.
+        bridge.op('bridge_runtime').module.stop(bridge)
+        bridge.op('bridge_runtime').text = rp._moge2_runtime_source(report)
+    if host.fetch('workflow_version', 0) < 2:
+        rp._set(host, 'Source', 'slot')
+        rp._set(host, 'Streamenabled', False)
+        host.store('workflow_version', 2)
+    if guarded_podcast is not None and guarded_podcast != podcast_callbacks.text:
+        host.store('legacy_podcast_callback_before_guard', podcast_callbacks.text)
+        podcast_callbacks.text = guarded_podcast
     runtime.module.tick(host)
     host.store('install_report', report.as_dict())
     if report.warnings:
         raise RuntimeError('; '.join(report.warnings))
-    print('[FlexGPU] StreamDiffusion host ready; existing source preserved, smoothing OFF by default; TOE unsaved')
+    print('[FlexGPU] Single-generator pipeline ready: select/load -> generate/preview -> send RGB to 3D; TOE unsaved')
     return host

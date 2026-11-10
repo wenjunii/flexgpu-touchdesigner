@@ -23,8 +23,15 @@ def validate(root):
     checks['smoothing_bounds'] = 0 <= host.par.Smoothms.eval() <= 250
     checks['no_shader_errors'] = not host.op('SMOOTH').errors()
     checks['drop_slot_present'] = host.op('PAYLOAD_SLOT') is not None
+    checks['single_generator_workflow'] = host.fetch('workflow_version', 0) == 2
+    checks['explicit_delivery_gate'] = list(host.op('OUT_RGB').inputs) == [host.op('STREAM_GATE')]
+    checks['bridge_source_gates'] = all(
+        hasattr(adapter.op(name).par, 'Sourceactive') and
+        hasattr(adapter.op(name).par, 'Sourceepoch')
+        for name in ('MOGE2_BRIDGE', 'DEPTH_ANYTHING_GEOMETRY_BRIDGE'))
     checks['no_engine_started'] = not any(x.type == 'engine' for x in host.children)
     return {'status': 'pass' if all(checks.values()) else 'fail', 'checks': checks,
             'source': host.par.Source.eval(), 'smoothing_enabled': host.par.Smoothenabled.eval(),
             'ready': host.par.Ready.eval(), 'detail': host.par.Status.eval(),
+            'stage': host.par.Stage.eval(), 'stream_connected': host.par.Streamenabled.eval(),
             'live_visual_acceptance': 'separate; requires fresh generated geometry'}

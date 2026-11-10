@@ -9,6 +9,7 @@ import math
 import os
 import re
 import time
+import uuid
 
 
 CONTROL_MAP = {
@@ -18,9 +19,10 @@ CONTROL_MAP = {
     "Sdfollowpodcast": "Followpodcast", "Sdpromptparameter": "Promptparameter",
     "Sdseedparameter": "Seedparameter", "Sdstartparameter": "Startparameter",
     "Sdstopparameter": "Stopparameter",
+    "Sdstreamenabled": "Streamenabled",
 }
 PULSE_MAP = {"Sdreset": "Reset", "Sdloadtox": "Loadtox",
-             "Sdstart": "Start", "Sdstop": "Stop"}
+             "Sdstart": "Start", "Sdstop": "Stop", "Sdopencontrols": "Opencontrols"}
 
 
 def history_weight(elapsed, response_ms, enabled=True):
@@ -69,6 +71,8 @@ def _state(host):
 def selected_payload(host):
     """Select only a direct child of the drop slot, never arbitrary network code."""
     slot = host.op('PAYLOAD_SLOT')
+    if slot is None:
+        return None
     name = str(_get(host, 'Payload', '')).strip()
     candidates = [x for x in slot.children if x.family == 'COMP']
     if not name and len(candidates) == 1:
@@ -101,6 +105,26 @@ def reset(host, reason='manual'):
     state['last_time'] = None
     state['filter_time'] = None
     state['cook_frame'] = None
+
+
+def disarm(host, reason='disconnected'):
+    """Close delivery, not the model server; invalidate prior geometry epochs."""
+    _set(host, 'Streamenabled', False)
+    gate = host.op('STREAM_GATE')
+    if gate is not None:
+        _set(gate, 'index', 0)
+    host.store('stream_epoch', uuid.uuid4().hex[:16])
+    reset(host, reason)
+
+
+def route_state(mode, payload_present, rgb_present, requested):
+    """Public routing state; never infer that a private model is generating."""
+    if mode not in ('slot', 'existing'):
+        return 'invalid_source', False, False
+    ready = mode == 'existing' or (payload_present and rgb_present)
+    if not ready:
+        return ('select_generator' if not payload_present else 'configure_rgb'), False, False
+    return ('connected' if requested else 'preview'), True, bool(requested)
 
 
 def _scene_token(host):
@@ -156,6 +180,7 @@ def _sync_show(host):
         for target, source in CONTROL_MAP.items():
             _set(show, target, _get(host, source))
         _set(show, 'Sdstatus', str(_get(host, 'Status', '')))
+        _set(show, 'Sdstage', str(_get(host, 'Stage', '')))
     finally:
         state['syncing'] = False
 
@@ -167,14 +192,29 @@ def tick(host):
     state['ticking'] = True
     try:
         now = time.perf_counter()
-        mode = str(_get(host, 'Source', 'existing'))
+        mode = str(_get(host, 'Source', 'slot'))
         payload = selected_payload(host)
         rgb = public_rgb(payload, _get(host, 'Rgboutput', 'out1')) if payload else None
-        ready = mode == 'existing' or rgb is not None
-        # Missing/incompatible candidates keep the accepted source alive visibly.
-        target = rgb if mode == 'slot' and rgb is not None else host.op('EXISTING_RGB')
+        identity = (mode, payload.path if payload else '', str(_get(host, 'Rgboutput', 'out1')),
+                    str(_get(host, 'Toxfile', '')))
+        if state.get('source_identity') != identity:
+            disarm(host, 'generator / output selection changed')
+            state['source_identity'] = identity
+            state['command'] = ''
+        stage, ready, connected = route_state(mode, payload is not None, rgb is not None,
+                                             bool(_get(host, 'Streamenabled', False)))
+        if state.get('connected') != connected:
+            host.store('stream_epoch', uuid.uuid4().hex[:16])
+            reset(host, 'RGB delivery connection changed')
+            state['connected'] = connected
+        if not ready:
+            _set(host, 'Streamenabled', False)
+        # No automatic legacy fallback: a missing generator must not masquerade
+        # as its still-cached predecessor. Legacy is an explicit rollback source.
+        target = rgb if mode == 'slot' and rgb is not None else (
+            host.op('EXISTING_RGB') if mode == 'existing' else host.op('DISCONNECTED'))
         _set(host.op('PAYLOAD_RGB'), 'top', target.path)
-        _set(host.op('RAW_RGB'), 'index', 1 if mode == 'slot' and rgb else 0)
+        _set(host.op('RAW_RGB'), 'index', 0 if mode == 'existing' else 1)
         raw = host.op('RAW_RGB')
         key = (mode, target.path, int(raw.width), int(raw.height), _scene_token(host),
                bool(_get(host, 'Smoothenabled', False)), float(_get(host, 'Smoothms', 50)))
@@ -185,29 +225,42 @@ def tick(host):
         weight = history_weight(dt, _get(host, 'Smoothms', 50), _get(host, 'Smoothenabled', False))
         _set(host.op('SMOOTH'), 'vec0valuex', weight)
         _set(host.op('OUTPUT_ROUTE'), 'index', 1 if _get(host, 'Smoothenabled', False) else 0)
-        message = ('Existing RGB passthrough' if mode == 'existing' else
-                   ('Hosted public RGB ready' if ready else
-                    'Payload/RGB missing: using existing source (not ready)'))
+        _set(host.op('STREAM_GATE'), 'index', 1 if connected else 0)
+        message = {
+            'select_generator': '1. Select trusted .tox and Load Selected Generator',
+            'configure_rgb': '2. Configure the documented public RGB TOP; delivery is disconnected',
+            'preview': '2. Run generation in Generator Controls, inspect OUT_RAW, then 3. Send RGB to 3D',
+            'connected': 'RGB delivery connected; geometry bridge status confirms fresh synchronized results',
+            'invalid_source': 'Invalid source; delivery is disconnected',
+        }[stage]
+        if mode == 'existing':
+            message = 'Legacy rollback: ' + message
         if mode == 'slot' and ready and _get(host, 'Followpodcast', False):
             _follow_podcast(host, payload)
+        if state.get('command'):
+            message += ' | ' + state['command']
         if state.get('error'):
             message += ' | ' + state['error']
         _set(host, 'Ready', ready)
+        _set(host, 'Stage', stage)
         _set(host, 'Status', message)
         _sync_show(host)
         if now - state['last_status'] >= 0.5:
             dat = host.op('STATUS')
             dat.clear()
-            for key, value in [('metric', 'value'), ('source', mode), ('ready', ready),
+            for key, value in [('metric', 'value'), ('source', mode), ('stage', stage),
+                               ('ready', ready), ('stream_connected', connected),
                                ('smoothing_enabled', _get(host, 'Smoothenabled', False)),
                                ('response_ms', _get(host, 'Smoothms', 50)),
                                ('history_weight', round(weight, 6)), ('resets', state['resets']),
                                ('width', raw.width), ('height', raw.height), ('detail', message),
-                               ('note', 'Routing state only; geometry bridges own frame freshness')]:
+                               ('note', 'One selected generator; routing only, not model/server readiness')]:
                 dat.appendRow([str(key), str(value)])
             state['last_status'] = now
     except Exception as exc:
+        disarm(host, 'routing error')
         _set(host, 'Ready', False)
+        _set(host, 'Stage', 'error')
         _set(host, 'Status', type(exc).__name__ + ': ' + str(exc))
         _sync_show(host)
     finally:
@@ -220,6 +273,7 @@ def pulse(host, name):
         if name == 'Reset':
             reset(host)
         elif name == 'Loadtox':
+            disarm(host, 'load requested')
             path = os.path.abspath(os.path.expanduser(str(_get(host, 'Toxfile', ''))))
             if not path.lower().endswith('.tox') or not os.path.isfile(path):
                 raise ValueError('Choose an existing trusted local .tox file')
@@ -229,7 +283,14 @@ def pulse(host, name):
             candidate = slot.loadTox(path, unwired=True)
             _set(host, 'Payload', candidate.name)
             reset(host, 'component loaded; no start command sent')
+        elif name == 'Opencontrols':
+            payload = selected_payload(host)
+            if payload is None:
+                raise ValueError('Load the selected generator first')
+            payload.openParameters()
         elif name in ('Start', 'Stop'):
+            # Closing delivery must succeed even if a version has no Stop API.
+            disarm(host, name.lower() + ' requested')
             payload = selected_payload(host)
             if payload is None:
                 raise ValueError('Select a component in PAYLOAD_SLOT first')
@@ -237,6 +298,7 @@ def pulse(host, name):
             if not getattr(parameter, 'isPulse', False):
                 raise ValueError('Start/Stop mappings must name custom Pulse parameters')
             parameter.pulse()
+            _state(host)['command'] = name + ' pulse sent; confirm in generator controls'
             reset(host, name.lower())
         tick(host)
     except Exception as exc:

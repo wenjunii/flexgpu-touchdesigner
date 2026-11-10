@@ -893,6 +893,27 @@ class ModuleCallbackTests(unittest.TestCase):
             self.assertEqual(frame_state["frame_id"], accepted.frame_id)
             self.assertEqual(camera["frame_id"], accepted.frame_id)
             self.assertEqual(component.nodes["STATUS"].rows[0], ("metric", "value"))
+            component.par.Sourceactive = FakeParameter("Sourceactive", False)
+            with mock.patch.object(created[0], "capture_due") as capture_due:
+                paused = bridge_module.tick(component)
+            capture_due.assert_not_called()
+            self.assertEqual(paused["state"], "source_paused")
+            self.assertFalse(component.par.Resultvalid.val)
+            self.assertEqual(created[0].stopped, 0)  # Listener survives preview.
+            self.assertFalse(bridge_module.on_script_top_cook(output))
+            component.par.Sourceactive.val = True
+            component.par.Sourceepoch = FakeParameter("Sourceepoch", "new-connection")
+            bridge_module.tick(component)
+            self.assertFalse(component.par.Resultvalid.val)  # Old result cannot revive.
+            created[0].current_result = replace(accepted, generation_id="sd-new-connection")
+            bridge_module.tick(component)
+            self.assertTrue(component.par.Resultvalid.val)
+            # Continue the original no-host fixture; only host-backed bridges
+            # opt into the connection epoch.
+            component.par.Sourceepoch.val = ""
+            output.cook_forces.clear()
+            output.cook_forces.append(True)
+            created[0].uploaded_results[:] = [accepted]
             newer = validate_moge2_result_frame(result_frame(2))
             created[0].current_result = newer
 

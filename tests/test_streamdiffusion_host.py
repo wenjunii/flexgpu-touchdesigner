@@ -112,7 +112,8 @@ class StreamDiffusionHostTests(unittest.TestCase):
         for name in ('Start', 'Stop'):
             setattr(payload.par, name, Parameter(pulse=True))
             setattr(host.par, name + 'parameter', Parameter(name))
-        with mock.patch.object(runtime, 'reset'), mock.patch.object(runtime, 'tick'):
+        with mock.patch.object(runtime, 'reset'), mock.patch.object(runtime, 'tick'), \
+                mock.patch.object(runtime, 'disarm') as disarm:
             runtime.pulse(host, 'Start')
             runtime.pulse(host, 'Stop')
             payload.par.Start.isPulse = False
@@ -120,6 +121,7 @@ class StreamDiffusionHostTests(unittest.TestCase):
         self.assertEqual(payload.par.Start.pulses, 1)
         self.assertEqual(payload.par.Stop.pulses, 1)
         self.assertIn('custom Pulse', host.fetch('_sd_host_state', {})['error'])
+        self.assertEqual(disarm.call_count, 3)
 
     def test_loading_never_replaces_an_occupied_slot(self):
         host, slot = self.fixture()
@@ -130,10 +132,56 @@ class StreamDiffusionHostTests(unittest.TestCase):
             path = Path(directory) / 'candidate.tox'
             path.write_bytes(b'fixture-not-a-real-tox')
             host.par.Toxfile = Parameter(str(path))
-            with mock.patch.object(runtime, '_sync_show'):
+            with mock.patch.object(runtime, '_sync_show'), mock.patch.object(runtime, 'disarm'):
                 runtime.pulse(host, 'Loadtox')
         slot.loadTox.assert_not_called()
         self.assertIn('occupied', host.par.Status.eval())
+
+    def test_route_stages_require_an_explicit_delivery_request(self):
+        self.assertEqual(runtime.route_state('slot', False, False, True),
+                         ('select_generator', False, False))
+        self.assertEqual(runtime.route_state('slot', True, False, True),
+                         ('configure_rgb', False, False))
+        self.assertEqual(runtime.route_state('slot', True, True, False),
+                         ('preview', True, False))
+        self.assertEqual(runtime.route_state('slot', True, True, True),
+                         ('connected', True, True))
+        self.assertEqual(runtime.route_state('existing', False, False, False),
+                         ('preview', True, False))
+        self.assertEqual(runtime.route_state('unexpected', True, True, True),
+                         ('invalid_source', False, False))
+
+    def test_disarm_closes_gate_and_invalidates_previous_epoch(self):
+        host, _ = self.fixture()
+        host.par.Streamenabled = Parameter(True)
+        gate = Node('STREAM_GATE', family='TOP', parent=host)
+        gate.par.index = Parameter(1)
+        host.store('stream_epoch', 'previous')
+        with mock.patch.object(runtime, 'reset'):
+            runtime.disarm(host)
+        self.assertFalse(host.par.Streamenabled.eval())
+        self.assertEqual(gate.par.index.eval(), 0)
+        self.assertNotEqual(host.fetch('stream_epoch', ''), 'previous')
+
+    def test_open_generator_controls_never_starts_or_sends_stream(self):
+        host, slot = self.fixture()
+        payload = Node('version_a', parent=slot)
+        payload.openParameters = mock.Mock()
+        host.par.Streamenabled = Parameter(False)
+        with mock.patch.object(runtime, 'tick'):
+            runtime.pulse(host, 'Opencontrols')
+        payload.openParameters.assert_called_once_with()
+        self.assertFalse(host.par.Streamenabled.eval())
+
+    def test_public_podcast_guard_is_narrow_and_idempotent(self):
+        original = 'def sync():\n    if play_parameter is not None:\n        timeline_play.val = desired_play\n'
+        guarded = builder.podcast_timeline_guard(original)
+        self.assertIn('podcast_owns_timeline', guarded)
+        self.assertIn('host.par.Followpodcast.eval()', guarded)
+        self.assertEqual(builder.podcast_timeline_guard(guarded), guarded)
+        compile(guarded, '<public podcast guard>', 'exec')
+        with self.assertRaisesRegex(RuntimeError, 'Unrecognized public'):
+            builder.podcast_timeline_guard('some unrelated public callback')
 
     def test_optional_show_control_inventory_matches_builder(self):
         self.assertEqual(builder.VALUE_CONTROLS, validate_show_controls.SD_HOST_VALUE_CONTROLS)
@@ -146,6 +194,9 @@ class StreamDiffusionHostTests(unittest.TestCase):
         self.assertNotIn('.destroy(', source)
         self.assertNotIn("'engineCOMP'", source)
         self.assertIn("'Smoothenabled', False", source)
+        self.assertIn("'Streamenabled', False", source)
+        self.assertIn("'slot', ('slot', 'existing')", source)
+        self.assertIn("def onStart()", builder.HOST_CALLBACKS)
         self.assertIn("sources[0] != sources[1]", source)
         self.assertIn("'rgba16float'", source)
         compile(builder.HOST_CALLBACKS, '<host callbacks>', 'exec')
