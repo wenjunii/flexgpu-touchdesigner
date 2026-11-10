@@ -28,10 +28,15 @@ REPORT_VERSION = "flexgpu-show-controls-validation/v2"
 SD_HOST_VALUE_CONTROLS = (
     "Sdsource", "Sdsmoothenabled", "Sdsmoothms", "Sdtoxfile", "Sdpayload",
     "Sdrgboutput", "Sdfollowpodcast", "Sdpromptparameter", "Sdseedparameter",
-    "Sdstartparameter", "Sdstopparameter", "Sdstreamenabled",
+    "Sdstartparameter", "Sdstopparameter", "Sdstreamenabled", "Sdnoiseenabled",
+    "Sdnoisewidth", "Sdnoiseheight", "Sdnoiseseed",
 )
 SD_HOST_PULSE_CONTROLS = ("Sdreset", "Sdloadtox", "Sdstart", "Sdstop", "Sdopencontrols")
 SD_HOST_STATUS_CONTROLS = ("Sdstatus", "Sdstage")
+RETIRED_ADAPTER_COLOR_CONTROLS = (
+    "Colorenabled", "Brightness", "Contrast", "Gamma", "Blacklevel", "Opacity",
+    "Hue", "Saturation", "Value", "Resetcolor",
+)
 
 OUTPUT_DIMENSION_TARGETS = (
     ("OUT_INSTALLATION", 1),
@@ -557,6 +562,12 @@ def validate(
                     ("Hue", 0.08),
                     ("Saturation", 0.82),
                     ("Value", 0.93)):
+                source_host = adapter.op("STREAMDIFFUSION_HOST")
+                if (source_host is not None and source_host.fetch('legacy_retired', False)
+                        and name in RETIRED_ADAPTER_COLOR_CONTROLS):
+                    _record(checks, 'adapter_' + name + '_retired_disabled',
+                            not bool(_parameter(adapter_show_control, name).enable), True)
+                    continue
                 _set(adapter_show_control, name, test_value)
                 _record(
                     checks, "adapter_" + name,

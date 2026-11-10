@@ -1,8 +1,9 @@
 # Single-generator StreamDiffusion front end
 
 The new route needs **one selected generator**, not the old two-generator test.
-The previous podcast/private components remain untouched as an explicit rollback
-source; they are not required for the new route.
+Normal installation preserves the previous components, but the 3080 working
+copy has now explicitly retired that old branch. Its saved pre-deletion TOE is
+the rollback. Neither old generator is required for the new route.
 
 ```text
 choose trusted .tox -> load -> configure / generate / preview OUT_RAW
@@ -61,6 +62,39 @@ version on the 16 GB GPU.
 
 ## Version replacement and rollback
 
+### Generator noise input
+
+The host now includes `INPUT_NOISE -> GENERATOR_INPUT -> generator public TOP
+input 0`. **Feed Noise to Generator Input 0** defaults on. Noise input width and
+height default to 512×512, with a separate seed control; `OUT_INPUT` previews the
+exact input. These values do not set the generator's output resolution or the
+1920×1080 wall resolution. Noise is static by default, like the former test
+source; change its seed deliberately rather than adding unwanted temporal jitter.
+
+Loading or directly dropping a generator automatically wires its public input.
+The host refuses to replace another existing input. Disable Feed Noise for a
+version that has no public TOP input or is configured for a different source.
+Only public component connectors are used; no internal input nodes are searched.
+
+### Explicitly retiring the old branch
+
+The 3080 working copy can retire the old two generators and their duplicated
+noise/color/fade/Spout test branch using the reviewed
+`touchdesigner/retire_legacy_streamdiffusion.py` helper. This is never called by a
+normal install: it requires explicit confirmation and an existing, local 3080
+TOE backup. It checks an exact name/type allowlist and rejects unrelated
+downstream consumers. Docked callback DATs that TD removes with their owner are
+handled without stale operator references.
+
+After retirement, the host has no legacy input and its source menu contains
+only Selected Generator. Reinstall remains supported and does not resurrect the
+old branch. Podcast audio, sequencing, caption/prompt tables, geometry workers,
+point-cloud grading, interactions and wall renderers remain. Public controller
+hooks stop targeting the removed two renderers; obsolete per-source color
+controls are disabled. Use the main Show Control Color Adjustment tab for the
+point cloud. Original external home-podcast files and all 5090 local files are
+unchanged. The saved pre-deletion TOE is the rollback, not hidden live generators.
+
 `PAYLOAD_SLOT` starts empty and loads one trusted TOX. Directly dropping a COMP
 is also supported; a sole child is selected automatically. An explicit component
 name must resolve to a direct child of this slot; the RGB mapping must stay
@@ -71,7 +105,8 @@ version deliberately before loading another. It never silently replaces or
 deletes private contents. This is a single active-generator workflow, not an
 automatic A/B switcher.
 
-**Legacy Podcast (Rollback)** selects the original accepted RGB source and also
+For copies that have not retired the old branch, **Legacy Podcast (Rollback)**
+selects the original accepted RGB source and also
 requires **Send RGB to 3D**. A missing replacement never silently falls back to
 a cached old image. Existing generators and the dual-stream podcast compositor
 are preserved but bypassed in Selected Generator mode. Selecting another route

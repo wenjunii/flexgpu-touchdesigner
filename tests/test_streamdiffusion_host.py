@@ -10,6 +10,7 @@ from unittest import mock
 from touchdesigner import streamdiffusion_host as builder
 from touchdesigner import streamdiffusion_host_runtime as runtime
 from touchdesigner import validate_show_controls
+from touchdesigner import retire_legacy_streamdiffusion as retirement
 
 
 class Parameter:
@@ -183,10 +184,86 @@ class StreamDiffusionHostTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'Unrecognized public'):
             builder.podcast_timeline_guard('some unrelated public callback')
 
+    def test_noise_wiring_uses_only_public_input_zero_and_preserves_other_input(self):
+        payload = SimpleNamespace(inputs=[])
+        noise = SimpleNamespace(outputConnectors=[])
+        incoming = mock.Mock()
+        incoming.disconnect.side_effect = lambda: setattr(payload, 'inputs', [])
+        payload.inputConnectors = [incoming]
+        outgoing = mock.Mock()
+        outgoing.connect.side_effect = lambda target: setattr(payload, 'inputs', [noise])
+        noise.outputConnectors = [outgoing]
+        runtime.wire_noise(payload, noise, True)
+        outgoing.connect.assert_called_once_with(incoming)
+        runtime.wire_noise(payload, noise, True)
+        outgoing.connect.assert_called_once()
+        runtime.wire_noise(payload, noise, False)
+        self.assertEqual(payload.inputs, [])
+        payload.inputs = [object()]
+        with self.assertRaisesRegex(ValueError, 'occupied'):
+            runtime.wire_noise(payload, noise, True)
+        runtime.wire_noise(payload, noise, False)
+        self.assertEqual(len(payload.inputs), 1)
+        payload.inputs = []
+        payload.inputConnectors = []
+        with self.assertRaisesRegex(ValueError, 'no public TOP input'):
+            runtime.wire_noise(payload, noise, True)
+
+    def test_loader_ignores_only_its_owned_noise_transport(self):
+        host, slot = self.fixture()
+        transport = Node('INPUT_FROM_HOST', family='TOP', parent=slot)
+        transport.type = 'select'
+        transport.store('managed_owner', 'flexgpu-streamdiffusion-input/v1')
+        self.assertFalse(runtime.slot_occupied(slot))
+        Node('user_node', family='TOP', parent=slot)
+        self.assertTrue(runtime.slot_occupied(slot))
+
+    def test_retired_controller_keeps_sequencing_but_cannot_write_old_generators(self):
+        host, _ = self.fixture()
+        host.store('legacy_retired', True)
+        controller = SimpleNamespace(_write_streamdiffusion=mock.Mock(),
+                                     _write_color_controls=mock.Mock(), update=mock.Mock())
+        self.assertIs(runtime.attach_podcast_controller(host, controller), controller)
+        self.assertEqual(controller._write_streamdiffusion(None), 'single_generator_host')
+        self.assertEqual(controller._write_color_controls(), 'point_cloud_color_controls')
+        controller.update.assert_not_called()
+        source = 'def get_controller():\n    if cached:\n        return _CONTROLLER\n    return _CONTROLLER\n'
+        patched = retirement.controller_guard(source)
+        self.assertEqual(retirement.controller_guard(patched), patched)
+        compile(patched, '<retired public controller>', 'exec')
+
+    def test_retirement_requires_explicit_confirmation_backup_and_3080_scope(self):
+        arguments = dict(backup_path='missing.toe', project_folder='.', project_name='3080.44.toe')
+        with self.assertRaisesRegex(RuntimeError, 'Explicit confirmation'):
+            retirement.retire(None, **arguments)
+        arguments['project_name'] = '5090.71.toe'
+        with self.assertRaisesRegex(RuntimeError, '3080 working copy'):
+            retirement.retire(None, confirm=True, **arguments)
+        arguments['project_name'] = '3080.44.toe'
+        with self.assertRaisesRegex(RuntimeError, 'backup is required'):
+            retirement.retire(None, confirm=True, **arguments)
+
+    def test_retirement_tolerates_automatically_deleted_docked_callbacks(self):
+        nodes = {}
+        callback = SimpleNamespace(destroy=mock.Mock())
+        def remove_generator():
+            nodes.pop('StreamDiffusionTD')
+            nodes.pop('StreamDiffusionTD_callbacks')
+        generator = SimpleNamespace(destroy=mock.Mock(side_effect=remove_generator))
+        nodes.update(StreamDiffusionTD=generator, StreamDiffusionTD_callbacks=callback)
+        adapter = SimpleNamespace(op=nodes.get)
+        retirement._destroy_reviewed_roots(adapter, ['StreamDiffusionTD', 'StreamDiffusionTD_callbacks'])
+        generator.destroy.assert_called_once()
+        callback.destroy.assert_not_called()
+        with self.assertRaisesRegex(RuntimeError, 'Unreviewed'):
+            retirement._destroy_reviewed_roots(adapter, ['audio_out'])
+
     def test_optional_show_control_inventory_matches_builder(self):
         self.assertEqual(builder.VALUE_CONTROLS, validate_show_controls.SD_HOST_VALUE_CONTROLS)
         self.assertEqual(builder.PULSE_CONTROLS, validate_show_controls.SD_HOST_PULSE_CONTROLS)
         self.assertEqual(builder.STATUS_CONTROLS, validate_show_controls.SD_HOST_STATUS_CONTROLS)
+        self.assertEqual(retirement.RETIRED_COLOR_CONTROLS,
+                         validate_show_controls.RETIRED_ADAPTER_COLOR_CONTROLS)
 
     def test_builder_has_no_automatic_private_load_or_engine(self):
         source = Path(builder.__file__).read_text(encoding='utf-8')
@@ -195,7 +272,7 @@ class StreamDiffusionHostTests(unittest.TestCase):
         self.assertNotIn("'engineCOMP'", source)
         self.assertIn("'Smoothenabled', False", source)
         self.assertIn("'Streamenabled', False", source)
-        self.assertIn("'slot', ('slot', 'existing')", source)
+        self.assertIn("('slot',) if retired else ('slot', 'existing')", source)
         self.assertIn("def onStart()", builder.HOST_CALLBACKS)
         self.assertIn("sources[0] != sources[1]", source)
         self.assertIn("'rgba16float'", source)

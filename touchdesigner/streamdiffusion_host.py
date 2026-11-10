@@ -14,7 +14,8 @@ OWNER = 'flexgpu-streamdiffusion-host/v1'
 VALUE_CONTROLS = ('Sdsource', 'Sdsmoothenabled', 'Sdsmoothms', 'Sdtoxfile',
                   'Sdpayload', 'Sdrgboutput', 'Sdfollowpodcast', 'Sdpromptparameter',
                   'Sdseedparameter', 'Sdstartparameter', 'Sdstopparameter',
-                  'Sdstreamenabled')
+                  'Sdstreamenabled', 'Sdnoiseenabled', 'Sdnoisewidth',
+                  'Sdnoiseheight', 'Sdnoiseseed')
 PULSE_CONTROLS = ('Sdreset', 'Sdloadtox', 'Sdstart', 'Sdstop', 'Sdopencontrols')
 STATUS_CONTROLS = ('Sdstatus', 'Sdstage')
 PIXEL = '''uniform float uHistory;
@@ -97,6 +98,7 @@ def install(root=None):
     host = adapter.op(HOST_NAME)
     if host is not None and host.fetch('managed_owner', None) != OWNER:
         raise RuntimeError('Refusing to overwrite an unrecognized host')
+    retired = host is not None and bool(host.fetch('legacy_retired', False))
     if host is not None:
         source = rp._first_input(host)
     else:
@@ -104,7 +106,7 @@ def install(root=None):
         if any(x is None for x in sources) or sources[0] != sources[1]:
             raise RuntimeError('Geometry bridges do not share one accepted RGB source')
         source = sources[0]
-    if source is None or source == host:
+    if not retired and (source is None or source == host):
         raise RuntimeError('Accepted upstream RGB source is unavailable')
     report = rp.BuildReport()
     host = rp._ensure(adapter, 'baseCOMP', HOST_NAME, report)
@@ -114,12 +116,16 @@ def install(root=None):
               'Stable RGB host; drop private tox in PAYLOAD_SLOT; smoothing defaults OFF', 300, 125)
     page = rp._page(host, 'StreamDiffusion Host')
     specs = [
-        ('Menu', 'Source', 'slot', ('slot', 'existing'), 'Pipeline Source'),
+        ('Menu', 'Source', 'slot', ('slot',) if retired else ('slot', 'existing'), 'Pipeline Source'),
         ('File', 'Toxfile', '', None, '1. Trusted Local StreamDiffusion .tox'),
         ('Pulse', 'Loadtox', False, None, '1. Load Selected Generator'),
         ('Pulse', 'Opencontrols', False, None, '2. Open Generator Controls'),
         ('Str', 'Payload', '', None, 'Selected Drop-Slot Component Name'),
         ('Str', 'Rgboutput', 'out1', None, 'Public RGB TOP Relative to Component'),
+        ('Toggle', 'Noiseenabled', True, None, 'Feed Noise to Generator Input 0'),
+        ('Int', 'Noisewidth', 512, None, 'Noise Input Width'),
+        ('Int', 'Noiseheight', 512, None, 'Noise Input Height'),
+        ('Int', 'Noiseseed', 1, None, 'Noise Input Seed'),
         ('Str', 'Startparameter', '', None, 'Public Start Pulse Parameter'),
         ('Str', 'Stopparameter', '', None, 'Public Stop Pulse Parameter'),
         ('Pulse', 'Start', False, None, '2. Start Generator (Mapped Pulse)'),
@@ -137,21 +143,45 @@ def install(root=None):
     ]
     for order, (kind, name, default, menu, label) in enumerate(specs):
         rp._custom(host, page, kind, name, default, menu, label,
-                   minimum=0 if name == 'Smoothms' else None,
-                   maximum=250 if name == 'Smoothms' else None)
+                   minimum=(64 if name in ('Noisewidth', 'Noiseheight') else
+                            0 if name in ('Smoothms', 'Noiseseed') else None),
+                   maximum=(2048 if name in ('Noisewidth', 'Noiseheight') else
+                            2147483647 if name == 'Noiseseed' else
+                            250 if name == 'Smoothms' else None))
         rp._par(host, name).order = order
         rp._par(host, name).label = label
-    rp._par(host, 'Source').menuLabels = ['Selected Generator', 'Legacy Podcast (Rollback)']
+    source_labels = ['Selected Generator'] + ([] if retired else ['Legacy Podcast (Rollback)'])
+    rp._par(host, 'Source').menuLabels = source_labels
+    rp._par(host, 'Source').readOnly = retired
     for name in ('Ready', 'Status', 'Stage'):
         rp._par(host, name).readOnly = True
-    existing = rp._in_top(host, 'EXISTING_RGB', 0, report)
+    existing = None if retired else rp._in_top(host, 'EXISTING_RGB', 0, report)
+    noise = rp._ensure(host, 'noiseTOP', 'INPUT_NOISE', report)
+    rp._set(noise, 'type', 'simplex4d')
+    rp._set(noise, 'outputresolution', 'custom')
+    rp._expr(noise, 'resolutionw', 'parent().par.Noisewidth')
+    rp._expr(noise, 'resolutionh', 'parent().par.Noiseheight')
+    rp._expr(noise, 'seed', 'parent().par.Noiseseed')
+    noise_input = rp._ensure(host, 'nullTOP', 'GENERATOR_INPUT', report)
+    rp._connect(noise, noise_input, report=report, replace=True)
+    rp._out_top(host, 'OUT_INPUT', noise_input, 2, report)
     slot = rp._ensure(host, 'baseCOMP', 'PAYLOAD_SLOT', report)
     rp._style(slot, -400, -200, (0.5, 0.2, 0.4), 'Drop a trusted private .tox HERE. Nothing is auto-started by the host.', 320, 125)
+    slot_input = rp._ensure(slot, 'selectTOP', 'INPUT_FROM_HOST', report)
+    slot_input.store('managed_owner', 'flexgpu-streamdiffusion-input/v1')
+    rp._set(slot_input, 'top', noise_input.path)
+    slot_input.nodeX, slot_input.nodeY = -400, 200
+    slot_input.comment = 'Public noise boundary; connects to the selected generator in this network'
     selected = rp._ensure(host, 'selectTOP', 'PAYLOAD_RGB', report)
-    rp._set(selected, 'top', existing.path)
+    rp._set(selected, 'top', existing.path if existing else host.path + '/DISCONNECTED')
     raw = rp._ensure(host, 'switchTOP', 'RAW_RGB', report)
-    rp._connect(existing, raw, 0, report=report, replace=True)
-    rp._connect(selected, raw, 1, report=report, replace=True)
+    if retired:
+        for connector in raw.inputConnectors:
+            connector.disconnect()
+        rp._connect(selected, raw, 0, report=report, replace=True)
+    else:
+        rp._connect(existing, raw, 0, report=report, replace=True)
+        rp._connect(selected, raw, 1, report=report, replace=True)
     history = rp._ensure(host, 'feedbackTOP', 'HISTORY', report)
     rp._connect(raw, history, report=report, replace=True)
     shader = rp._text(host, 'SMOOTH_PIXEL', PIXEL, report)
@@ -197,6 +227,9 @@ def install(root=None):
              'ONE selected generator. 1: choose trusted .tox and Load. '
              '2: Open Generator Controls, configure and run it (or map Start). '
              'Preview OUT_RAW. 3: enable Send RGB to 3D.\n'
+             'INPUT_NOISE -> GENERATOR_INPUT automatically feeds public TOP input 0. '
+             'OUT_INPUT previews it. Noise resolution/seed are independent of generation '
+             'and wall resolution; disable noise for versions without a public TOP input.\n'
              'Drop a trusted private .tox inside PAYLOAD_SLOT. Select its direct child '
              'name and public RGB TOP (relative to that component).\n'
              'Load Selected Generator refuses an occupied slot and never deletes an existing version. '
@@ -208,7 +241,7 @@ def install(root=None):
              'Stop always disconnects RGB first, even if Stop mapping is missing. '
              'Disconnection does not itself unload an external model server. '
              'Cold reopen and generator/output changes require explicit reconnection. '
-             'Legacy is rollback only; there is no A/B generator requirement.\n'
+             'No A/B generator is required. Legacy may be explicitly retired with a backup.\n'
              'MoGe-2 and Depth Anything consume the same gated OUT_RGB. Do not change '
              'their downstream RGB/depth routes. Engine is not enabled by this installer.', report)
     positions = {
@@ -220,10 +253,12 @@ def install(root=None):
         'STATUS': (760, 0), 'host_runtime': (-550, -350),
         'host_callbacks': (-220, -350), 'host_parameter_callbacks': (110, -350),
         'README_FIRST': (-550, -600),
+        'INPUT_NOISE': (-1100, 560), 'GENERATOR_INPUT': (-820, 560), 'OUT_INPUT': (-550, 560),
     }
     for name, (x, y) in positions.items():
         node = host.op(name)
-        node.nodeX, node.nodeY = x, y
+        if node is not None:
+            node.nodeX, node.nodeY = x, y
     show = pipeline.op('SHOW_CONTROL')
     if show is not None:
         show_page = rp._page(show, 'StreamDiffusion')
@@ -231,11 +266,15 @@ def install(root=None):
             key = 'Sd' + name.lower()
             if key in VALUE_CONTROLS + PULSE_CONTROLS + STATUS_CONTROLS:
                 rp._custom(show, show_page, kind, key, rp._value(host, name, default), menu, label,
-                           minimum=0 if name == 'Smoothms' else None,
-                           maximum=250 if name == 'Smoothms' else None)
+                           minimum=(64 if name in ('Noisewidth', 'Noiseheight') else
+                                    0 if name in ('Smoothms', 'Noiseseed') else None),
+                           maximum=(2048 if name in ('Noisewidth', 'Noiseheight') else
+                                    2147483647 if name == 'Noiseseed' else
+                                    250 if name == 'Smoothms' else None))
                 rp._par(show, key).order = order
                 rp._par(show, key).label = label
-        rp._par(show, 'Sdsource').menuLabels = ['Selected Generator', 'Legacy Podcast (Rollback)']
+        rp._par(show, 'Sdsource').menuLabels = source_labels
+        rp._par(show, 'Sdsource').readOnly = retired
         for name in STATUS_CONTROLS:
             rp._par(show, name).readOnly = True
         show_dat = rp._ensure(show, 'parameterexecuteDAT', 'streamdiffusion_callbacks', report)
@@ -248,7 +287,8 @@ def install(root=None):
         show_dat.nodeX = max((x.nodeX + x.nodeWidth for x in show.children if x != show_dat), default=0) + 180
         show_dat.nodeY = 130
     # Complete the managed host before touching the two accepted consumer wires.
-    rp._connect(source, host, report=report, replace=True)
+    if not retired:
+        rp._connect(source, host, report=report, replace=True)
     for bridge in bridges:
         if not rp._connect(host, bridge, report=report, replace=True):
             raise RuntimeError('Could not connect the shared hosted RGB to geometry')

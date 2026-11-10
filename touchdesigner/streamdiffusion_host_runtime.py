@@ -20,6 +20,8 @@ CONTROL_MAP = {
     "Sdseedparameter": "Seedparameter", "Sdstartparameter": "Startparameter",
     "Sdstopparameter": "Stopparameter",
     "Sdstreamenabled": "Streamenabled",
+    "Sdnoiseenabled": "Noiseenabled", "Sdnoisewidth": "Noisewidth",
+    "Sdnoiseheight": "Noiseheight", "Sdnoiseseed": "Noiseseed",
 }
 PULSE_MAP = {"Sdreset": "Reset", "Sdloadtox": "Loadtox",
              "Sdstart": "Start", "Sdstop": "Stop", "Sdopencontrols": "Opencontrols"}
@@ -94,6 +96,47 @@ def public_rgb(payload, relative_path):
             node.path.startswith(payload.path + '/')):
         return node
     return None
+
+
+def wire_noise(payload, noise_top, enabled):
+    """Touch only public input zero; never replace a user's different input."""
+    inputs = list(payload.inputs)
+    own_input = bool(inputs) and inputs[0] == noise_top
+    connectors = list(payload.inputConnectors)
+    if not enabled:
+        if own_input:
+            connectors[0].disconnect()
+        return
+    if not connectors:
+        raise ValueError('Generator has no public TOP input 0; disable Feed Noise for this version')
+    if inputs and not own_input:
+        raise ValueError('Generator input 0 is occupied; disconnect it or disable Feed Noise')
+    if not own_input:
+        noise_top.outputConnectors[0].connect(connectors[0])
+        if not payload.inputs or payload.inputs[0] != noise_top:
+            raise ValueError('Public generator input connection was not established')
+
+
+def slot_occupied(slot):
+    """Ignore only the exact owned transport TOP, never arbitrary user nodes."""
+    return any(not (x.name == 'INPUT_FROM_HOST' and x.family == 'TOP'
+                    and getattr(x, 'type', '') == 'select'
+                    and x.fetch('managed_owner', '') == 'flexgpu-streamdiffusion-input/v1')
+               for x in slot.children)
+
+
+def attach_podcast_controller(host, controller):
+    """Keep prompt/caption/audio sequencing without the retired two renderers.
+
+    These are public controller hooks, not private component implementation.
+    The external home-podcast module/class is not changed.
+    """
+    if not host.fetch('legacy_retired', False) or getattr(controller, '_flexgpu_single_source', False):
+        return controller
+    controller._write_streamdiffusion = lambda *args, **kwargs: 'single_generator_host'
+    controller._write_color_controls = lambda *args, **kwargs: 'point_cloud_color_controls'
+    controller._flexgpu_single_source = True
+    return controller
 
 
 def reset(host, reason='manual'):
@@ -193,10 +236,17 @@ def tick(host):
     try:
         now = time.perf_counter()
         mode = str(_get(host, 'Source', 'slot'))
+        retired = bool(host.fetch('legacy_retired', False))
+        if retired and mode != 'slot':
+            _set(host, 'Source', 'slot')
+            mode = 'slot'
         payload = selected_payload(host)
+        noise_boundary = host.op('PAYLOAD_SLOT/INPUT_FROM_HOST')
+        if payload is not None and noise_boundary is not None:
+            wire_noise(payload, noise_boundary, bool(_get(host, 'Noiseenabled', True)))
         rgb = public_rgb(payload, _get(host, 'Rgboutput', 'out1')) if payload else None
         identity = (mode, payload.path if payload else '', str(_get(host, 'Rgboutput', 'out1')),
-                    str(_get(host, 'Toxfile', '')))
+                    str(_get(host, 'Toxfile', '')), bool(_get(host, 'Noiseenabled', True)))
         if state.get('source_identity') != identity:
             disarm(host, 'generator / output selection changed')
             state['source_identity'] = identity
@@ -214,10 +264,11 @@ def tick(host):
         target = rgb if mode == 'slot' and rgb is not None else (
             host.op('EXISTING_RGB') if mode == 'existing' else host.op('DISCONNECTED'))
         _set(host.op('PAYLOAD_RGB'), 'top', target.path)
-        _set(host.op('RAW_RGB'), 'index', 0 if mode == 'existing' else 1)
+        _set(host.op('RAW_RGB'), 'index', 0 if retired or mode == 'existing' else 1)
         raw = host.op('RAW_RGB')
         key = (mode, target.path, int(raw.width), int(raw.height), _scene_token(host),
-               bool(_get(host, 'Smoothenabled', False)), float(_get(host, 'Smoothms', 50)))
+               bool(_get(host, 'Smoothenabled', False)), float(_get(host, 'Smoothms', 50)),
+               _get(host, 'Noisewidth', 512), _get(host, 'Noiseheight', 512), _get(host, 'Noiseseed', 1))
         if state['key'] != key:
             reset(host, 'source / scene / resolution / smoothing change')
             state['key'] = key
@@ -278,7 +329,7 @@ def pulse(host, name):
             if not path.lower().endswith('.tox') or not os.path.isfile(path):
                 raise ValueError('Choose an existing trusted local .tox file')
             slot = host.op('PAYLOAD_SLOT')
-            if slot.children:
+            if slot_occupied(slot):
                 raise ValueError('Drop slot is occupied; preserve/stop the old version before loading another')
             candidate = slot.loadTox(path, unwired=True)
             _set(host, 'Payload', candidate.name)
@@ -294,6 +345,9 @@ def pulse(host, name):
             payload = selected_payload(host)
             if payload is None:
                 raise ValueError('Select a component in PAYLOAD_SLOT first')
+            noise_boundary = host.op('PAYLOAD_SLOT/INPUT_FROM_HOST')
+            if name == 'Start' and noise_boundary is not None:
+                wire_noise(payload, noise_boundary, bool(_get(host, 'Noiseenabled', True)))
             parameter = _mapped_parameter(payload, _get(host, name + 'parameter', ''))
             if not getattr(parameter, 'isPulse', False):
                 raise ValueError('Start/Stop mappings must name custom Pulse parameters')

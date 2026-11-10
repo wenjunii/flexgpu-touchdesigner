@@ -428,8 +428,9 @@ producer and add the external MoGe-2 bridge to an ignored working `.toe`.
 
 The optional **single-generator front end** uses a clear sequence: select/load a
 trusted local StreamDiffusion `.tox`, configure/run it and preview `OUT_RAW`, then
-enable **Send RGB to 3D**. Only one selected generator is needed. Previous podcast
-generators remain untouched as explicit legacy rollback, not an A/B requirement.
+enable **Send RGB to 3D**. Only one selected generator is needed. Normal installs
+preserve previous components; the explicitly retired 3080 working copy removes
+the old dual branch and uses a saved TOE backup for rollback, not live A/B nodes.
 Delivery and temporal smoothing default off. Both geometry providers receive the
 same gated RGB. Pausing delivery keeps listeners available without sending
 placeholder frames, and old-connection results cannot revive. The
@@ -438,6 +439,11 @@ Start/Stop mappings and pipeline stage/status. No model is downloaded or started
 by installation. See
 [docs/STREAMDIFFUSION_HOST.md](docs/STREAMDIFFUSION_HOST.md) for installation,
 drop-slot workflow, compatibility limits, and the separate live acceptance gate.
+The host also supplies a configurable Noise TOP to the generator's public TOP
+input zero, with `OUT_INPUT` preview. A separate, explicit backup-gated 3080
+retirement helper removes the old duplicated generator branch without deleting
+podcast audio/sequencing or changing the 5090 working copy. Normal installation
+never deletes private components or resurrects an explicitly retired branch.
 
 [docs/MOGE2_LIVE.md](docs/MOGE2_LIVE.md) gives the exact offline gate,
 default-off installer, local 3080 startup order, mock/real worker commands, and
