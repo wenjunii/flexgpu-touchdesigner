@@ -16,7 +16,8 @@ VALUE_CONTROLS = ('Sdsource', 'Sdsmoothenabled', 'Sdsmoothms', 'Sdtoxfile',
                   'Sdseedparameter', 'Sdstartparameter', 'Sdstopparameter',
                   'Sdstreamenabled', 'Sdnoiseenabled', 'Sdnoisewidth',
                   'Sdnoiseheight', 'Sdnoiseseed')
-PULSE_CONTROLS = ('Sdreset', 'Sdloadtox', 'Sdstart', 'Sdstop', 'Sdopencontrols')
+PULSE_CONTROLS = ('Sdreset', 'Sdloadtox', 'Sdstart', 'Sdstop', 'Sdopencontrols',
+                  'Sdopenpreview', 'Sdopennoisecontrols', 'Sdopennoisepreview')
 STATUS_CONTROLS = ('Sdstatus', 'Sdstage')
 PIXEL = '''uniform float uHistory;
 out vec4 fragColor;
@@ -36,10 +37,14 @@ def onStart():
     return
 '''
 PARAM_CALLBACKS = '''def onValueChange(par, prev):
-    parent().op('host_runtime').module.tick(parent())
+    parent().op('host_runtime').module.host_changed(parent(), par)
     return
 def onPulse(par):
     parent().op('host_runtime').module.pulse(parent(), par.name)
+    return
+'''
+NOISE_CALLBACKS = '''def onValueChange(par, prev):
+    parent().op('host_runtime').module.tick(parent())
     return
 '''
 SHOW_CALLBACKS = '''def _host():
@@ -120,12 +125,15 @@ def install(root=None):
         ('File', 'Toxfile', '', None, '1. Trusted Local StreamDiffusion .tox'),
         ('Pulse', 'Loadtox', False, None, '1. Load Selected Generator'),
         ('Pulse', 'Opencontrols', False, None, '2. Open Generator Controls'),
+        ('Pulse', 'Openpreview', False, None, 'Generation Preview (Before 3D)'),
         ('Str', 'Payload', '', None, 'Selected Drop-Slot Component Name'),
         ('Str', 'Rgboutput', 'out1', None, 'Public RGB TOP Relative to Component'),
         ('Toggle', 'Noiseenabled', True, None, 'Feed Noise to Generator Input 0'),
         ('Int', 'Noisewidth', 512, None, 'Noise Input Width'),
         ('Int', 'Noiseheight', 512, None, 'Noise Input Height'),
         ('Int', 'Noiseseed', 1, None, 'Noise Input Seed'),
+        ('Pulse', 'Opennoisecontrols', False, None, 'Noise Controls (Native TOP Window)'),
+        ('Pulse', 'Opennoisepreview', False, None, 'Noise Input Preview'),
         ('Str', 'Startparameter', '', None, 'Public Start Pulse Parameter'),
         ('Str', 'Stopparameter', '', None, 'Public Stop Pulse Parameter'),
         ('Pulse', 'Start', False, None, '2. Start Generator (Mapped Pulse)'),
@@ -156,12 +164,24 @@ def install(root=None):
     for name in ('Ready', 'Status', 'Stage'):
         rp._par(host, name).readOnly = True
     existing = None if retired else rp._in_top(host, 'EXISTING_RGB', 0, report)
+    noise_is_new = host.op('INPUT_NOISE') is None
     noise = rp._ensure(host, 'noiseTOP', 'INPUT_NOISE', report)
-    rp._set(noise, 'type', 'simplex4d')
-    rp._set(noise, 'outputresolution', 'custom')
-    rp._expr(noise, 'resolutionw', 'parent().par.Noisewidth')
-    rp._expr(noise, 'resolutionh', 'parent().par.Noiseheight')
-    rp._expr(noise, 'seed', 'parent().par.Noiseseed')
+    if noise_is_new:
+        rp._set(noise, 'type', 'simplex4d')
+        rp._set(noise, 'outputresolution', 'custom')
+        for native, quick in (('resolutionw', 'Noisewidth'),
+                              ('resolutionh', 'Noiseheight'), ('seed', 'Noiseseed')):
+            rp._set(noise, native, rp._value(host, quick, 512 if native != 'seed' else 1))
+    else:
+        # Detach only our old expressions. Native custom expressions and other
+        # Noise/Transform/Output settings belong to the user and are preserved.
+        for native, quick in (('resolutionw', 'Noisewidth'),
+                              ('resolutionh', 'Noiseheight'), ('seed', 'Noiseseed')):
+            p = rp._par(noise, native)
+            if p.expr == 'parent().par.' + quick:
+                value = p.eval()
+                p.mode = type(p.mode).CONSTANT
+                p.val = value
     noise_input = rp._ensure(host, 'nullTOP', 'GENERATOR_INPUT', report)
     rp._connect(noise, noise_input, report=report, replace=True)
     rp._out_top(host, 'OUT_INPUT', noise_input, 2, report)
@@ -222,6 +242,12 @@ def install(root=None):
     rp._set(params, 'onpulse', True)
     # Value changes only update routing. Loading/starting requires explicit pulses.
     rp._set(params, 'active', True)
+    noise_params = rp._ensure(host, 'parameterexecuteDAT', 'noise_parameter_callbacks', report)
+    noise_params.text = NOISE_CALLBACKS
+    rp._set(noise_params, 'op', noise.path)
+    rp._set(noise_params, 'pars', 'resolutionw resolutionh seed')
+    rp._set(noise_params, 'valuechange', True)
+    rp._set(noise_params, 'active', True)
     rp._text(host, 'README_FIRST',
              'STREAMDIFFUSION HOST\n\n'
              'ONE selected generator. 1: choose trusted .tox and Load. '
@@ -230,6 +256,9 @@ def install(root=None):
              'INPUT_NOISE -> GENERATOR_INPUT automatically feeds public TOP input 0. '
              'OUT_INPUT previews it. Noise resolution/seed are independent of generation '
              'and wall resolution; disable noise for versions without a public TOP input.\n'
+             'Generation Preview opens OUT_RAW even with Send RGB to 3D OFF. '
+             'Noise Controls opens the real Noise TOP parameter window; all native '
+             'settings are preserved on reinstall. Noise Input Preview opens OUT_INPUT.\n'
              'Drop a trusted private .tox inside PAYLOAD_SLOT. Select its direct child '
              'name and public RGB TOP (relative to that component).\n'
              'Load Selected Generator refuses an occupied slot and never deletes an existing version. '
@@ -253,6 +282,7 @@ def install(root=None):
         'STATUS': (760, 0), 'host_runtime': (-550, -350),
         'host_callbacks': (-220, -350), 'host_parameter_callbacks': (110, -350),
         'README_FIRST': (-550, -600),
+        'noise_parameter_callbacks': (440, -350),
         'INPUT_NOISE': (-1100, 560), 'GENERATOR_INPUT': (-820, 560), 'OUT_INPUT': (-550, 560),
     }
     for name, (x, y) in positions.items():
@@ -303,8 +333,11 @@ def install(root=None):
         rp._par(bridge, 'Sourceactive').readOnly = True
         rp._par(bridge, 'Sourceepoch').readOnly = True
         # Refresh only the public generated-geometry runtime, not provider settings.
-        bridge.op('bridge_runtime').module.stop(bridge)
-        bridge.op('bridge_runtime').text = rp._moge2_runtime_source(report)
+        bridge_runtime = bridge.op('bridge_runtime')
+        bridge_source = rp._moge2_runtime_source(report)
+        if bridge_runtime.text != bridge_source:
+            bridge_runtime.module.stop(bridge)
+            bridge_runtime.text = bridge_source
     if host.fetch('workflow_version', 0) < 2:
         rp._set(host, 'Source', 'slot')
         rp._set(host, 'Streamenabled', False)

@@ -35,6 +35,9 @@ podcast's original timeline ownership; audio controls remain unchanged.
 2. Press **Open Generator Controls**, configure that version and run generation
    there. Set **Public RGB TOP Relative to Component** to its documented output
    (for example `out1`) and inspect `STREAMDIFFUSION_HOST/OUT_RAW`.
+   **Generation Preview (Before 3D)** opens that raw output in a reusable,
+   bordered floating viewer. It works while Send RGB to 3D is off; opening a
+   preview neither starts the generator nor connects a geometry worker.
    Alternatively, map its top-level custom Start/Stop pulse parameter names and
    use the host's buttons. Names are version-specific; no private API is guessed
    or inspected. Start dispatch does not itself connect the stream.
@@ -70,6 +73,18 @@ height default to 512×512, with a separate seed control; `OUT_INPUT` previews t
 exact input. These values do not set the generator's output resolution or the
 1920×1080 wall resolution. Noise is static by default, like the former test
 source; change its seed deliberately rather than adding unwanted temporal jitter.
+
+**Noise Controls (Native TOP Window)** opens the actual `INPUT_NOISE` parameter
+dialog, including its regular Noise, Transform, Output and Common pages—not a
+limited replica. **Noise Input Preview** opens a reusable viewer for `OUT_INPUT`.
+The quick width/height/integer-seed controls synchronize with the native TOP;
+native fractional seeds, custom expressions and other native settings remain
+authoritative and are preserved on reinstall. Editing a quick size control
+explicitly selects Custom output resolution. Native settings beyond the quick
+controls' bounds are not silently clamped back to the convenience readouts.
+The installer detaches only its previous width/height/seed link expressions,
+leaving user-authored expressions intact. Unchanged geometry runtimes are not
+restarted just to refresh these UI controls.
 
 Loading or directly dropping a generator automatically wires its public input.
 The host refuses to replace another existing input. Disable Feed Noise for a

@@ -174,6 +174,51 @@ class StreamDiffusionHostTests(unittest.TestCase):
         payload.openParameters.assert_called_once_with()
         self.assertFalse(host.par.Streamenabled.eval())
 
+    def test_preview_and_noise_windows_do_not_start_or_connect_generation(self):
+        host, _ = self.fixture()
+        host.par.Streamenabled = Parameter(False)
+        raw = Node('OUT_RAW', 'TOP', parent=host)
+        raw.openViewer = mock.Mock()
+        preview = Node('OUT_INPUT', 'TOP', parent=host)
+        preview.openViewer = mock.Mock()
+        noise = Node('INPUT_NOISE', 'TOP', parent=host)
+        noise.openParameters = mock.Mock()
+        with mock.patch.object(runtime, 'tick'), mock.patch.object(runtime, 'disarm') as disarm:
+            for name in ('Openpreview', 'Opennoisecontrols', 'Opennoisepreview'):
+                runtime.pulse(host, name)
+        raw.openViewer.assert_called_once_with(unique=False, borders=True)
+        preview.openViewer.assert_called_once_with(unique=False, borders=True)
+        noise.openParameters.assert_called_once_with()
+        disarm.assert_not_called()
+        self.assertFalse(host.par.Streamenabled.eval())
+
+    def test_native_noise_and_quick_controls_sync_without_clobbering_native_seed(self):
+        host, _ = self.fixture()
+        noise = Node('INPUT_NOISE', 'TOP', parent=host)
+        for quick, native in runtime.NOISE_QUICK_MAP.items():
+            value = 1 if native == 'seed' else 512
+            setattr(host.par, quick, Parameter(value))
+            getattr(host.par, quick).name = quick
+            setattr(noise.par, native, Parameter(value))
+        noise.par.outputresolution = Parameter('custom')
+        runtime._sync_noise(host)
+        noise.par.seed.val = 2.75
+        runtime._sync_noise(host)
+        self.assertEqual(host.par.Noiseseed.eval(), 2)
+        with mock.patch.object(runtime, 'tick'):
+            runtime.host_changed(host, host.par.Noiseseed)
+        self.assertEqual(noise.par.seed.eval(), 2.75)
+        # A host edit remains authoritative if the frame tick arrives first.
+        host.par.Noisewidth.val = 384
+        runtime._sync_noise(host)
+        self.assertEqual(noise.par.resolutionw.eval(), 384)
+        show_parameter = Parameter(640)
+        show_parameter.name = 'Sdnoisewidth'
+        with mock.patch.object(runtime, 'tick'):
+            runtime.control_changed(host, show_parameter)
+        self.assertEqual(noise.par.resolutionw.eval(), 640)
+        self.assertEqual(noise.par.seed.eval(), 2.75)
+
     def test_public_podcast_guard_is_narrow_and_idempotent(self):
         original = 'def sync():\n    if play_parameter is not None:\n        timeline_play.val = desired_play\n'
         guarded = builder.podcast_timeline_guard(original)
@@ -279,6 +324,7 @@ class StreamDiffusionHostTests(unittest.TestCase):
         compile(builder.HOST_CALLBACKS, '<host callbacks>', 'exec')
         compile(builder.PARAM_CALLBACKS, '<parameter callbacks>', 'exec')
         compile(builder.SHOW_CALLBACKS, '<show callbacks>', 'exec')
+        compile(builder.NOISE_CALLBACKS, '<noise callbacks>', 'exec')
 
 
 if __name__ == '__main__':

@@ -24,7 +24,10 @@ CONTROL_MAP = {
     "Sdnoiseheight": "Noiseheight", "Sdnoiseseed": "Noiseseed",
 }
 PULSE_MAP = {"Sdreset": "Reset", "Sdloadtox": "Loadtox",
-             "Sdstart": "Start", "Sdstop": "Stop", "Sdopencontrols": "Opencontrols"}
+             "Sdstart": "Start", "Sdstop": "Stop", "Sdopencontrols": "Opencontrols",
+             "Sdopenpreview": "Openpreview", "Sdopennoisecontrols": "Opennoisecontrols",
+             "Sdopennoisepreview": "Opennoisepreview"}
+NOISE_QUICK_MAP = {'Noisewidth': 'resolutionw', 'Noiseheight': 'resolutionh', 'Noiseseed': 'seed'}
 
 
 def history_weight(elapsed, response_ms, enabled=True):
@@ -228,12 +231,64 @@ def _sync_show(host):
         state['syncing'] = False
 
 
+def _sync_noise(host):
+    """The native TOP owns settings; mirror only integer convenience controls."""
+    noise = host.op('INPUT_NOISE')
+    if noise is None:
+        return
+    state = _state(host)
+    state['noise_syncing'] = True
+    try:
+        mirrors = state.setdefault('noise_mirrors', {})
+        seen = state.setdefault('noise_native_values', {})
+        for quick, native in NOISE_QUICK_MAP.items():
+            value = _get(noise, native, _get(host, quick))
+            if (quick in seen and value == seen[quick] and quick in mirrors
+                    and _get(host, quick) != mirrors[quick]):
+                # Honor a direct host edit even if a frame tick beats the
+                # deferred Parameter Execute callback to it.
+                _apply_noise_quick(host, quick, _get(host, quick))
+                value = _get(noise, native, value)
+            _set(host, quick, int(float(value)))
+            # Use the actual (possibly bounded) quick value. A delayed callback
+            # must not clamp a native fractional/large value back to this mirror.
+            mirrors[quick] = _get(host, quick)
+            seen[quick] = value
+    finally:
+        state['noise_syncing'] = False
+
+
+def _apply_noise_quick(host, name, value):
+    native = NOISE_QUICK_MAP.get(name)
+    noise = host.op('INPUT_NOISE')
+    if native is None or noise is None:
+        return
+    p = getattr(noise.par, native)
+    if hasattr(p, 'mode'):
+        p.mode = type(p.mode).CONSTANT
+    p.val = value
+    if name in ('Noisewidth', 'Noiseheight'):
+        _set(noise, 'outputresolution', 'custom')
+    _state(host).setdefault('noise_mirrors', {})[name] = value
+
+
+def host_changed(host, parameter):
+    state = _state(host)
+    if state.get('noise_syncing'):
+        return
+    name, value = str(parameter.name), parameter.eval()
+    if name in NOISE_QUICK_MAP and state.get('noise_mirrors', {}).get(name) != value:
+        _apply_noise_quick(host, name, value)
+    tick(host)
+
+
 def tick(host):
     state = _state(host)
     if state.get('ticking'):
         return
     state['ticking'] = True
     try:
+        _sync_noise(host)
         now = time.perf_counter()
         mode = str(_get(host, 'Source', 'slot'))
         retired = bool(host.fetch('legacy_retired', False))
@@ -339,6 +394,16 @@ def pulse(host, name):
             if payload is None:
                 raise ValueError('Load the selected generator first')
             payload.openParameters()
+        elif name in ('Openpreview', 'Opennoisepreview'):
+            target = host.op('OUT_RAW' if name == 'Openpreview' else 'OUT_INPUT')
+            if target is None:
+                raise ValueError('Preview TOP is unavailable; reinstall the public host')
+            target.openViewer(unique=False, borders=True)
+        elif name == 'Opennoisecontrols':
+            noise = host.op('INPUT_NOISE')
+            if noise is None:
+                raise ValueError('Noise TOP is unavailable; reinstall the public host')
+            noise.openParameters()
         elif name in ('Start', 'Stop'):
             # Closing delivery must succeed even if a version has no Stop API.
             disarm(host, name.lower() + ' requested')
@@ -368,5 +433,10 @@ def control_changed(host, parameter, is_pulse=False):
     if is_pulse and name in PULSE_MAP:
         pulse(host, PULSE_MAP[name])
     elif name in CONTROL_MAP:
-        _set(host, CONTROL_MAP[name], parameter.eval())
+        target, value = CONTROL_MAP[name], parameter.eval()
+        if _get(host, target) == value:
+            return
+        _set(host, target, value)
+        if target in NOISE_QUICK_MAP:
+            _apply_noise_quick(host, target, value)
         tick(host)

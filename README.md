@@ -440,7 +440,10 @@ by installation. See
 [docs/STREAMDIFFUSION_HOST.md](docs/STREAMDIFFUSION_HOST.md) for installation,
 drop-slot workflow, compatibility limits, and the separate live acceptance gate.
 The host also supplies a configurable Noise TOP to the generator's public TOP
-input zero, with `OUT_INPUT` preview. A separate, explicit backup-gated 3080
+input zero, with `OUT_INPUT` preview. The StreamDiffusion tab has floating
+Generation Preview, native Noise Controls and Noise Input Preview buttons;
+previewing is independent of Send RGB to 3D and never starts generation.
+Native noise settings are preserved on reinstall. A separate, explicit backup-gated 3080
 retirement helper removes the old duplicated generator branch without deleting
 podcast audio/sequencing or changing the 5090 working copy. Normal installation
 never deletes private components or resurrects an explicitly retired branch.
