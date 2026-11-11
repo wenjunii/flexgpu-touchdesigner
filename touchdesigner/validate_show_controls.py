@@ -15,6 +15,7 @@ private StreamDiffusionTD internals.
 from __future__ import print_function
 
 import json
+import inspect
 import math
 import time
 from pathlib import Path
@@ -183,6 +184,44 @@ STATUS_CONTROLS = (
     "Vrstatus",
 )
 
+# These are bounded optional additions, not permission to ignore missing controls.
+OPTIONAL_CONTROL_GROUPS = {
+    "vr_foundation": tuple(name for name in VALUE_CONTROLS + PULSE_CONTROLS + STATUS_CONTROLS
+                           if name == "Experience" or name.lower().startswith("vr")
+                           or name in ("Resetvrheadpose", "Resetvrhands")),
+    "femto_calibration_trim": (
+        "Femtomirrorhorizontal", "Femtopositionscale",
+        "Femtotrimxmetres", "Femtotrimymetres", "Femtotrimzmetres",
+        "Femtotrimyawdegrees", "Femtotrimpitchdegrees", "Femtotrimrolldegrees",
+        "Femtoaudiencenearmetres", "Femtoaudiencefarmetres",
+        "Resetfemtocalibrationtrim",
+    ),
+}
+
+
+def control_inventory(control, pipeline, allow_absent_optional=False):
+    """Fail closed on partial features; explicitly opt in to older destinations."""
+    actual = {str(parameter.name) for parameter in control.customPars}
+    excluded = set()
+    features = {}
+    for feature, names in OPTIONAL_CONTROL_GROUPS.items():
+        present = actual.intersection(names)
+        if present and present != set(names):
+            raise RuntimeError("Partially installed optional control group: " + feature)
+        installed = bool(present)
+        if feature == "vr_foundation" and installed != (pipeline.op("VR_OUTPUT") is not None):
+            raise RuntimeError("VR controls and VR_OUTPUT must be installed together")
+        if not installed:
+            if not allow_absent_optional:
+                raise RuntimeError("Optional feature is absent; use allow_absent_optional=True "
+                                   "only to audit an existing older destination: " + feature)
+            excluded.update(names)
+        features[feature] = "installed" if installed else "not_installed"
+    return (tuple(name for name in VALUE_CONTROLS if name not in excluded),
+            tuple(name for name in PULSE_CONTROLS if name not in excluded),
+            tuple(name for name in STATUS_CONTROLS if name not in excluded), features)
+
+
 ADAPTER_VALUE_CONTROLS = (
     "Play",
     "Audioenabled",
@@ -207,6 +246,20 @@ ADAPTER_PULSE_CONTROLS = (
     "Reload",
     "Resetcolor",
 )
+
+
+def adapter_control_inventory(adapter, control, allow_absent_optional=False):
+    """Recognize only the complete old/new public scene-selector contract."""
+    if control is None:
+        raise RuntimeError("Existing adapter show_control is required")
+    present = [getattr(node.par, "Visualpath", None) is not None
+               for node in (adapter, control)]
+    if present == [True, True]:
+        return ADAPTER_VALUE_CONTROLS, "installed"
+    if (any(present) or not allow_absent_optional or
+            getattr(adapter.par, "Playlistmanifest", None) is not None):
+        raise RuntimeError("Missing or partially installed podcast Visualpath controls")
+    return tuple(name for name in ADAPTER_VALUE_CONTROLS if name != "Visualpath"), "not_installed"
 
 
 def _operator(path, lookup=None):
@@ -324,6 +377,21 @@ def _apply(callbacks, control, name, value):
     callbacks.apply_parameter(name)
 
 
+def _reset_calibration_trim(callbacks, prefix):
+    """Respect the older Sensor-only public callback without hiding its errors."""
+    reset = callbacks._reset_sensor_calibration_trim
+    signature = inspect.signature(reset)
+    try:
+        signature.bind(prefix)
+    except TypeError:
+        if prefix != "Sensor":
+            raise RuntimeError("Femto trim controls require the prefixed reset callback")
+        signature.bind()
+        reset()
+    else:
+        reset(prefix)
+
+
 def _shader_contains(node, marker, value):
     if node is None:
         return False
@@ -409,13 +477,19 @@ def _output_dimension_report(pipeline, wall_width, wall_height):
 
 def validate(
         report_path=None, expected_profile="3080ti_16gb",
-        operator_lookup=None):
-    """Exercise every public value control and restore the accepted state."""
+        operator_lookup=None, allow_absent_optional=False):
+    """Exercise installed public controls; absent optional groups require opt-in."""
+    if expected_profile not in ("3080ti_16gb", "4090", "5090"):
+        raise ValueError("Use the canonical 3080ti_16gb, 4090 or 5090 profile")
 
     control = _assert_operator(
         _operator(CONTROL_PATH, operator_lookup), CONTROL_PATH)
     pipeline = _assert_operator(
         _operator(PIPELINE_PATH, operator_lookup), PIPELINE_PATH)
+    value_controls, pulse_controls, status_controls, features = control_inventory(
+        control, pipeline, allow_absent_optional)
+    if _value(control, "Qualityprofile") != expected_profile:
+        raise ValueError("Show Control profile does not match the requested machine")
     callback_dat = _assert_operator(
         control.op("show_control_callbacks"),
         CONTROL_PATH + "/show_control_callbacks")
@@ -447,8 +521,7 @@ def validate(
         pipeline.path + "/SOURCES/FEMTO_MEGA_ADAPTER")
     render = _assert_operator(
         pipeline.op("POINT_RENDER"), PIPELINE_PATH + "/POINT_RENDER")
-    vr = _assert_operator(
-        pipeline.op("VR_OUTPUT"), PIPELINE_PATH + "/VR_OUTPUT")
+    vr = pipeline.op("VR_OUTPUT")
     triple = _assert_operator(
         pipeline.op("TRIPLE_DISPLAY"), PIPELINE_PATH + "/TRIPLE_DISPLAY")
     reconstruction = _assert_operator(
@@ -468,11 +541,16 @@ def validate(
     adapter_show_callbacks = (
         adapter_show_control.op("control_callbacks")
         if adapter_show_control is not None else None)
+    adapter_value_controls, features["podcast_visual_path"] = adapter_control_inventory(
+        adapter, adapter_show_control, allow_absent_optional)
     adapter_execute_callbacks = adapter.op("execute_callbacks")
     audio_switch = adapter.op("audiosource_switch")
     audio_out = adapter.op("audio_out")
 
-    snapshot = _snapshot(control, VALUE_CONTROLS)
+    if any(_value(bridge, "Profile") != expected_profile
+           for bridge in (moge_bridge, depth_bridge)):
+        raise ValueError("Both geometry bridge profiles must match the requested machine")
+    snapshot = _snapshot(control, value_controls)
     bridge_snapshot = {
         "moge_enabled": _value(moge_bridge, "Enabled", False),
         "depth_enabled": _value(depth_bridge, "Enabled", False),
@@ -510,7 +588,7 @@ def validate(
     if adapter_show_control is not None:
         adapter_control_snapshot = _snapshot(
             adapter_show_control,
-            ADAPTER_VALUE_CONTROLS,
+            adapter_value_controls,
             label="adapter show_control",
         )
     checks = []
@@ -519,7 +597,7 @@ def validate(
     try:
         custom_names = set(_custom_parameter_names(control))
         expected_names = set(
-            VALUE_CONTROLS + PULSE_CONTROLS + STATUS_CONTROLS)
+            value_controls + pulse_controls + status_controls)
         if adapter.op("STREAMDIFFUSION_HOST") is not None:
             expected_names.update(SD_HOST_VALUE_CONTROLS + SD_HOST_PULSE_CONTROLS +
                                   SD_HOST_STATUS_CONTROLS)
@@ -528,9 +606,9 @@ def validate(
             sorted(custom_names), sorted(expected_names),
             details={
                 "custom_parameter_count": len(custom_names),
-                "value_controls": len(VALUE_CONTROLS),
-                "pulse_controls": len(PULSE_CONTROLS),
-                "status_controls": len(STATUS_CONTROLS),
+                "value_controls": len(value_controls),
+                "pulse_controls": len(pulse_controls),
+                "status_controls": len(status_controls),
             })
 
         if adapter_show_control is None:
@@ -541,7 +619,7 @@ def validate(
             adapter_names = set(
                 _custom_parameter_names(adapter_show_control))
             expected_adapter_names = set(
-                ADAPTER_VALUE_CONTROLS + ADAPTER_PULSE_CONTROLS)
+                adapter_value_controls + ADAPTER_PULSE_CONTROLS)
             missing_adapter_names = sorted(
                 expected_adapter_names - adapter_names)
             _record(
@@ -549,7 +627,7 @@ def validate(
                 missing_adapter_names, [],
                 details={
                     "path": adapter_show_control.path,
-                    "required_value_controls": len(ADAPTER_VALUE_CONTROLS),
+                    "required_value_controls": len(adapter_value_controls),
                     "required_pulse_controls": len(ADAPTER_PULSE_CONTROLS),
                 })
             for name in ADAPTER_PULSE_CONTROLS:
@@ -571,6 +649,8 @@ def validate(
                     ("Hue", 0.08),
                     ("Saturation", 0.82),
                     ("Value", 0.93)):
+                if name == "Visualpath" and features["podcast_visual_path"] == "not_installed":
+                    continue
                 source_host = adapter.op("STREAMDIFFUSION_HOST")
                 if (source_host is not None and source_host.fetch('legacy_retired', False)
                         and name in RETIRED_ADAPTER_COLOR_CONTROLS):
@@ -591,7 +671,9 @@ def validate(
                         "deadlock this synchronous validator.")
                 })
 
-            if adapter_show_callbacks is None:
+            if features["podcast_visual_path"] == "not_installed":
+                pass  # Older accepted podcast has no scene-variant selector to exercise.
+            elif adapter_show_callbacks is None:
                 _record(
                     checks, "adapter_Visualpath_callbacks",
                     "missing", "present")
@@ -629,7 +711,7 @@ def validate(
                         expected_file,
                     )
 
-        for name in STATUS_CONTROLS:
+        for name in status_controls:
             _record(
                 checks, name + "_read_only",
                 _status_read_only(_parameter(control, name)), True)
@@ -741,86 +823,87 @@ def validate(
                 checks, "Resetcolor_" + name,
                 _value(control, name), expected)
 
-        _apply(callbacks, control, "Experience", "combined")
-        _record(
-            checks, "Experience_vr_enabled",
-            bool(_value(vr, "Enabled", False)), True)
-        _record(
-            checks, "Experience_render_vr_enabled",
-            bool(_value(render, "Vrenabled", False)), True)
-        _set_and_check(
-            checks, callbacks, control, "Vrinputsource",
-            "mock", vr, "Inputsource")
-        for name, value, target, target_parameter in (
-                ("Vrtargethz", 80, vr, "Targethz"),
-                ("Vreyewidth", 960, vr, "Eyewidth"),
-                ("Vreyeheight", 540, vr, "Eyeheight"),
-                ("Vripdmetres", 0.066, vr, "Ipdmetres"),
-                ("Vrfovdegrees", 82.0, vr, "Fovdegrees"),
-                ("Vrheadxmetres", 0.12, render, "Vrheadxmetres"),
-                ("Vrheadymetres", -0.08, render, "Vrheadymetres"),
-                ("Vrheadzmetres", 0.16, render, "Vrheadzmetres"),
-                ("Vrheadyawdegrees", 13.0, render, "Vrheadyawdegrees"),
-                ("Vrheadpitchdegrees", -7.0, render,
-                 "Vrheadpitchdegrees"),
-                ("Vrheadrolldegrees", 4.0, render,
-                 "Vrheadrolldegrees"),
-                ("Vrhandgain", 0.73, vr, "Handgain"),
-                ("Vrlefthandxmetres", -0.19, vr,
-                 "Lefthandxmetres"),
-                ("Vrlefthandymetres", 0.11, vr,
-                 "Lefthandymetres"),
-                ("Vrlefthandzmetres", -0.92, vr,
-                 "Lefthandzmetres"),
-                ("Vrrighthandxmetres", 0.21, vr,
-                 "Righthandxmetres"),
-                ("Vrrighthandymetres", 0.09, vr,
-                 "Righthandymetres"),
-                ("Vrrighthandzmetres", -0.95, vr,
-                 "Righthandzmetres")):
+        if features["vr_foundation"] == "installed":
+            _apply(callbacks, control, "Experience", "combined")
+            _record(
+                checks, "Experience_vr_enabled",
+                bool(_value(vr, "Enabled", False)), True)
+            _record(
+                checks, "Experience_render_vr_enabled",
+                bool(_value(render, "Vrenabled", False)), True)
             _set_and_check(
-                checks, callbacks, control, name,
-                value, target, target_parameter)
-        _apply(callbacks, control, "Vrhandenabled", True)
-        _record(
-            checks, "Vrhandenabled",
-            bool(_value(vr, "Handsenabled", False)), True)
-        _record(
-            checks, "Vrhandgain_shader",
-            _shader_contains(
-                sensor.op("interaction_field_PIXEL"),
-                "FLEXGPU_VR_HAND_GAIN", 0.73),
-            True)
-        _record(
-            checks, "Vrleft_eye_dimensions",
-            _top_dimensions(vr.op("OUT_LEFT_EYE")), [960, 540])
-        _record(
-            checks, "Vrright_eye_dimensions",
-            _top_dimensions(vr.op("OUT_RIGHT_EYE")), [960, 540])
-        callbacks._reset_vr_head_pose()
-        for name in (
-                "Vrheadxmetres", "Vrheadymetres", "Vrheadzmetres",
-                "Vrheadyawdegrees", "Vrheadpitchdegrees",
-                "Vrheadrolldegrees"):
+                checks, callbacks, control, "Vrinputsource",
+                "mock", vr, "Inputsource")
+            for name, value, target, target_parameter in (
+                    ("Vrtargethz", 80, vr, "Targethz"),
+                    ("Vreyewidth", 960, vr, "Eyewidth"),
+                    ("Vreyeheight", 540, vr, "Eyeheight"),
+                    ("Vripdmetres", 0.066, vr, "Ipdmetres"),
+                    ("Vrfovdegrees", 82.0, vr, "Fovdegrees"),
+                    ("Vrheadxmetres", 0.12, render, "Vrheadxmetres"),
+                    ("Vrheadymetres", -0.08, render, "Vrheadymetres"),
+                    ("Vrheadzmetres", 0.16, render, "Vrheadzmetres"),
+                    ("Vrheadyawdegrees", 13.0, render, "Vrheadyawdegrees"),
+                    ("Vrheadpitchdegrees", -7.0, render,
+                     "Vrheadpitchdegrees"),
+                    ("Vrheadrolldegrees", 4.0, render,
+                     "Vrheadrolldegrees"),
+                    ("Vrhandgain", 0.73, vr, "Handgain"),
+                    ("Vrlefthandxmetres", -0.19, vr,
+                     "Lefthandxmetres"),
+                    ("Vrlefthandymetres", 0.11, vr,
+                     "Lefthandymetres"),
+                    ("Vrlefthandzmetres", -0.92, vr,
+                     "Lefthandzmetres"),
+                    ("Vrrighthandxmetres", 0.21, vr,
+                     "Righthandxmetres"),
+                    ("Vrrighthandymetres", 0.09, vr,
+                     "Righthandymetres"),
+                    ("Vrrighthandzmetres", -0.95, vr,
+                     "Righthandzmetres")):
+                _set_and_check(
+                    checks, callbacks, control, name,
+                    value, target, target_parameter)
+            _apply(callbacks, control, "Vrhandenabled", True)
             _record(
-                checks, "Resetvrheadpose_" + name,
-                _value(control, name), 0.0)
-        callbacks._reset_vr_hands()
-        for name, expected in (
-                ("Vrlefthandxmetres", -0.28),
-                ("Vrlefthandymetres", 0.02),
-                ("Vrlefthandzmetres", -1.15),
-                ("Vrrighthandxmetres", 0.28),
-                ("Vrrighthandymetres", 0.02),
-                ("Vrrighthandzmetres", -1.15)):
+                checks, "Vrhandenabled",
+                bool(_value(vr, "Handsenabled", False)), True)
             _record(
-                checks, "Resetvrhands_" + name,
-                _value(control, name), expected)
-        _apply(callbacks, control, "Vrhandenabled", False)
-        _apply(callbacks, control, "Experience", "installation")
-        _record(
-            checks, "Experience_installation_vr_disabled",
-            bool(_value(vr, "Enabled", True)), False)
+                checks, "Vrhandgain_shader",
+                _shader_contains(
+                    sensor.op("interaction_field_PIXEL"),
+                    "FLEXGPU_VR_HAND_GAIN", 0.73),
+                True)
+            _record(
+                checks, "Vrleft_eye_dimensions",
+                _top_dimensions(vr.op("OUT_LEFT_EYE")), [960, 540])
+            _record(
+                checks, "Vrright_eye_dimensions",
+                _top_dimensions(vr.op("OUT_RIGHT_EYE")), [960, 540])
+            callbacks._reset_vr_head_pose()
+            for name in (
+                    "Vrheadxmetres", "Vrheadymetres", "Vrheadzmetres",
+                    "Vrheadyawdegrees", "Vrheadpitchdegrees",
+                    "Vrheadrolldegrees"):
+                _record(
+                    checks, "Resetvrheadpose_" + name,
+                    _value(control, name), 0.0)
+            callbacks._reset_vr_hands()
+            for name, expected in (
+                    ("Vrlefthandxmetres", -0.28),
+                    ("Vrlefthandymetres", 0.02),
+                    ("Vrlefthandzmetres", -1.15),
+                    ("Vrrighthandxmetres", 0.28),
+                    ("Vrrighthandymetres", 0.02),
+                    ("Vrrighthandzmetres", -1.15)):
+                _record(
+                    checks, "Resetvrhands_" + name,
+                    _value(control, name), expected)
+            _apply(callbacks, control, "Vrhandenabled", False)
+            _apply(callbacks, control, "Experience", "installation")
+            _record(
+                checks, "Experience_installation_vr_disabled",
+                bool(_value(vr, "Enabled", True)), False)
 
         _set_and_check(
             checks, callbacks, control, "Interactionradius",
@@ -1009,7 +1092,7 @@ def validate(
                 for index in range(4)
             ],
             sensor_snapshot["sensor_to_world"])
-        callbacks._reset_sensor_calibration_trim("Sensor")
+        _reset_calibration_trim(callbacks, "Sensor")
         for name, expected in (
                 ("Sensorpositionscale", 1.0),
                 ("Sensortrimxmetres", 0.0),
@@ -1029,79 +1112,80 @@ def validate(
             ],
             sensor_snapshot["sensor_to_world"])
 
-        _apply(callbacks, control, "Camerasensorsource", "femto_mega")
-        _apply(callbacks, control, "Femtomirrorhorizontal", True)
-        _record(
-            checks, "Femtomirrorhorizontal",
-            bool(_value(control, "Femtomirrorhorizontal")), True)
-        _record(
-            checks, "Femtomirrorhorizontal_shader",
-            _shader_contains(
-                femto_adapter.op("CONVERT_SENSOR_POSITION_PIXEL"),
-                "FLEXGPU_FEMTO_MIRROR_HORIZONTAL", 1.0),
-            True)
-        for name, test_value, marker in (
-                ("Femtopositionscale", 1.09,
-                 "FLEXGPU_SENSOR_POSITION_SCALE"),
-                ("Femtotrimxmetres", -0.14,
-                 "FLEXGPU_SENSOR_TRIM_X"),
-                ("Femtotrimymetres", 0.11,
-                 "FLEXGPU_SENSOR_TRIM_Y"),
-                ("Femtotrimzmetres", 0.33,
-                 "FLEXGPU_SENSOR_TRIM_Z"),
-                ("Femtotrimyawdegrees", -9.0,
-                 "FLEXGPU_SENSOR_TRIM_YAW"),
-                ("Femtotrimpitchdegrees", 6.0,
-                 "FLEXGPU_SENSOR_TRIM_PITCH"),
-                ("Femtotrimrolldegrees", -3.0,
-                 "FLEXGPU_SENSOR_TRIM_ROLL")):
-            _apply(callbacks, control, name, test_value)
+        if features["femto_calibration_trim"] == "installed":
+            _apply(callbacks, control, "Camerasensorsource", "femto_mega")
+            _apply(callbacks, control, "Femtomirrorhorizontal", True)
             _record(
-                checks, name, _value(control, name), test_value)
+                checks, "Femtomirrorhorizontal",
+                bool(_value(control, "Femtomirrorhorizontal")), True)
             _record(
-                checks, name + "_shader",
+                checks, "Femtomirrorhorizontal_shader",
                 _shader_contains(
-                    calibration_shader, marker, test_value), True)
-        femto_validity_shader = femto_adapter.op(
-            "DERIVE_SENSOR_VALIDITY_PIXEL")
-        for name, test_value, marker in (
-                ("Femtoaudiencenearmetres", 2.4,
-                 "FLEXGPU_FEMTO_NEAR_METRES"),
-                ("Femtoaudiencefarmetres", 4.6,
-                 "FLEXGPU_FEMTO_FAR_METRES")):
-            _apply(callbacks, control, name, test_value)
+                    femto_adapter.op("CONVERT_SENSOR_POSITION_PIXEL"),
+                    "FLEXGPU_FEMTO_MIRROR_HORIZONTAL", 1.0),
+                True)
+            for name, test_value, marker in (
+                    ("Femtopositionscale", 1.09,
+                     "FLEXGPU_SENSOR_POSITION_SCALE"),
+                    ("Femtotrimxmetres", -0.14,
+                     "FLEXGPU_SENSOR_TRIM_X"),
+                    ("Femtotrimymetres", 0.11,
+                     "FLEXGPU_SENSOR_TRIM_Y"),
+                    ("Femtotrimzmetres", 0.33,
+                     "FLEXGPU_SENSOR_TRIM_Z"),
+                    ("Femtotrimyawdegrees", -9.0,
+                     "FLEXGPU_SENSOR_TRIM_YAW"),
+                    ("Femtotrimpitchdegrees", 6.0,
+                     "FLEXGPU_SENSOR_TRIM_PITCH"),
+                    ("Femtotrimrolldegrees", -3.0,
+                     "FLEXGPU_SENSOR_TRIM_ROLL")):
+                _apply(callbacks, control, name, test_value)
+                _record(
+                    checks, name, _value(control, name), test_value)
+                _record(
+                    checks, name + "_shader",
+                    _shader_contains(
+                        calibration_shader, marker, test_value), True)
+            femto_validity_shader = femto_adapter.op(
+                "DERIVE_SENSOR_VALIDITY_PIXEL")
+            for name, test_value, marker in (
+                    ("Femtoaudiencenearmetres", 2.4,
+                     "FLEXGPU_FEMTO_NEAR_METRES"),
+                    ("Femtoaudiencefarmetres", 4.6,
+                     "FLEXGPU_FEMTO_FAR_METRES")):
+                _apply(callbacks, control, name, test_value)
+                _record(
+                    checks, name, _value(control, name), test_value)
+                _record(
+                    checks, name + "_shader",
+                    _shader_contains(
+                        femto_validity_shader, marker, test_value), True)
             _record(
-                checks, name, _value(control, name), test_value)
+                checks, "Femtocalibration_baseline_preserved",
+                [
+                    _value(sensor, "Sensortoworld%d" % index, "")
+                    for index in range(4)
+                ],
+                sensor_snapshot["sensor_to_world"])
+            _reset_calibration_trim(callbacks, "Femto")
+            for name, expected in (
+                    ("Femtopositionscale", 1.0),
+                    ("Femtotrimxmetres", 0.0),
+                    ("Femtotrimymetres", 0.0),
+                    ("Femtotrimzmetres", 0.0),
+                    ("Femtotrimyawdegrees", 0.0),
+                    ("Femtotrimpitchdegrees", 0.0),
+                    ("Femtotrimrolldegrees", 0.0)):
+                _record(
+                    checks, "Resetfemtocalibrationtrim_" + name,
+                    _value(control, name), expected)
             _record(
-                checks, name + "_shader",
-                _shader_contains(
-                    femto_validity_shader, marker, test_value), True)
-        _record(
-            checks, "Femtocalibration_baseline_preserved",
-            [
-                _value(sensor, "Sensortoworld%d" % index, "")
-                for index in range(4)
-            ],
-            sensor_snapshot["sensor_to_world"])
-        callbacks._reset_sensor_calibration_trim("Femto")
-        for name, expected in (
-                ("Femtopositionscale", 1.0),
-                ("Femtotrimxmetres", 0.0),
-                ("Femtotrimymetres", 0.0),
-                ("Femtotrimzmetres", 0.0),
-                ("Femtotrimyawdegrees", 0.0),
-                ("Femtotrimpitchdegrees", 0.0),
-                ("Femtotrimrolldegrees", 0.0)):
-            _record(
-                checks, "Resetfemtocalibrationtrim_" + name,
-                _value(control, name), expected)
-        _record(
-            checks, "Resetfemtocalibrationtrim_baseline_preserved",
-            [
-                _value(sensor, "Sensortoworld%d" % index, "")
-                for index in range(4)
-            ],
-            sensor_snapshot["sensor_to_world"])
+                checks, "Resetfemtocalibrationtrim_baseline_preserved",
+                [
+                    _value(sensor, "Sensortoworld%d" % index, "")
+                    for index in range(4)
+                ],
+                sensor_snapshot["sensor_to_world"])
 
         for name, test_value, target_name in (
                 ("Wrapyawdegrees", 22.0, "Wrapyawdegrees"),
@@ -1383,11 +1467,13 @@ def validate(
             "fail": len(failures),
             "restoration_failures": len(all_restoration_failures),
         },
+        "features": features,
+        "allow_absent_optional": bool(allow_absent_optional),
         "controls": {
-            "value": list(VALUE_CONTROLS),
-            "pulse": list(PULSE_CONTROLS),
-            "status": list(STATUS_CONTROLS),
-            "adapter_value": list(ADAPTER_VALUE_CONTROLS),
+            "value": list(value_controls),
+            "pulse": list(pulse_controls),
+            "status": list(status_controls),
+            "adapter_value": list(adapter_value_controls),
             "adapter_pulse": list(ADAPTER_PULSE_CONTROLS),
             "streamdiffusion_host_value": list(SD_HOST_VALUE_CONTROLS)
                 if adapter.op("STREAMDIFFUSION_HOST") is not None else [],

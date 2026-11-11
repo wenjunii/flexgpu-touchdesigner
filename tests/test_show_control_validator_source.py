@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -187,11 +188,11 @@ class ShowControlValidatorSourceTests(unittest.TestCase):
             "$result.output_dimensions.status -ne 'pass'",
             "Cooked wall output dimensions",
             "actual=$($_.Value.actual -join 'x')",
-            "$valueControls.Count -ne 101",
-            "$pulseControls.Count -ne 12",
-            "$statusControls.Count -ne 8",
+            "$valueControls.Count -ne $expectedValues",
+            "$pulseControls.Count -ne $expectedPulses",
+            "$statusControls.Count -ne $expectedStatuses",
             "Experience_installation_vr_disabled",
-            "vr_foundation = 'desktop_mock_pass'",
+            "'desktop_mock_pass' } else { 'not_installed'",
             "headset_validation = 'not_performed'",
             "complete_live_acceptance = $false",
             "acceptance_scope = 'public_control_mapping_and_output_dimensions'",
@@ -209,7 +210,63 @@ class ShowControlValidatorSourceTests(unittest.TestCase):
         self.assertIn('"streamdiffusion_host_status": list(SD_HOST_STATUS_CONTROLS)', self.source)
         self.assertIn('Turn off Follow Audio / Podcast Prompts', self.source)
         self.assertLess(self.source.index('Turn off Follow Audio / Podcast Prompts'),
-                        self.source.index('snapshot = _snapshot(control, VALUE_CONTROLS)'))
+                        self.source.index('snapshot = _snapshot(control, value_controls)'))
+
+    def test_older_destination_requires_explicit_complete_feature_groups(self):
+        all_names = set(self.module.VALUE_CONTROLS + self.module.PULSE_CONTROLS +
+                        self.module.STATUS_CONTROLS)
+        absent = set().union(*map(set, self.module.OPTIONAL_CONTROL_GROUPS.values()))
+        control = SimpleNamespace(customPars=[SimpleNamespace(name=n) for n in all_names - absent])
+        pipeline = SimpleNamespace(op=lambda path: None)
+        with self.assertRaisesRegex(RuntimeError, 'allow_absent_optional'):
+            self.module.control_inventory(control, pipeline)
+        values, pulses, statuses, features = self.module.control_inventory(control, pipeline, True)
+        self.assertEqual((len(values), len(pulses), len(statuses)), (70, 9, 7))
+        self.assertEqual(set(features.values()), {'not_installed'})
+        control.customPars.append(SimpleNamespace(name='Vrinputsource'))
+        with self.assertRaisesRegex(RuntimeError, 'Partially installed'):
+            self.module.control_inventory(control, pipeline, True)
+
+    def test_vr_controls_require_matching_component_and_profiles_are_canonical(self):
+        names = self.module.VALUE_CONTROLS + self.module.PULSE_CONTROLS + self.module.STATUS_CONTROLS
+        control = SimpleNamespace(customPars=[SimpleNamespace(name=n) for n in names])
+        with self.assertRaisesRegex(RuntimeError, 'installed together'):
+            self.module.control_inventory(control, SimpleNamespace(op=lambda path: None), True)
+        for profile in ('5090_32gb', '4090_24gb', 'unknown'):
+            with self.assertRaisesRegex(ValueError, 'canonical'):
+                self.module.validate(expected_profile=profile)
+        self.assertIn('Show Control profile does not match the requested machine', self.source)
+        self.assertIn('Both geometry bridge profiles must match', self.source)
+
+    def test_calibration_reset_supports_old_and_new_public_callbacks(self):
+        calls = []
+        old = SimpleNamespace(_reset_sensor_calibration_trim=lambda: calls.append('old'))
+        new = SimpleNamespace(_reset_sensor_calibration_trim=lambda prefix: calls.append(prefix))
+        self.module._reset_calibration_trim(old, 'Sensor')
+        self.module._reset_calibration_trim(new, 'Sensor')
+        self.module._reset_calibration_trim(new, 'Femto')
+        self.assertEqual(calls, ['old', 'Sensor', 'Femto'])
+        with self.assertRaisesRegex(RuntimeError, 'prefixed reset'):
+            self.module._reset_calibration_trim(old, 'Femto')
+        def broken(prefix):
+            raise TypeError('callback body failed')
+        with self.assertRaisesRegex(TypeError, 'callback body failed'):
+            self.module._reset_calibration_trim(
+                SimpleNamespace(_reset_sensor_calibration_trim=broken), 'Sensor')
+
+    def test_adapter_scene_selector_only_allows_complete_old_or_new_contract(self):
+        old = SimpleNamespace(par=SimpleNamespace())
+        new = SimpleNamespace(par=SimpleNamespace(Visualpath=object()))
+        with self.assertRaisesRegex(RuntimeError, 'Visualpath'):
+            self.module.adapter_control_inventory(old, old)
+        values, feature = self.module.adapter_control_inventory(old, old, True)
+        self.assertEqual((len(values), feature), (14, 'not_installed'))
+        self.assertNotIn('Visualpath', values)
+        self.assertEqual(self.module.adapter_control_inventory(new, new)[1], 'installed')
+        for adapter, control in ((old, new), (new, old),
+                                 (SimpleNamespace(par=SimpleNamespace(Playlistmanifest='')), old)):
+            with self.assertRaisesRegex(RuntimeError, 'Visualpath'):
+                self.module.adapter_control_inventory(adapter, control, True)
 
     def report_fixture(self, host=True):
         vr_checks = ('Experience_vr_enabled','Experience_render_vr_enabled','Vrinputsource',
@@ -218,12 +275,16 @@ class ShowControlValidatorSourceTests(unittest.TestCase):
                      'Resetvrhands_Vrlefthandxmetres','Experience_installation_vr_disabled')
         controls = {'value':list(self.module.VALUE_CONTROLS),
                     'pulse':list(self.module.PULSE_CONTROLS),
-                    'status':list(self.module.STATUS_CONTROLS)}
+                    'status':list(self.module.STATUS_CONTROLS),
+                    'adapter_value':list(self.module.ADAPTER_VALUE_CONTROLS),
+                    'adapter_pulse':list(self.module.ADAPTER_PULSE_CONTROLS)}
         for key, values in (('value',self.module.SD_HOST_VALUE_CONTROLS),
                             ('pulse',self.module.SD_HOST_PULSE_CONTROLS),
                             ('status',self.module.SD_HOST_STATUS_CONTROLS)):
             controls['streamdiffusion_host_' + key] = list(values) if host else []
         return {'version':'flexgpu-show-controls-validation/v2','profile':'3080ti_16gb',
+                'acceptance_scope':'public_control_mapping_and_output_dimensions',
+                'complete_live_acceptance':False,
                 'status':'pass','summary':{'pass':311,'fail':0,'restoration_failures':0},
                 'controls':controls,'checks':[{'name':n,'status':'pass'} for n in
                     vr_checks + (('streamdiffusion_host_structure',) if host else ())],
@@ -234,7 +295,7 @@ class ShowControlValidatorSourceTests(unittest.TestCase):
                     'status':'pass','complete_live_acceptance':False,
                     'generator_buttons':'external_validation_required'}}
 
-    def run_report_checker(self, report):
+    def run_report_checker(self, report, expected_profile='3080ti_16gb'):
         shell = shutil.which('pwsh') or shutil.which('powershell')
         if shell is None:
             self.skipTest('PowerShell is unavailable')
@@ -242,7 +303,8 @@ class ShowControlValidatorSourceTests(unittest.TestCase):
             path = Path(temporary) / 'report.json'
             path.write_text(json.dumps(report), encoding='utf-8')
             return subprocess.run([shell, '-NoLogo', '-NoProfile', '-NonInteractive',
-                                   '-File', str(REPORT_CHECKER_PATH), '-Report', str(path)],
+                                   '-File', str(REPORT_CHECKER_PATH), '-Report', str(path),
+                                   '-ExpectedProfile', expected_profile],
                                   capture_output=True, text=True, timeout=30, check=False)
 
     def test_report_checker_accepts_optional_host_and_legacy_without_host(self) -> None:
@@ -252,12 +314,67 @@ class ShowControlValidatorSourceTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertFalse(json.loads(result.stdout)['complete_live_acceptance'])
 
+    def test_report_checker_uses_canonical_destination_profiles(self):
+        for profile in ('4090', '5090'):
+            report = self.report_fixture()
+            report['profile'] = profile
+            result = self.run_report_checker(report, profile)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            mismatch = self.run_report_checker(report)
+            self.assertNotEqual(mismatch.returncode, 0)
+            self.assertIn('does not match', mismatch.stderr)
+        for alias in ('4090_24gb', '5090_32gb'):
+            result = self.run_report_checker(self.report_fixture(), alias)
+            self.assertNotEqual(result.returncode, 0)
+
+    def older_report_fixture(self):
+        report = self.report_fixture()
+        excluded = set().union(*map(set, self.module.OPTIONAL_CONTROL_GROUPS.values()))
+        for key in ('value', 'pulse', 'status'):
+            report['controls'][key] = [n for n in report['controls'][key] if n not in excluded]
+        report['features'] = dict.fromkeys(self.module.OPTIONAL_CONTROL_GROUPS, 'not_installed')
+        report['features']['podcast_visual_path'] = 'not_installed'
+        report['controls']['adapter_value'].remove('Visualpath')
+        report['allow_absent_optional'] = True
+        return report
+
+    def test_report_checker_accepts_explicit_older_inventory_without_claiming_vr(self):
+        result = self.run_report_checker(self.older_report_fixture())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        parsed = json.loads(result.stdout)
+        self.assertEqual(parsed['public_controls'], 86)
+        self.assertEqual(parsed['vr_foundation'], 'not_installed')
+        self.assertEqual(parsed['femto_calibration_trim'], 'not_installed')
+        self.assertEqual(parsed['podcast_visual_path'], 'not_installed')
+        self.assertFalse(parsed['complete_live_acceptance'])
+
+    def test_report_checker_rejects_partial_absent_or_unapproved_features(self):
+        for mutation in ('partial', 'no_opt_in', 'missing_base', 'unknown_feature'):
+            report = self.older_report_fixture()
+            if mutation == 'partial':
+                report['controls']['value'].append('Vrinputsource')
+            elif mutation == 'no_opt_in':
+                report['allow_absent_optional'] = False
+            elif mutation == 'missing_base':
+                report['controls']['value'].remove('Pointsize')
+            else:
+                report['features']['vr_foundation'] = 'pass'
+            result = self.run_report_checker(report)
+            self.assertNotEqual(result.returncode, 0, mutation)
+
     def test_report_checker_rejects_stale_host_inventory(self) -> None:
         report = self.report_fixture()
         report['controls'].pop('streamdiffusion_host_status')
         result = self.run_report_checker(report)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('inventory is missing or stale', result.stderr)
+
+    def test_report_checker_rejects_overclaimed_top_level_acceptance(self):
+        report = self.report_fixture()
+        report['complete_live_acceptance'] = True
+        result = self.run_report_checker(report)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('overclaimed acceptance scope', result.stderr)
 
     def test_report_checker_rejects_failed_host_or_overclaimed_acceptance(self) -> None:
         for field, value in (('status','fail'), ('complete_live_acceptance',True),

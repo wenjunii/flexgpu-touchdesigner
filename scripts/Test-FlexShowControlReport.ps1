@@ -12,7 +12,11 @@ this detects license-tier clamping even when resolution parameters still show
 the optional single-generator host's exact control/status inventory and wiring
 gate when installed. Generator start/stop/offload pulses are never inferred
 from a structural pass. It requires
-the default-off desktop VR head/hand rehearsal checks. This does not validate
+the default-off desktop VR head/hand rehearsal checks when that feature is
+installed. Older destinations may explicitly report wholly absent VR, Femto
+trim and podcast scene-variant groups; partial groups still fail closed. No
+feature is installed by this checker. Use canonical 4090/5090 profile names.
+This does not validate
 an OpenXR/OpenVR compositor or a physical headset.
 
 This command is read-only. It does not start TouchDesigner, launch workers,
@@ -27,7 +31,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Report,
 
-    [ValidateSet('3080ti_16gb', '4090_24gb', '5090_32gb')]
+    [ValidateSet('3080ti_16gb', '4090', '5090')]
     [string]$ExpectedProfile = '3080ti_16gb'
 )
 
@@ -43,6 +47,10 @@ if ($result.profile -ne $ExpectedProfile) {
         "SHOW_CONTROL report profile '$($result.profile)' does not match " +
         "expected profile '$ExpectedProfile'."
     )
+}
+if ($result.acceptance_scope -ne 'public_control_mapping_and_output_dimensions' -or
+    $result.complete_live_acceptance -ne $false) {
+    throw 'SHOW_CONTROL report has an unsupported or overclaimed acceptance scope.'
 }
 if ($null -eq $result.output_dimensions) {
     throw 'SHOW_CONTROL report does not contain cooked output dimensions.'
@@ -69,13 +77,66 @@ if ($result.status -ne 'pass' -or
 $valueControls = @($result.controls.value)
 $pulseControls = @($result.controls.pulse)
 $statusControls = @($result.controls.status)
+$vrInstalled = $true
+$femtoTrimInstalled = $true
+$visualPathInstalled = $true
+$vrValues = @(
+    'Experience','Vrinputsource','Vrtargethz','Vreyewidth','Vreyeheight',
+    'Vripdmetres','Vrfovdegrees','Vrheadxmetres','Vrheadymetres','Vrheadzmetres',
+    'Vrheadyawdegrees','Vrheadpitchdegrees','Vrheadrolldegrees','Vrhandenabled',
+    'Vrhandgain','Vrlefthandxmetres','Vrlefthandymetres','Vrlefthandzmetres',
+    'Vrrighthandxmetres','Vrrighthandymetres','Vrrighthandzmetres'
+)
+$femtoTrimValues = @(
+    'Femtomirrorhorizontal','Femtopositionscale','Femtotrimxmetres',
+    'Femtotrimymetres','Femtotrimzmetres','Femtotrimyawdegrees',
+    'Femtotrimpitchdegrees','Femtotrimrolldegrees',
+    'Femtoaudiencenearmetres','Femtoaudiencefarmetres'
+)
+if ($null -ne $result.features) {
+    if (@(Compare-Object @($result.features.psobject.Properties.Name) @(
+        'vr_foundation','femto_calibration_trim','podcast_visual_path'
+    )).Count -ne 0) {
+        throw 'Unknown or missing optional feature inventory.'
+    }
+    foreach ($feature in @(
+        @{ name='vr_foundation'; values=$vrValues; pulses=@('Resetvrheadpose','Resetvrhands'); statuses=@('Vrstatus') },
+        @{ name='femto_calibration_trim'; values=$femtoTrimValues; pulses=@('Resetfemtocalibrationtrim'); statuses=@() }
+    )) {
+        $state = $result.features.($feature.name)
+        if ($state -notin @('installed','not_installed')) {
+            throw "Unknown optional feature state: $($feature.name)."
+        }
+        $expected = @($feature.values) + @($feature.pulses) + @($feature.statuses)
+        $present = @($expected | Where-Object { $_ -in ($valueControls + $pulseControls + $statusControls) })
+        if (($state -eq 'installed' -and $present.Count -ne $expected.Count) -or
+            ($state -eq 'not_installed' -and ($present.Count -ne 0 -or $result.allow_absent_optional -ne $true))) {
+            throw "Partially installed or unapproved absent optional feature: $($feature.name)."
+        }
+    }
+    $vrInstalled = $result.features.vr_foundation -eq 'installed'
+    $femtoTrimInstalled = $result.features.femto_calibration_trim -eq 'installed'
+    $visualState = $result.features.podcast_visual_path
+    $visualPresent = 'Visualpath' -in @($result.controls.adapter_value)
+    if ($visualState -notin @('installed','not_installed') -or
+        ($visualState -eq 'installed' -and -not $visualPresent) -or
+        ($visualState -eq 'not_installed' -and ($visualPresent -or $result.allow_absent_optional -ne $true))) {
+        throw 'Partially installed or unapproved absent podcast Visualpath feature.'
+    }
+    $visualPathInstalled = $visualState -eq 'installed'
+}
+$expectedValues = 101
+$expectedPulses = 12
+$expectedStatuses = 8
+if (-not $vrInstalled) { $expectedValues -= 21; $expectedPulses -= 2; $expectedStatuses -= 1 }
+if (-not $femtoTrimInstalled) { $expectedValues -= 10; $expectedPulses -= 1 }
 if (
-    $valueControls.Count -ne 101 -or
-    $pulseControls.Count -ne 12 -or
-    $statusControls.Count -ne 8
+    $valueControls.Count -ne $expectedValues -or
+    $pulseControls.Count -ne $expectedPulses -or
+    $statusControls.Count -ne $expectedStatuses
 ) {
     throw (
-        'SHOW_CONTROL report does not contain the expected 121-control ' +
+        'SHOW_CONTROL report does not contain the expected installed-control ' +
         "inventory: value=$($valueControls.Count), " +
         "pulse=$($pulseControls.Count), status=$($statusControls.Count)."
     )
@@ -111,7 +172,7 @@ $missingVrControls = @(
     $requiredVrPulses | Where-Object { $_ -notin $pulseControls }
     $requiredVrStatuses | Where-Object { $_ -notin $statusControls }
 )
-if ($missingVrControls.Count -gt 0) {
+if ($vrInstalled -and $missingVrControls.Count -gt 0) {
     throw (
         'SHOW_CONTROL report is missing VR foundation controls: ' +
         ($missingVrControls -join ', ')
@@ -139,7 +200,7 @@ $failedVrChecks = @(
         -not $checksByName.ContainsKey($_) -or $checksByName[$_] -ne 'pass'
     }
 )
-if ($failedVrChecks.Count -gt 0) {
+if ($vrInstalled -and $failedVrChecks.Count -gt 0) {
     throw (
         'SHOW_CONTROL report is missing or failed VR foundation checks: ' +
         ($failedVrChecks -join ', ')
@@ -195,7 +256,12 @@ if (($hostValues + $hostPulses + $hostStatuses | Where-Object { $null -ne $_ }).
     output_dimensions = $result.output_dimensions.status
     public_controls = (
         $valueControls.Count + $pulseControls.Count + $statusControls.Count)
-    vr_foundation = 'desktop_mock_pass'
+    streamdiffusion_host_controls = ($hostValues.Count + $hostPulses.Count + $hostStatuses.Count)
+    total_main_controls = ($valueControls.Count + $pulseControls.Count + $statusControls.Count +
+        $hostValues.Count + $hostPulses.Count + $hostStatuses.Count)
+    vr_foundation = $(if ($vrInstalled) { 'desktop_mock_pass' } else { 'not_installed' })
+    femto_calibration_trim = $(if ($femtoTrimInstalled) { 'installed' } else { 'not_installed' })
+    podcast_visual_path = $(if ($visualPathInstalled) { 'installed' } else { 'not_installed' })
     headset_validation = 'not_performed'
     worker_buttons = $result.worker_buttons.status
     adapter_ui_buttons = $result.adapter_ui_buttons.status
