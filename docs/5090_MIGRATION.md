@@ -168,7 +168,7 @@ weights, logs, and all `config/local-*.json` files remain intentionally
 untracked. This record is a short functional migration check, not the required
 sustained thermal, projector, interaction, or venue acceptance.
 
-The current combined 5090 working checkpoint is `.71`; it does not replace the
+The historical combined 5090 working checkpoint `.71` does not replace the
 3080 history. The earlier `.49` audit found and repaired a stale near-black
 adapter frame plus an invalid F1 window reference. Subsequent 5090-only
 checkpoints added output-local interaction routing, independent webcam/Femto
@@ -190,6 +190,79 @@ seven 1920x1080 output TOPs reported zero errors. Because the webcam and Femto
 Mega were physically disconnected and StreamDiffusionTD was intentionally left
 stopped, this record does not replace the `.67` live sensor/image acceptance or
 the remaining StreamDiffusionTD scene-advance and visual-content check.
+
+## Saved .80 host and control audit
+
+On 2026-11-11, the user saved
+`FlexShow-moge2-embody-podcast-local-5090.80.toe` after the targeted PR #33 host
+upgrade of the accepted 5090 `.64` baseline. The 3080 `.46` was not used as a
+replacement TOE. No legacy generator was deleted, no private component was
+inspected internally, and neither inference environment was upgraded.
+
+The installed-control mapping/dimension audit passed 233 checks with zero
+failures or restoration failures. The main panel contains 86 older core
+controls plus all 32 host controls; its older podcast panel contains 18
+controls. Desktop-VR, separate Femto trims and the podcast Visualpath selector
+are not installed in this baseline. Do not install these unrelated features
+merely to satisfy the current full-inventory validator. Explicit older-feature
+mode only permits wholly absent known groups and rejects partial installations.
+
+After saving a rollback and stopping generation, run in TD Textport:
+
+```python
+from pathlib import Path
+import importlib, sys
+repo = Path(project.folder).parent
+sys.path.insert(0, str(repo / 'touchdesigner'))
+import validate_show_controls as controls
+importlib.reload(controls)
+report = controls.validate(
+    report_path=repo / '.flexgpu' / 'evidence' / 'show-controls-5090.json',
+    expected_profile='5090', operator_lookup=op,
+    allow_absent_optional=True)
+print(report['status'], report['summary'], report['features'])
+```
+
+Keep Follow Audio / Podcast Prompts off for this mutating audit. It exercises
+public value mappings and safe reset behavior, restores original values, and
+does not start workers or exercise generator shutdown/removal. Wrong Show
+Control or geometry-bridge profiles are refused before mutations. Do not save
+a failed audit; reopen the saved same-machine rollback instead.
+
+Check the resulting ignored report from PowerShell:
+
+```powershell
+.\scripts\Test-FlexShowControlReport.ps1 `
+  -Report .\.flexgpu\evidence\show-controls-5090.json `
+  -ExpectedProfile 5090
+```
+
+The `.80` audit also compared all nine public camera parameter states exactly
+before/after (no changes), captured the source/position/single/triple outputs,
+and confirmed 1920x1080 for every wall plus 5760x1080 for both mosaics. Separate
+MoGe-2 and generated-geometry Depth Anything Start/Stop tests verified each
+checkout-owned process command line used `--profile 5090`, with no worker
+remaining afterward. RGB delivery was off, so this does not verify frame
+freshness or real depth. The disconnected Femto path failed closed; the final
+recursive error scan was empty. No audit change was saved over `.80`.
+
+The generator slot remains empty. Trusted generator loading, native
+start/stop/confirmed offload/version replacement, audio scene/timeline pulses,
+prompt forwarding into a running generator, changing imagery, per-provider
+freshness, artistic bouncing/parallax, physical sensors, stereo and thermal/
+venue acceptance remain deferred. Do not treat dark/procedural output with RGB
+delivery off as a visual pass. The launcher still targets accepted `.64` until
+real-imagery acceptance; open the saved `.80` manually for continuation.
+
+The Full release gate requires the exact `requirements-test.txt` pins in an
+isolated source-test interpreter. Initial package-index DNS failures recovered
+during this audit, allowing that source-only environment to be prepared without
+changing either model environment. Run the release script with a process-local
+PowerShell execution-policy override if required by the local script policy;
+do not change the machine-wide policy. Source-release and live-show gates
+remain distinct, and raw reports stay ignored.
+
+## Historical .71 live validation recipe
 
 In the TouchDesigner Textport:
 

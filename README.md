@@ -291,9 +291,26 @@ and confirmed offload controls to an existing destination, follow the
 [cross-machine host upgrade](docs/STREAMDIFFUSION_HOST_UPGRADE.md). Its read-only
 PowerShell preflight and default-dry-run TD helper check all three identities.
 Only the optional host is installed; no full world rebuild, model-environment
-upgrade, private-component deletion or automatic save is performed. The 4090
-and 5090 upgrade/visual steps remain destination-local and have not been run
-from this 3080 checkout.
+upgrade, private-component deletion or automatic save is performed. Destination
+acceptance remains machine-local; the limited 5090 control check below is not
+4090 acceptance and does not replace a generated-imagery test.
+
+On 2026-11-11 the 5090 user saved the host-upgraded local checkpoint
+`FlexShow-moge2-embody-podcast-local-5090.80.toe`, derived from that machine's
+accepted `.64`, not from the 3080 `.46`. Its installed-control audit passed
+233 checks with zero restoration failures. All nine camera parameter states
+were unchanged; the seven wall feeds cooked at 1920x1080 and both mosaics at
+5760x1080. MoGe-2 and generated-image Depth Anything Start/Stop pairs each
+launched checkout-owned `5090` processes and stopped them afterward, with RGB
+delivery off. No generator was loaded or started, and the 3080 files, profiles
+and model environments were not changed.
+
+This is **not full show acceptance**. Generator load/start/stop/offload and
+version replacement, audio/scene button behavior, real prompt forwarding,
+fresh geometry, particle motion/perspective, physical sensors, stereo, and
+thermal/venue tests remain pending. The accepted `.64` launcher target remains
+in place until imagery acceptance; the saved `.80` is opened manually for the
+next test. Local TOEs, audit evidence and configs remain ignored.
 
 The generated-geometry worker profile is mandatory and checked against the
 selected physical GPU before a real worker starts. The start wrappers also
@@ -1129,6 +1146,18 @@ Load/Start/Stop/Offload buttons still need separate live acceptance. The report
 checker verifies all optional host value, pulse and status controls, including
 audio sync status, without calling any of those buttons. See
 [the host audit procedure](docs/STREAMDIFFUSION_HOST.md#install-and-validate).
+
+For an existing destination with older controls, the validator can explicitly
+audit installed features with `allow_absent_optional=True`. Only wholly absent
+desktop-VR, separate Femto calibration-trim, and podcast scene-variant groups
+are allowed; partial groups or other missing controls fail. It installs
+nothing and never treats absent VR as a desktop-mock pass. The 5090 `.80` has
+86 core controls plus 32 host controls, and an 18-control older podcast panel.
+Use `expected_profile='5090'` and `operator_lookup=op` when importing the
+validator in Textport. The read-only report checker takes
+`-ExpectedProfile 5090` (or `4090` / `3080ti_16gb`); the memory-suffixed
+`5090_32gb` and `4090_24gb` names are not worker profiles. See
+[the 5090 audit procedure](docs/5090_MIGRATION.md#saved-80-host-and-control-audit).
 
 If F1 reports that
 `/project1/flexgpu/INSTALLATION_OUT/window1` is missing, run
