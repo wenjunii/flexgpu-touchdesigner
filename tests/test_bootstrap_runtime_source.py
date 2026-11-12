@@ -93,7 +93,7 @@ class BootstrapRuntimeSourceTests(unittest.TestCase):
         ):
             self.assertIn(marker, self.callbacks)
         self.assertLess(
-            self.callbacks.index("module_dat.module.apply(root_comp)"),
+            self.callbacks.index("module_dat.module.apply(root_comp, preserve_show_selections=True)"),
             self.callbacks.index(
                 "_venue_restore_pending = not "
                 "_restore_saved_venue_output(root_comp)"),

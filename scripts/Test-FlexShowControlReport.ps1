@@ -73,6 +73,9 @@ if ($result.status -ne 'pass' -or
     [int]$result.summary.restoration_failures -ne 0) {
     throw 'SHOW_CONTROL report contains control or restoration failures.'
 }
+if ($result.camera_parameter_states_restored -eq $false) {
+    throw 'SHOW_CONTROL audit did not restore the accepted camera expressions/bindings.'
+}
 
 $valueControls = @($result.controls.value)
 $pulseControls = @($result.controls.pulse)

@@ -351,11 +351,15 @@ def _parameter_state(node, name):
     if parameter is None:
         return None
     state = {"value": _value(node, name)}
-    for attribute in ("expr", "mode"):
+    for attribute in ("expr", "mode", "bindExpr"):
         try:
             state[attribute] = getattr(parameter, attribute)
         except Exception:
             pass
+    try:
+        state["raw_value"] = parameter.val
+    except Exception:
+        pass
     return state
 
 
@@ -365,11 +369,38 @@ def _restore_parameter_state(node, name, state):
     parameter = _parameter(node, name)
     if parameter is None:
         return
-    parameter.val = state["value"]
+    parameter.val = state.get("raw_value", state["value"])
     if "expr" in state:
         parameter.expr = state["expr"]
     if "mode" in state:
         parameter.mode = state["mode"]
+    if "bindExpr" in state and getattr(parameter, 'bindExpr', None) != state['bindExpr']:
+        parameter.bindExpr = state["bindExpr"] or ''
+        if "mode" in state:
+            parameter.mode = state["mode"]
+
+
+def _camera_parameter_states(render):
+    """Only documented public camera roots, never private COMP descendants."""
+    return {camera.name: {par.name: _parameter_state(camera, par.name)
+                         for par in camera.pars()}
+            for camera in render.children if camera.name.startswith('CAMERA_')}
+
+
+def _state_contract(state):
+    if state is None:
+        return None
+    mode = str(state.get('mode', ''))
+    constant = not mode or mode.rsplit('.', 1)[-1].lower() == 'constant'
+    return (mode, state.get('raw_value', state['value']) if constant else None,
+            state.get('expr'), state.get('bindExpr'))
+
+
+def _same_camera_states(before, after):
+    return ({name: {par: _state_contract(state) for par, state in values.items()}
+             for name, values in before.items()} ==
+            {name: {par: _state_contract(state) for par, state in values.items()}
+             for name, values in after.items()})
 
 
 def _apply(callbacks, control, name, value):
@@ -551,6 +582,8 @@ def validate(
            for bridge in (moge_bridge, depth_bridge)):
         raise ValueError("Both geometry bridge profiles must match the requested machine")
     snapshot = _snapshot(control, value_controls)
+    control_states = {name: _parameter_state(control, name) for name in value_controls}
+    camera_states = _camera_parameter_states(render)
     bridge_snapshot = {
         "moge_enabled": _value(moge_bridge, "Enabled", False),
         "depth_enabled": _value(depth_bridge, "Enabled", False),
@@ -592,6 +625,7 @@ def validate(
             label="adapter show_control",
         )
     checks = []
+    state_restore_failures = []
     started_ns = time.time_ns()
 
     try:
@@ -1401,6 +1435,23 @@ def validate(
         except Exception:
             pass
 
+        # apply_all restores mappings, but an accepted camera may contain a
+        # user-authored motion expression. Restore exact modes/bindings last.
+        for name, state in control_states.items():
+            try:
+                if _state_contract(state) != _state_contract(_parameter_state(control, name)):
+                    _restore_parameter_state(control, name, state)
+            except Exception:
+                state_restore_failures.append('control.' + name)
+        for camera_name, states in camera_states.items():
+            for name, state in states.items():
+                try:
+                    camera = render.op(camera_name)
+                    if _state_contract(state) != _state_contract(_parameter_state(camera, name)):
+                        _restore_parameter_state(camera, name, state)
+                except Exception:
+                    state_restore_failures.append(camera_name + '.' + name)
+
     restored = {}
     for name, expected in snapshot.items():
         actual = _value(control, name)
@@ -1441,6 +1492,12 @@ def validate(
         )
     host_report = {"status": "not_installed"}
     if adapter.op("STREAMDIFFUSION_HOST") is not None:
+        # This synchronous audit prevents Execute DAT frame callbacks from
+        # running until it returns. Publish the restored mirrors explicitly;
+        # otherwise a correct host can fail for one stale application frame.
+        host_runtime = host.op('host_runtime')
+        if host_runtime is not None:
+            host_runtime.module.tick(host)
         try:
             import validate_streamdiffusion_host as host_validation
         except ImportError:
@@ -1452,7 +1509,13 @@ def validate(
     all_restoration_failures = (
         list(restoration_failures)
         + ["adapter." + name for name in adapter_restoration_failures]
+        + state_restore_failures
     )
+    cameras_restored = _same_camera_states(camera_states, _camera_parameter_states(render))
+    _record(checks, 'accepted_camera_parameter_states_restored', cameras_restored, True)
+    if not cameras_restored:
+        all_restoration_failures.append('accepted_camera_parameter_states')
+    failures = [item for item in checks if item["status"] != "pass"]
     result = {
         "version": REPORT_VERSION,
         "captured_ns": time.time_ns(),
@@ -1469,6 +1532,7 @@ def validate(
         },
         "features": features,
         "allow_absent_optional": bool(allow_absent_optional),
+        "camera_parameter_states_restored": cameras_restored,
         "controls": {
             "value": list(value_controls),
             "pulse": list(pulse_controls),

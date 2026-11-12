@@ -312,6 +312,39 @@ thermal/venue tests remain pending. The accepted `.64` launcher target remains
 in place until imagery acceptance; the saved `.80` is opened manually for the
 next test. Local TOEs, audit evidence and configs remain ignored.
 
+The subsequent **5090 podcast receiver sync** ports the reviewed 3080 `.46`
+playlist data/public controls into the 5090's own world; it does not replace
+that TOE or copy the 3080 configuration. It adds the 136-story/three-audio-mode
+playlist and 39-control podcast panel while retaining the selected local
+generator, 5090 camera/particle settings, budgets, calibration and paths.
+The two separately reviewed legacy generator roots were retired only after
+explicit approval and a same-machine rollback; the 3080 retirement helper was
+not run. Canonical audio playback is named `3080_safe` on both machines; the
+5090 Show Control and both geometry bridge profiles remain **`5090`**.
+See [the bounded receiver sync and audit recipe](docs/5090_PODCAST_RECEIVER_SYNC.md).
+
+The follow-up audit checks exact camera modes/expressions/bindings as well as
+control values. The public geometry runtime now keeps a checkout- and
+operator-scoped receiver registry across in-process TOE/DAT reloads: a new
+instance closes only its own predecessor before rebinding. It never kills
+another process or closes a different checkout's/project's receiver. Stop
+generation and workers before changing projects; this guard is not a reason
+to skip the normal shutdown sequence. No private media/components, local
+configs, TOEs or runtime evidence are published.
+
+The completed 5090 receiver/control checkpoint is now the ignored
+`FlexShow-moge2-embody-podcast-local-5090.90.toe`. Only this workstation's
+launcher was retargeted. The audit passed 241 control/dimension checks, 1,897
+muted playlist checks and 31 safe host mapping checks. Native generator and
+worker buttons, prompt/seed forwarding, smoothing and fresh geometry were
+tested separately with real imagery; inference was stopped afterward.
+Same-process reopen retained all audited public values and exact camera
+expressions/bindings. Startup and first-tick initialization now preserve the
+saved provider/display selections and manual source routing, without changing
+deterministic builder defaults or copying local config. Physical sensors,
+listening, real TOX version
+replacement/removal, headset VR and thermal/venue soak remain separate tests.
+
 The generated-geometry worker profile is mandatory and checked against the
 selected physical GPU before a real worker starts. The start wrappers also
 refuse to launch while another generated-geometry worker from the same checkout

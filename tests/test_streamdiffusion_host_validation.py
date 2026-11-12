@@ -52,9 +52,10 @@ class StreamDiffusionHostValidationTests(unittest.TestCase):
         for mirror, source in runtime.CONTROL_MAP.items():
             setattr(show.par, mirror, Parameter(values[source]))
         for name in ('RAW_RGB','HISTORY','SMOOTH','OUTPUT_ROUTE','STREAM_GATE','OUT_RGB',
-                     'OUT_RAW','DISCONNECTED','PAYLOAD_SLOT','INPUT_NOISE','GENERATOR_INPUT','OUT_INPUT'):
+                     'OUT_RAW','DISCONNECTED','PAYLOAD_SLOT','PAYLOAD_RGB','INPUT_NOISE','GENERATOR_INPUT','OUT_INPUT'):
             PublicNode(name, host)
         for name, inputs in {
+            'RAW_RGB':['PAYLOAD_RGB'],
             'HISTORY':['RAW_RGB'], 'SMOOTH':['RAW_RGB','HISTORY'],
             'OUTPUT_ROUTE':['RAW_RGB','SMOOTH'], 'STREAM_GATE':['DISCONNECTED','OUTPUT_ROUTE'],
             'OUT_RGB':['STREAM_GATE'], 'OUT_RAW':['RAW_RGB'],
@@ -108,6 +109,17 @@ class StreamDiffusionHostValidationTests(unittest.TestCase):
         report = validation.validate(root)
         self.assertFalse(report['checks']['host_control_mirrors'])
         self.assertFalse(report['checks']['delivery_gate_selection'])
+
+    def test_retained_non_generating_outputs_are_reported_but_cannot_feed_host(self):
+        root, host, _ = self.fixture()
+        adapter = host.parent()
+        old = PublicNode('null1', adapter)
+        PublicNode('null2', adapter)
+        report = validation.validate(root)
+        self.assertEqual(report['status'], 'pass', report['checks'])
+        self.assertEqual(report['retained_legacy_test_outputs'], ['null1', 'null2'])
+        host.op('RAW_RGB').inputs = [old]
+        self.assertFalse(validation.validate(root)['checks']['retired_raw_slot_only'])
 
     def test_nonfinite_response_or_weight_fails_closed(self):
         for name, value in (('Smoothms', math.nan), ('Smoothms', math.inf),

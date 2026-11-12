@@ -1341,6 +1341,76 @@ def _component_config(bridge_comp: object) -> BridgeConfig:
     )
 
 
+_RECEIVER_REGISTRY = '_flexgpu_managed_geometry_receivers_v1'
+_MANAGED_BRIDGE_PATHS = frozenset(
+    '/project1/flexgpu/WORKING_PIPELINE/SOURCES/STREAMDIFFUSION_ADAPTER/' + name
+    for name in ('MOGE2_BRIDGE', 'DEPTH_ANYTHING_GEOMETRY_BRIDGE')
+)
+
+
+def _receiver_owner_key(bridge_comp: object) -> Optional[tuple[str, str]]:
+    """Stable across same-checkout TOE/DAT reloads; never retain an OP."""
+    path = str(getattr(bridge_comp, 'path', ''))
+    if path not in _MANAGED_BRIDGE_PATHS:
+        return None
+    checkout = _EMBEDDED_FLEXGPU_SRC
+    if not checkout:
+        checkout = str(getattr(bridge_comp, 'fileFolder', '') or '')
+    if not checkout:
+        return None
+    return (os.path.normcase(os.path.realpath(checkout)), path)
+
+
+def _receiver_registry() -> dict[str, Any]:
+    # Text DAT module globals can disappear on project load without onExit.
+    # A process-local registry keeps only public transport objects, not TD OPs,
+    # and lets the next instance close its own predecessor before binding.
+    registry = getattr(builtins, _RECEIVER_REGISTRY, None)
+    if registry is None:
+        registry = {'version': 1, 'lock': threading.RLock(), 'owners': {}}
+        setattr(builtins, _RECEIVER_REGISTRY, registry)
+    if (not isinstance(registry, dict) or registry.get('version') != 1
+            or not isinstance(registry.get('owners'), dict) or 'lock' not in registry):
+        raise BridgeRuntimeError('Unrecognized managed receiver registry')
+    return registry
+
+
+def _retire_owned_receiver(bridge_comp: object) -> None:
+    owner = _receiver_owner_key(bridge_comp)
+    if owner is None:
+        return
+    registry = _receiver_registry()
+    with registry['lock']:
+        previous = registry['owners'].get(owner)
+        if previous is not None:
+            previous.stop()
+            if registry['owners'].get(owner) is previous:
+                del registry['owners'][owner]
+
+
+def _register_owned_receiver(bridge_comp: object, runtime: BridgeRuntime) -> None:
+    owner = _receiver_owner_key(bridge_comp)
+    if owner is None:
+        return
+    registry = _receiver_registry()
+    with registry['lock']:
+        previous = registry['owners'].get(owner)
+        if previous is not None and previous is not runtime:
+            raise BridgeRuntimeError('Managed receiver already has an owner')
+        registry['owners'][owner] = runtime
+
+
+def _forget_owned_receiver(runtime: BridgeRuntime) -> None:
+    registry = getattr(builtins, _RECEIVER_REGISTRY, None)
+    if registry is None:
+        return
+    registry = _receiver_registry()
+    with registry['lock']:
+        for owner, registered in tuple(registry['owners'].items()):
+            if registered is runtime:
+                del registry['owners'][owner]
+
+
 _GLOBAL_LOCK = threading.RLock()
 _GLOBAL_RUNTIME: Optional[BridgeRuntime] = None
 _GLOBAL_SIGNATURE: Optional[tuple[int, BridgeConfig]] = None
@@ -1405,9 +1475,15 @@ def tick(bridge_comp: object) -> dict[str, Any]:
         if _GLOBAL_RUNTIME is None or _GLOBAL_SIGNATURE != signature:
             if _GLOBAL_RUNTIME is not None:
                 _GLOBAL_RUNTIME.stop()
+                _forget_owned_receiver(_GLOBAL_RUNTIME)
             try:
+                _retire_owned_receiver(bridge_comp)
                 _GLOBAL_RUNTIME = BridgeRuntime(config).start()
+                _register_owned_receiver(bridge_comp, _GLOBAL_RUNTIME)
             except Exception:
+                if _GLOBAL_RUNTIME is not None:
+                    _GLOBAL_RUNTIME.stop()
+                    _forget_owned_receiver(_GLOBAL_RUNTIME)
                 _GLOBAL_RUNTIME = None
                 _GLOBAL_SIGNATURE = None
                 failed = {
@@ -1622,6 +1698,10 @@ def stop(bridge_comp: Optional[object] = None) -> None:
         _GLOBAL_BRIDGE_COMP = None
     if runtime is not None:
         runtime.stop()
+        _forget_owned_receiver(runtime)
+    elif bridge_comp is not None:
+        # An explicitly disabled replacement must also retire its old module.
+        _retire_owned_receiver(bridge_comp)
     if bridge_comp is not None:
         _set_parameter(bridge_comp, "Resultvalid", False)
         status_dat = _child(bridge_comp, "STATUS")

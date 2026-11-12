@@ -30,6 +30,23 @@ def load_validator():
 
 
 class ShowControlValidatorSourceTests(unittest.TestCase):
+    def test_parameter_restoration_preserves_motion_expressions_and_bindings(self):
+        module = load_validator()
+        par = SimpleNamespace(val=7, expr='absTime.seconds', mode='ParMode.EXPRESSION',
+                              bindExpr="op('driver').par.X", eval=lambda: 27)
+        node = SimpleNamespace(par=SimpleNamespace(tx=par))
+        before = module._parameter_state(node, 'tx')
+        par.val, par.expr, par.mode, par.bindExpr = 99, '', 'ParMode.CONSTANT', ''
+        module._restore_parameter_state(node, 'tx', before)
+        self.assertEqual((par.val, par.expr, par.mode, par.bindExpr),
+                         (7, 'absTime.seconds', 'ParMode.EXPRESSION', "op('driver').par.X"))
+        after = dict(before, value=99, raw_value=99)
+        self.assertTrue(module._same_camera_states({'CAMERA_LEFT': {'tx': before}},
+                                                  {'CAMERA_LEFT': {'tx': after}}))
+        after['expr'] = 'a different motion'
+        self.assertFalse(module._same_camera_states({'CAMERA_LEFT': {'tx': before}},
+                                                   {'CAMERA_LEFT': {'tx': after}}))
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.module = load_validator()
@@ -211,6 +228,8 @@ class ShowControlValidatorSourceTests(unittest.TestCase):
         self.assertIn('Turn off Follow Audio / Podcast Prompts', self.source)
         self.assertLess(self.source.index('Turn off Follow Audio / Podcast Prompts'),
                         self.source.index('snapshot = _snapshot(control, value_controls)'))
+        self.assertLess(self.source.index('host_runtime.module.tick(host)'),
+                        self.source.index('host_report = host_validation.validate('))
 
     def test_older_destination_requires_explicit_complete_feature_groups(self):
         all_names = set(self.module.VALUE_CONTROLS + self.module.PULSE_CONTROLS +

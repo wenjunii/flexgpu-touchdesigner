@@ -83,6 +83,37 @@ def podcast_timeline_guard(source):
         '            and not (host and host.fetch("offload_wake_timeline", False))):\n', 1)
 
 
+def single_generator_controller_guard(source):
+    marker = '# FLEXGPU_RETIRED_DUAL_GENERATOR'
+    construction_marker = '# FLEXGPU_SINGLE_CONTROLLER_CONSTRUCTION'
+    if construction_marker not in source:
+        needle = '    _CONTROLLER = module.PodcastVisualController(owner)\n'
+        if source.count(needle) != 1:
+            raise RuntimeError('Unrecognized public controller constructor; review before retirement')
+        source = source.replace(needle,
+            '    ' + construction_marker + '\n'
+            '    host = owner.op("STREAMDIFFUSION_HOST")\n'
+            '    if host is not None and host.fetch("legacy_retired", False):\n'
+            '        _CONTROLLER = host.op("host_runtime").module.construct_podcast_controller(\n'
+            '            host, module.PodcastVisualController, owner)\n'
+            '    else:\n'
+            '        _CONTROLLER = module.PodcastVisualController(owner)\n', 1)
+    if marker in source:
+        return source
+    if source.count('return _CONTROLLER') != 2:
+        raise RuntimeError('Unrecognized public controller factory; review before retirement')
+    return source.replace('return _CONTROLLER', 'return _single_generator_controller(_CONTROLLER)') + '''
+
+# FLEXGPU_RETIRED_DUAL_GENERATOR
+def _single_generator_controller(controller):
+    host = parent().op('STREAMDIFFUSION_HOST')
+    if host is not None:
+        return host.op('host_runtime').module.attach_podcast_controller(host, controller)
+    return controller
+'''
+
+
+
 def install(root=None):
     """Preserve private/podcast nodes, ports, workers, and RGB/depth outputs.
 
@@ -112,11 +143,7 @@ def install(root=None):
         raise RuntimeError('Refusing to overwrite an unrecognized host')
     retired = host is not None and bool(host.fetch('legacy_retired', False))
     if retired and guarded_podcast is not None:
-        try:
-            from retire_legacy_streamdiffusion import controller_guard
-        except ImportError:
-            from touchdesigner.retire_legacy_streamdiffusion import controller_guard
-        guarded_podcast = controller_guard(guarded_podcast)
+        guarded_podcast = single_generator_controller_guard(guarded_podcast)
     if host is not None:
         source = rp._first_input(host)
     else:
