@@ -73,7 +73,13 @@ def validate(root, report_path=None):
         checks['noise_input_present'] = noise is not None and _from(generator_input, [noise]) and _from(noise_out, [generator_input])
         if retired:
             checks['legacy_generators_removed'] = all(_node(adapter, n) is None for n in
-                                                      ('StreamDiffusionTD', 'StreamDiffusionTD4', 'null1', 'null2'))
+                                                      ('StreamDiffusionTD', 'StreamDiffusionTD4'))
+            # Non-generating old test TOPs may be retained after a separately
+            # reviewed destination retirement. They cannot feed the host once
+            # its legacy input is disconnected and only slot mode is allowed.
+            result['retained_legacy_test_outputs'] = [n for n in ('null1', 'null2')
+                                                       if _node(adapter, n) is not None]
+            checks['retired_raw_slot_only'] = _from(raw, [_node(host, 'PAYLOAD_RGB')])
             source_parameter = getattr(host.par, 'Source', None)
             checks['legacy_source_removed'] = source_parameter is not None and list(source_parameter.menuNames) == ['slot']
         checks['single_generator_workflow'] = host.fetch('workflow_version', 0) == 2

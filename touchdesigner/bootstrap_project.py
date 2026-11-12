@@ -2591,7 +2591,31 @@ def _apply_level(runtime):
         state['point_budget'], state['geometry_resolution'] ** 2)
     state['adaptive_level'] = level
 
-def apply(root_comp=None, overrides=None, inherit_environment=True):
+def _preserve_show_selections(root_comp, state):
+    """Startup-only merge: retain saved provider/view, not another PC's config."""
+    show = root_comp.op('WORKING_PIPELINE/SHOW_CONTROL')
+    if show is None:
+        return
+    try:
+        provider = str(show.par.Geometryprovider.eval())
+        mode = str(show.par.Displaymode.eval())
+    except Exception:
+        return
+    if provider in ('moge2', 'depth_anything'):
+        if 'source' in state:
+            source = _mapping(state.get('source'))
+            source['geometry_provider'] = provider
+            state['source'] = source
+        else:
+            # Absence means respect the saved/manual adapter routing. Do not
+            # synthesize a source section whose default mode would be demo.
+            state['source_geometry_provider'] = provider
+    if mode in ('single', 'panoramic_wrap', 'artistic_multi_angle'):
+        render = _mapping(state.get('render'))
+        render['display_mode'] = mode
+        state['render'] = render
+
+def apply(root_comp=None, overrides=None, inherit_environment=True, preserve_show_selections=False):
     root_comp = root_comp or op('/project1/flexgpu')
     if root_comp is None:
         return {}
@@ -2602,6 +2626,8 @@ def apply(root_comp=None, overrides=None, inherit_environment=True):
     state = environment() if inherit_environment else {}
     if overrides:
         state.update(overrides)
+    if preserve_show_selections:
+        _preserve_show_selections(root_comp, state)
     _materialize(state)
     _role_policy(state)
     ai_on = state['ai_active']
@@ -3439,7 +3465,7 @@ def tick(root_comp=None):
         return None
     runtime = _runtime(root_comp)
     if runtime is None:
-        apply(root_comp)
+        apply(root_comp, preserve_show_selections=True)
         runtime = _runtime(root_comp)
     if runtime is None:
         return None
@@ -3652,6 +3678,13 @@ def onExit():
         module_dat.module.flush_telemetry(root_comp, True)
     return
 '''
+
+
+# Retain the exact previous public callback for guarded in-place migrations.
+STARTUP_CALLBACKS_PRE_SELECTION = STARTUP_CALLBACKS
+STARTUP_CALLBACKS = STARTUP_CALLBACKS.replace(
+    'module_dat.module.apply(root_comp)',
+    'module_dat.module.apply(root_comp, preserve_show_selections=True)', 1)
 
 
 class BuildReport(object):

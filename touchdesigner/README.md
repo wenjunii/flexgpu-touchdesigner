@@ -1,5 +1,33 @@
 # FlexGPU TouchDesigner project
 
+## 5090 podcast receiver parity
+
+Use [the 5090-only receiver recipe](../docs/5090_PODCAST_RECEIVER_SYNC.md) to
+extend an existing 5090 world with the reviewed 136-story playlist/public
+panel. `sync_combined_podcast_5090.upgrade()` is dry-run by default, requires a
+saved same-machine rollback and confirmed inactive generators, checks reviewed
+data before editing, and requires separate explicit confirmation for the two
+named legacy generators/docked DATs. It never installs a 3080 TOE, copies its
+GPU settings, updates a model environment, starts inference or saves a TOE.
+The selected private generator is preserved at its public integration boundary.
+
+`validate_podcast_5090` checks muted playback/data/audio mappings with all
+controls restored; `audit_streamdiffusion_controls` exercises safe public host
+value mappings only while the generator is stopped, following is OFF and RGB
+delivery is disconnected. Native Start/Stop/Offload/previews and per-provider
+freshness are separate asynchronous tests. Invalid file/occupied-slot guards
+are not proof of real version replacement; no private generator is removed as
+part of an audit.
+
+The audited 5090 local checkpoint is `.90`; source changes do not distribute
+that TOE. Startup preserves saved geometry-provider/display selections even
+when the runtime's first tick precedes Execute DAT startup. Explicit builder
+calls remain deterministic. The bounded updater changes only the recognized
+public runtime preamble/tick and startup callback; unknown local code fails
+closed. The audit also restores exact camera expressions/bindings, not just
+their sampled values. See the recipe for passed checks and deferred hardware,
+listening, version-replacement and soak acceptance.
+
 ## Combined 3080 storytelling playlist (podcast.40)
 
 The bounded migration from the local reviewed home-podcast `.40` edition adds
@@ -398,6 +426,12 @@ managed operator or shader, and restores every original value in a `finally`
 block. In a combined podcast TOE it also inventories all 19 public adapter
 controls and safely exercises the adapter value controls without reading
 private StreamDiffusionTD internals:
+
+Camera parameter modes, motion expressions and bindings are restored exactly,
+not replaced with their sampled values. The synchronous audit explicitly
+publishes restored host mirrors before its final wiring gate; it does not wait
+for a TD frame callback while blocking that same main thread. The 39-control
+5090 playlist panel has an additional dedicated audit, described above.
 
 ```python
 from pathlib import Path

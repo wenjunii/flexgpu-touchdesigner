@@ -262,6 +262,39 @@ PowerShell execution-policy override if required by the local script policy;
 do not change the machine-wide policy. Source-release and live-show gates
 remain distinct, and raw reports stay ignored.
 
+## Saved .90 receiver and live-control audit
+
+The later 2026-11-11 receiver migration supersedes the `.80` pending-image
+status above. The 5090's own world now includes the reviewed 3080 `.46`
+playlist/public controls, not the 3080 TOE or its GPU configuration. The
+selected trusted local generator is retained. Only the two separately reviewed
+stopped legacy roots/docked callbacks were retired with approval and rollback.
+
+The new local checkpoint is
+`FlexShow-moge2-embody-podcast-local-5090.90.toe`. Only
+`config/local-5090.json`'s `processes.world.project` was retargeted. The 3080
+configs/TOEs, model environments, calibration, camera motion expressions,
+ports, profiles and accepted rollback checkpoints remain unchanged.
+
+Passed: 241 installed control/dimension checks, 1,897 muted playlist checks,
+31 safe host mappings, asynchronous native generator/playlist/worker buttons,
+confirmed offload with component retained, smoothing/RGB routing, actual
+prompt/seed forwarding, and separate real-image MoGe-2/Depth Anything freshness
+tests with profile `5090`. Seven surfaces stayed 1920x1080 and both mosaics
+5760x1080; orientation, depth/parallax and camera differences were inspected.
+All inference was stopped afterward. Same-process reopen matched all audited
+public values and all nine camera parameter states, retired old registered
+receivers, and reported zero recursive operator errors. The startup fix keeps
+saved provider/display selections and manual source routing even if first-tick
+initialization runs early.
+
+Not claimed: audible listening, real TOX version replacement/removal, physical
+webcam/Femto interaction while disconnected, disabled desktop stereo/headset
+VR, or sustained thermal/venue acceptance. See
+[the receiver recipe](5090_PODCAST_RECEIVER_SYNC.md) for bounded installation,
+audit evidence scope and reload safety. Local TOEs, configs, media, captures
+and runtime reports remain ignored; only public source/docs are synchronized.
+
 ## Historical .71 live validation recipe
 
 In the TouchDesigner Textport:
