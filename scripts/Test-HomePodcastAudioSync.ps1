@@ -1,10 +1,12 @@
 <#
 .SYNOPSIS
-Verifies the approved local Home Podcast .41 audio assets for a 3080 FlexGPU sync.
+Verifies the approved local Home Podcast .41 audio assets for a FlexGPU audio-only sync.
 .DESCRIPTION
 Read-only for the Home Podcast checkout and all working TOEs. Hashes all three
 WAVs and checks the exact clock, separators and unchanged visual plans outside
-TouchDesigner. Writes only an ignored JSON report; no audio is copied.
+TouchDesigner. Writes only an ignored JSON report; no audio is copied. The
+receipt is shared by the separate 3080 and 5090 live validators. This script
+does not select, install, or modify a live project for either tier.
 #>
 #Requires -Version 5.1
 [CmdletBinding()]

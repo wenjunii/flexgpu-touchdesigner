@@ -79,6 +79,9 @@ and a matching loopback listener. It never kills TouchDesigner and it is
 restricted to this checkout's ignored runtime registry. Also close the
 TouchDesigner Textport after diagnostics; while it is open, the timeline can be
 paused and live Envoy calls that require cooking may time out.
+If TouchDesigner is minimized and its cook loop has stopped, restore the
+existing window before retrying. Do not close an unsaved review session just
+to recover the bridge.
 
 If the registry and interpreter are correct but Envoy is still offline, confirm
 that Embody's **Envoy Enable** is on and the timeline can advance during
@@ -88,6 +91,13 @@ Enabled**, then enable **Play**; restore both previous settings after the test.
 These checks do not require changing private component internals, tool
 permissions, or externalization settings. Do not save over the working TOE as
 part of a connectivity probe.
+
+For a checkpoint with a reviewed, filename-scoped Envoy startup callback,
+carry the scope forward only in the new machine-tagged copy. Verify a fresh
+TouchDesigner process can open that exact file and register its own loopback
+listener while playback remains paused. A listener from the prior process is
+not proof of startup. Keep the previous TOE and the project-local preferences
+separate from shared MCP configuration.
 
 With TouchDesigner closed, the MCP should still expose:
 
