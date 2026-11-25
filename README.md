@@ -248,7 +248,7 @@ cross-profile, or ambiguously named local files:
 # Run this separate pair only on the RTX 3080 workstation.
 .\scripts\Set-FlexShowLocalProject.ps1 `
   -Config .\config\local-moge2-3080.json `
-  -Project .\projects\FlexShow-moge2-embody-podcast-local-3080.46.toe `
+  -Project .\projects\FlexShow-moge2-embody-podcast-local-3080.47.toe `
   -ExpectedTier 3080ti_16gb `
   -WhatIf
 ```
@@ -279,9 +279,10 @@ either local JSON file because it contains that computer's absolute project
 path and GPU UUID. Never open the 3080 working TOE as the 5090 save target, or
 vice versa. Git intentionally ignores all of these local files.
 
-The current clean 3080 checkpoint is
-`FlexShow-moge2-embody-podcast-local-3080.46.toe`, with an empty/offloaded
-single-generator slot. Historical 5090 checkpoints such as `.71` do not identify
+The accepted 3080 audio checkpoint is
+`FlexShow-moge2-embody-podcast-local-3080.47.toe`, with an empty/offloaded
+single-generator slot and the approved Home Podcast audio update. Its
+`.46` predecessor is the rollback. Historical 5090 checkpoints such as `.71` do not identify
 the latest file on another PC. Use each destination's own latest accepted TOE.
 These files are not Git artifacts or interchangeable release versions; private
 components, audio media and licences remain local and untracked.
@@ -1133,7 +1134,7 @@ panel and compare two stable `OUT_RGB` samples after a scene interval; an
 unchanged or effectively near-black frame is a failed visual check even when
 operator errors and output dimensions are clean.
 
-The later local `podcast.40.toe` uses a different, reviewed storytelling
+The local `podcast.40.toe` introduced a different, reviewed storytelling
 playlist: 136 stories, 619 scenes in each of three visual paths, 2,862 captions,
 and a 3:18:58.720 audio clock. For this edition use
 `touchdesigner/update_combined_storytelling_3080.py` and
@@ -1145,19 +1146,29 @@ checkout. It preserves the current renderer list and geometry bridge inputs.
 The main FlexGPU Audio page gains Narration + Ambient only when a combined
 audio track exists. See [the combined playlist procedure](touchdesigner/README.md#combined-3080-storytelling-playlist-podcast40).
 
-The reviewed media, playlist manifests and edition helper modules remain local
-dependencies in home-podcast; updating this Git repository alone does not copy
-them. Installation starts paused and muted, does not start model servers or
-save the TOE, and rejects 5090 projects. Save an accepted result as a new
-3080-tagged checkpoint. The legacy updater refuses a playlist-equipped adapter
-to avoid restoring the historical two-path setup.
+The approved Home Podcast `.41` audio update changes **Ambient Only** and
+**Narration + Ambient** without replacing narration, captions, visual cues,
+story navigation, or the clock. The accepted 3080 `.47` already uses these
+tracks and passed all three native audio routes, a reopen/decode check, and
+listening review. For an earlier accepted 3080 copy with the existing
+playlist and single-generator host, run the read-only
+`Test-HomePodcastAudioSync.ps1` preflight and follow the
+[audio-only sync procedure](touchdesigner/README.md#3080-audio-only-update-podcast41).
+The updater previews by default, requires a distinct saved 3080 rollback, and
+does not change 4090/5090 projects, start models, or save the TOE.
+
+Audio, reviewed manifests and playback helper modules are linked from the
+local Home Podcast checkout. GitHub sync distributes scripts and docs only;
+it does not transfer the assets, working TOE, or launcher config. The legacy
+updater refuses a playlist-equipped adapter to avoid restoring the historical
+two-path setup.
 
 The playlist/control baseline was
 `FlexShow-moge2-embody-podcast-local-3080.43.toe`. Its cold-reopen audit retained
 the 136-story edition, passed 2,598 playlist checks and 311 FlexGPU control
 checks, and confirmed seven 1920x1080 wall TOPs plus two 5760x1080 mosaics.
 Generated-image, physical-sensor, headset and thermal acceptance remain
-separate. The current single-generator 3080 front-end checkpoint is
+separate. The earlier single-generator 3080 front-end checkpoint was
 `FlexShow-moge2-embody-podcast-local-3080.45.toe`: one selected private `.tox`,
 native noise controls and previews, public Stop Server/offload, weighted audio
 prompt forwarding, and optional temporal smoothing. On November 10, live audio
