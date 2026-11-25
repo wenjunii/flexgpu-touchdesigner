@@ -1,5 +1,72 @@
 # FlexGPU TouchDesigner project
 
+## 3080 audio-only update (podcast.41)
+
+The accepted local 3080 `.47` is already synced and needs no reinstall.
+It links the approved **Ambient Only** and **Narration + Ambient** files
+from Home Podcast `.41`. **Narration Only**, the 136 stories, 619 cues per
+visual path, 2,862 captions, the one-second separators, and the
+3:18:58.720 clock are unchanged. The saved `.46` is the local rollback.
+
+To verify or repeat this sync on an existing combined **3080** TOE with
+the reviewed `.40` playlist and the single-generator host:
+
+1. Keep the local Home Podcast `.40` and approved `.41` playlist folders,
+   approval/assembly receipts, WAVs and playback modules available. From
+   the FlexGPU root, run the audio preflight. Use a new `-Report` filename
+   for each verification; it is written under ignored `runtime/`.
+
+   ```powershell
+   .\scripts\Test-HomePodcastAudioSync.ps1 `
+     -Report runtime/validation/podcast41-audio-preflight.json
+   ```
+
+   The script defaults to the sibling `home-podcast` folder; supply
+   `-PodcastRoot` if it is elsewhere. It verifies the three WAV hashes,
+   format and silent gaps outside TouchDesigner, and checks that the only
+   differences in all three cue plans are audio metadata. The resulting local
+   receipt records manifests and file stamps, and must be regenerated if the
+   source assets change. No WAVs are copied.
+
+2. Stop generation and geometry workers normally. Pause and mute playback,
+   disable live variations, and keep **Send RGB to 3D** off. If updating an
+   old copy, open a separate 3080-tagged working TOE alongside the accepted
+   rollback. In TouchDesigner **2025.32820**, run a dry run in Textport:
+
+   ```python
+   from pathlib import Path
+   import sys
+   root = Path(project.folder).resolve().parent
+   sys.path.insert(0, str(root / 'touchdesigner'))
+   import sync_combined_podcast_audio_3080 as audio
+   podcast = root.parent / 'home-podcast'
+   receipt = root / 'runtime/validation/podcast41-audio-preflight.json'
+   backup = root / 'projects/FlexShow-moge2-embody-podcast-local-3080.46.toe'
+   print(audio.sync_live(podcast, receipt, backup))
+   ```
+
+   Use the actual receipt and same-folder backup on this machine. Stop if
+   the project is the wrong GPU profile, a generator is active, the receipt
+   is stale, or the existing bindings differ from the complete approved edition.
+
+3. If the preview returns `preflight_pass`, repeat with `apply=True`.
+   It changes only the two audio file bindings and their associated playlist
+   and plan paths; it refreshes the existing controller and checks native
+   decoding. A failure restores those parameters. It does not change playback
+   settings, rewire nodes, start a model, or save. If the result is
+   `already_current`, no apply is needed; `check_native=True` verifies the
+   current native audio routes and decoding without editing settings.
+
+4. Check for recursive errors, then listen to **Ambient Only** and
+   **Narration + Ambient** with **Audio Enabled** and **Play** on. After
+   acceptance, pause/mute, save a new machine-tagged checkpoint, reopen to
+   verify, and use `Set-FlexShowLocalProject.ps1 -ExpectedTier 3080ti_16gb`
+   to retarget only this launcher. Keep the rollback. No 4090/5090 sync or
+   generated-image/geometry acceptance is implied.
+
+Keep the WAVs, private playlist data, runtime receipts, TOEs, and configs out
+of Git. The historical .40 installer/audit below is not the .41 audio updater.
+
 ## 5090 podcast receiver parity
 
 Use [the 5090-only receiver recipe](../docs/5090_PODCAST_RECEIVER_SYNC.md) to
