@@ -333,18 +333,27 @@ generation and workers before changing projects; this guard is not a reason
 to skip the normal shutdown sequence. No private media/components, local
 configs, TOEs or runtime evidence are published.
 
-The completed 5090 receiver/control checkpoint is now the ignored
+The previous 5090 receiver/control baseline is the ignored
 `FlexShow-moge2-embody-podcast-local-5090.90.toe`. Only this workstation's
-launcher was retargeted. The audit passed 241 control/dimension checks, 1,897
-muted playlist checks and 31 safe host mapping checks. Native generator and
+launcher was retargeted for that baseline. The audit passed 241
+control/dimension checks, 1,897 muted playlist checks and 31 safe host mapping
+checks. Native generator and
 worker buttons, prompt/seed forwarding, smoothing and fresh geometry were
 tested separately with real imagery; inference was stopped afterward.
 Same-process reopen retained all audited public values and exact camera
 expressions/bindings. Startup and first-tick initialization now preserve the
 saved provider/display selections and manual source routing, without changing
 deterministic builder defaults or copying local config. Physical sensors,
-listening, real TOX version
-replacement/removal, headset VR and thermal/venue soak remain separate tests.
+real TOX version replacement/removal, headset VR and thermal/venue soak
+remain separate tests.
+
+The [5090 audio-only follow-up](touchdesigner/README.md#5090-audio-only-update-podcast41)
+updates an already-installed `.40` receiver with the approved Home Podcast
+`.41` ambient and combined tracks. It does not rerun receiver parity or use
+the 3080 TOE. The local 5090 `.92` audio checkpoint was listening-accepted,
+reopened paused and muted, and verified through Envoy with all three native
+audio decoders. `.91` remains its local rollback. Only the 5090 launcher
+was retargeted; no private payloads or runtime evidence are distributed.
 
 The generated-geometry worker profile is mandatory and checked against the
 selected physical GPU before a real worker starts. The start wrappers also
@@ -1154,8 +1163,11 @@ listening review. For an earlier accepted 3080 copy with the existing
 playlist and single-generator host, run the read-only
 `Test-HomePodcastAudioSync.ps1` preflight and follow the
 [audio-only sync procedure](touchdesigner/README.md#3080-audio-only-update-podcast41).
-The updater previews by default, requires a distinct saved 3080 rollback, and
-does not change 4090/5090 projects, start models, or save the TOE.
+The 3080 updater previews by default, requires a distinct saved 3080 rollback,
+and does not change 4090/5090 projects, start models, or save the TOE. For an
+existing 5090 receiver use the [separate 5090 audio-only procedure](touchdesigner/README.md#5090-audio-only-update-podcast41)
+and its 5090-tagged rollback. The offline asset verifier is shared; the live
+updates are not interchangeable.
 
 Audio, reviewed manifests and playback helper modules are linked from the
 local Home Podcast checkout. GitHub sync distributes scripts and docs only;

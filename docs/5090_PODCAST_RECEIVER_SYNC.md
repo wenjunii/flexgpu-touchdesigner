@@ -5,6 +5,10 @@ The accepted 3080 `.46` is a read-only reference for public playback behavior.
 Keep each machine's GPU tier, working TOE, camera/particle settings, profiles,
 ports, sensor calibration, components, media and local paths separate.
 
+If this 5090 already has the reviewed `.40` receiver and only needs the
+approved `.41` audio, use the [5090 audio-only update](../touchdesigner/README.md#5090-audio-only-update-podcast41).
+Do not rerun this migration for an audio overlay.
+
 ## Preconditions and scope
 
 - Read `AGENTS.md`, inspect/preserve Git changes and fast-forward shared source

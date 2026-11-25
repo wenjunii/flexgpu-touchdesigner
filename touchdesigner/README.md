@@ -67,6 +67,89 @@ the reviewed `.40` playlist and the single-generator host:
 Keep the WAVs, private playlist data, runtime receipts, TOEs, and configs out
 of Git. The historical .40 installer/audit below is not the .41 audio updater.
 
+## 5090 audio-only update (podcast.41)
+
+Use this only on a local 5090 receiver that already has the reviewed `.40`
+playlist and managed single-generator host. It links the approved **Ambient
+Only** and **Narration + Ambient** audio and matching playlist/plan metadata.
+Narration Only, captions, scene and story timing, controller modules, and the
+5090 GPU, camera, geometry and sensor settings are retained. Do not install a
+3080 TOE or rerun receiver parity for this update.
+
+1. Verify the approved private handoff separately using its sender-supplied
+   checksum and inventory. Preview any asset staging before copying. Keep the
+   original `.40` playlist, playback modules and audio in the local Home
+   Podcast checkout; stop if the staging preview finds any conflict. No
+   private handoff files or media are distributed by Git.
+2. From the FlexGPU root, generate a fresh offline receipt. The existing
+   `scripts/Test-HomePodcastAudioSync.ps1` can do this for either machine.
+   On Windows the same verifier is available directly in Python:
+
+   ```powershell
+   py -3.11 -B .\touchdesigner\sync_combined_podcast_audio_5090.py `
+     ..\home-podcast --report runtime/validation/podcast41-5090-preflight.json
+   ```
+
+   Use the actual local path and a new ignored receipt filename. If the
+   sender supplies the two playlist hashes, pass them with `--source-sha256`
+   and `--edition-sha256`; these pin the local manifests without publishing
+   either hash. The offline check requires the unchanged `.40` lineage,
+   validates all three WAV hashes and 48 kHz stereo timing, checks each silent
+   separator, and compares the non-audio content of all three visual plans.
+3. Confirm the physical RTX 5090. Open a separate saved 5090 working copy
+   in this checkout's `projects/` folder and keep the accepted same-folder
+   5090 rollback untouched. Stop generation and geometry workers, pause and
+   mute both audio controls, and turn off live variations, **Follow Audio /
+   Podcast Prompts**, and **Send RGB to 3D**. Record the original settings.
+   Discover `/project1/flexgpu` through the project-scoped MCP and claim the
+   managed scope when available. In TouchDesigner **2025.32820**, preview:
+
+   ```python
+   from pathlib import Path
+   import sys
+   repo = Path(project.folder).resolve().parent
+   sys.path.insert(0, str(repo / 'touchdesigner'))
+   import sync_combined_podcast_audio_5090 as audio
+   podcast = repo.parent / 'home-podcast'
+   receipt = repo / 'runtime/validation/podcast41-5090-preflight.json'
+   backup = Path(project.folder) / 'FlexShow-5090-accepted.toe'  # use your saved rollback
+   preview = audio.sync_live(podcast, receipt, backup)
+   print(preview)
+   ```
+
+   Require `preflight_pass` with only the two new WAV paths and matching
+   playlist/plan paths proposed. Show Control and **both** geometry bridge
+   profiles must be `5090`; `3080_safe` is the cached playback profile, not a
+   GPU tier. Stop if bindings are mixed/custom, the receipt is stale, or any
+   guard fails. If the result is `already_current`, skip apply and use
+   `check_native=True` to verify the current bindings and decode.
+4. After reviewing the preview, apply with the same unchanged state:
+
+   ```python
+   print(audio.sync_live(podcast, receipt, backup, apply=True,
+                         review_digest=preview['review_digest']))
+   ```
+
+   The helper compares the dry-run fingerprint on apply, refreshes only the
+   installed playback controller, and checks stereo decode, recursive errors and
+   protected settings. A failure restores the changed bindings and controller
+   cache; do not save and reopen the rollback if a check fails. Nothing here
+   saves a TOE, retargets a launcher, or starts inference.
+5. Verify exclusive routing for all three audio modes and listen before
+   saving. Restore the intended show controls and pause/mute for safe
+   startup. Save a new 5090-tagged checkpoint; reopen it and run the native
+   `already_current` check. Temporarily turn prompt following off during
+   that check if needed, then restore the saved preference. For projects
+   with filename-scoped Envoy startup, verify it in a fresh process for the
+   new filename. Preview `Set-FlexShowLocalProject.ps1 -ExpectedTier 5090`
+   with `-WhatIf`, then retarget only the local 5090 launcher to the checked
+   checkpoint. Keep the rollback and old audio available.
+
+The accepted local 5090 `.92` audio checkpoint passed listening, all three
+native routes/decoders, and cold reopen with Envoy running while paused.
+`.91` remains the rollback. Generated imagery and sensor/venue acceptance
+are separate. No TOEs, WAVs, private plans, receipts or configs go in Git.
+
 ## 5090 podcast receiver parity
 
 Use [the 5090-only receiver recipe](../docs/5090_PODCAST_RECEIVER_SYNC.md) to
@@ -86,9 +169,10 @@ freshness are separate asynchronous tests. Invalid file/occupied-slot guards
 are not proof of real version replacement; no private generator is removed as
 part of an audit.
 
-The audited 5090 local checkpoint is `.90`; source changes do not distribute
-that TOE. Startup preserves saved geometry-provider/display selections even
-when the runtime's first tick precedes Execute DAT startup. Explicit builder
+The historical receiver/control audit used local checkpoint `.90`; source
+changes do not distribute that TOE. Startup preserves saved geometry-provider
+and display selections even when the runtime's first tick precedes Execute
+DAT startup. Explicit builder
 calls remain deterministic. The bounded updater changes only the recognized
 public runtime preamble/tick and startup callback; unknown local code fails
 closed. The audit also restores exact camera expressions/bindings, not just
