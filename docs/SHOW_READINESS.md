@@ -62,6 +62,43 @@ install from its own checkout against its own working copy and rollback using
 its own profile (`4090` or `5090`). `rd.refresh(root)` takes a passive sample
 while troubleshooting.
 
+## Prepare a later 5090 update
+
+For preparation only, review the source commit and run
+`.\scripts\Test-FlexShowRelease.ps1 -Mode Quick` on the current checkout. It
+includes the named staging guards and simulated 5090 readiness/recovery for
+both providers and all three wall modes. It does not require or test the GPU.
+
+When the 5090 update is authorized, fetch the reviewed source into the 5090's
+own checkout. Fast-forward a clean compatible branch; stop for review if
+there is local work or the branch has diverged. Preserve the accepted 5090
+TOE and launcher; do not copy the 3080 `.48`, configs, or private inputs.
+
+On the 5090, use native **Save As** to make a separate, same-folder staging
+TOE with `5090` in its name. Leave audio muted and generation stopped. Use the
+Textport import snippet above, then substitute the exact staging basename and
+the actual accepted 5090 rollback file:
+
+```python
+options = dict(expected_profile='5090',
+               working_name='FlexShow-readiness-stage-local-5090.toe',
+               backup_path=Path(project.folder) / 'FlexShow-accepted-local-5090.toe')
+print(rd.preview_install(root, **options))
+```
+
+The preview checks the title's project identity, same-folder rollback, main
+Show Control profile, existing generator host, both geometry bridge profiles,
+and Readiness ownership. It cannot validate the physical GPU, license, or
+wall output. A rejection is a stop signal, not a reason to retune the project
+just to pass. The preview does not create operators, start workers, or save.
+
+Only when ready to install the tab, run `rd.install(root, **options)` with
+the **same** options. The installer rechecks the guards. Save to a new 5090
+candidate, cold-reopen it, and verify the seven read-only fields, recursive
+errors/warnings, and the selected wall TOP sizes. Rehearse the real feed and
+recovery separately before asking to retarget the 5090 launcher. No source
+sync or install preview promotes the candidate automatically.
+
 ## Rehearse a show and a recovery
 
 1. Select one geometry provider and the intended layout. Check wall width and
