@@ -109,6 +109,22 @@ class ClassifierTests(unittest.TestCase):
         self.assertEqual(self.monitor.evaluate(d, 1)["code"], "wall_not_observed")
         self.assertEqual(self.monitor.evaluate(advance(d), 2)["code"], "live")
 
+    def test_5090_readiness_and_recovery_for_both_providers_and_each_layout(self):
+        for provider in ready.BRIDGES:
+            for layout, walls in ready.WALLS.items():
+                with self.subTest(provider=provider, layout=layout):
+                    monitor = ready.ReadinessMonitor()
+                    d = dict(healthy(), profile="5090", bridge_profile="5090",
+                             provider=provider, show_provider=provider, mode=layout, show_mode=layout,
+                             walls={name: (1920, 1080, 42) for name in walls})
+                    self.assertEqual(monitor.evaluate(d, 0)["code"], "geometry_not_advancing")
+                    self.assertEqual(monitor.evaluate(advance(d), 1)["code"], "live")
+                    d.update(fresh_result=False, atlas_published=False, bridge_state="stale")
+                    self.assertEqual(monitor.evaluate(d, 2)["code"], "geometry_stale")
+                    d.update(fresh_result=True, atlas_published=True, bridge_state="running")
+                    self.assertEqual(monitor.evaluate(advance(d), 3)["code"], "geometry_not_advancing")
+                    self.assertEqual(monitor.evaluate(advance(d), 4)["code"], "live")
+
 
 class RecorderTests(unittest.TestCase):
     def test_rehearsal_is_bounded_and_captures_recovery_without_raw_values(self):
@@ -164,6 +180,30 @@ class RecorderTests(unittest.TestCase):
 
 
 class InstallGuards(unittest.TestCase):
+    def staged_5090(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        folder = Path(temporary.name)
+        stage = folder / "FlexShow-readiness-stage-local-5090.toe"
+        backup = folder / "FlexShow-accepted-local-5090.toe"
+        for fixture in (stage, backup):
+            fixture.write_bytes(bytes(1024))
+        project = SimpleNamespace(folder=str(folder), name=stage.name)
+        show = SimpleNamespace(customPages=[], par=SimpleNamespace(Qualityprofile=Mock()))
+        show.par.Qualityprofile.eval.return_value = "5090"
+        adapter_ops = {"STREAMDIFFUSION_HOST": object()}
+        for name in install.GEOMETRY_BRIDGES:
+            profile = Mock()
+            profile.eval.return_value = "5090"
+            adapter_ops[name] = SimpleNamespace(par=SimpleNamespace(Profile=profile))
+        pipe = "/project1/flexgpu/WORKING_PIPELINE"
+        pipe_ops = {"SHOW_CONTROL": show, "SOURCES/STREAMDIFFUSION_ADAPTER": SimpleNamespace(op=adapter_ops.get)}
+        root = SimpleNamespace(path="/project1/flexgpu", op={"WORKING_PIPELINE": SimpleNamespace(
+            path=pipe, op=pipe_ops.get)}.get)
+        return SimpleNamespace(root=root, project=project, stage=stage, show=show,
+                               adapter_ops=adapter_ops, pipe_ops=pipe_ops,
+                               options=dict(expected_profile="5090", backup_path=backup, working_name=stage.name))
+
     def test_working_copy_and_rollback_checks_precede_live_access(self):
         root = Mock(path="/project1/flexgpu")
         with tempfile.TemporaryDirectory() as tmp:
@@ -179,6 +219,70 @@ class InstallGuards(unittest.TestCase):
                 install._target(root, "3080ti_16gb", accepted,
                                 SimpleNamespace(folder=tmp, name=other.name))
         root.op.assert_not_called()
+
+    def test_preview_reports_scope_and_leaves_valid_5090_stage_unchanged(self):
+        f = self.staged_5090()
+        with patch.object(install.rp, "_symbol", return_value=f.project), patch.object(install.rp, "_ensure") as ensure:
+            receipt = install.preview_install(f.root, **f.options)
+            self.assertEqual(receipt["status"], "preview")
+            self.assertEqual(receipt["action"], "add_readiness_tab")
+            self.assertEqual(receipt["profile"], "5090")
+            self.assertEqual(receipt["fields"], 7)
+            self.assertEqual(receipt["observer"], "/project1/flexgpu/WORKING_PIPELINE/SHOW_READINESS")
+            for flag in ("applied", "saved", "models_started", "live_visual_acceptance"):
+                self.assertIs(receipt[flag], False)
+            self.assertNotIn(str(f.stage.parent), json.dumps(receipt))
+            f.pipe_ops[install.NODE] = SimpleNamespace(fetch=lambda *_: install.OWNER)
+            self.assertEqual(install.preview_install(f.root, **f.options)["action"], "refresh_existing")
+            ensure.assert_not_called()
+
+    def test_named_preview_and_apply_refuse_wrong_open_toe_or_rollback(self):
+        f = self.staged_5090()
+        wrong_machine = f.stage.parent / "FlexShow-accepted-local-3080.toe"
+        wrong_machine.write_bytes(bytes(1024))
+        with patch.object(install.rp, "_symbol", return_value=f.project), patch.object(install.rp, "_ensure") as ensure:
+            for entry in (install.preview_install, install.install):
+                with self.subTest(entry=entry.__name__):
+                    with self.assertRaisesRegex(ValueError, "exact named staging TOE"):
+                        entry(f.root, **dict(f.options, working_name="different-local-5090.toe"))
+                    for backup in (f.stage, wrong_machine):
+                        with self.assertRaisesRegex(ValueError, "distinct saved same-folder"):
+                            entry(f.root, **dict(f.options, backup_path=backup))
+            with self.assertRaisesRegex(ValueError, "exact staging TOE basename"):
+                install.preview_install(f.root, **dict(f.options, working_name=None))
+            ensure.assert_not_called()
+
+    def test_preview_and_named_apply_refuse_missing_host_or_mixed_profile(self):
+        f = self.staged_5090()
+        with patch.object(install.rp, "_symbol", return_value=f.project), patch.object(install.rp, "_ensure") as ensure:
+            for entry in (install.preview_install, install.install):
+                with self.subTest(entry=entry.__name__):
+                    f.show.par.Qualityprofile.eval.return_value = "3080ti_16gb"
+                    with self.assertRaisesRegex(ValueError, "Live Show Control profile"):
+                        entry(f.root, **f.options)
+                    f.show.par.Qualityprofile.eval.return_value = "5090"
+                    with patch.dict(f.adapter_ops, {"STREAMDIFFUSION_HOST": None}):
+                        with self.assertRaisesRegex(ValueError, "existing managed generator host"):
+                            entry(f.root, **f.options)
+                    for name in install.GEOMETRY_BRIDGES:
+                        result = f.adapter_ops[name].par.Profile.eval
+                        result.return_value = "3080ti_16gb"
+                        with self.assertRaisesRegex(ValueError, name):
+                            entry(f.root, **f.options)
+                        result.return_value = "5090"
+            ensure.assert_not_called()
+
+    def test_preview_refuses_user_owned_readiness_page_or_component(self):
+        f = self.staged_5090()
+        with patch.object(install.rp, "_symbol", return_value=f.project), patch.object(install.rp, "_ensure") as ensure:
+            f.show.customPages = [SimpleNamespace(name=install.PAGE)]
+            with self.assertRaisesRegex(RuntimeError, "user owned"):
+                install.preview_install(f.root, **f.options)
+            f.show.customPages = []
+            f.pipe_ops[install.NODE] = SimpleNamespace(fetch=lambda *_: "another owner")
+            with self.assertRaisesRegex(RuntimeError, "user owned"):
+                install.preview_install(f.root, **f.options)
+            ensure.assert_not_called()
 
     def test_report_path_rejects_existing_and_outside_runtime(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -398,6 +398,11 @@ TOP at 1920×1080; `.47` remains the accepted launcher target. This was an idle
 check with no private generator or real geometry worker running, not a visual
 or recovery acceptance test. Only the source and runbook are shared.
 
+For a later 5090 sync, use the [named, read-only install preview](docs/SHOW_READINESS.md#prepare-a-later-5090-update)
+on the workstation's own staging TOE. It checks the exact open file, rollback,
+and existing 5090 profiles before any operators are added. The 3080 rehearsal
+TOE and launcher are not part of that update.
+
 Alternatively, presets are ready to run in place. To make an untracked local
 copy, keep it in the same directory so its relative project paths remain
 valid:
@@ -1578,8 +1583,8 @@ validate public configurations, parse PowerShell, preview the sensor wrapper,
 check TD Knowledge public wiring, and scan publication candidates/history.
 Quick runs the maintenance and Show Readiness contracts; Full additionally
 runs the complete unit suite, synthetic benchmark, and initializer/launcher
-smoke. Readiness tests cover stale and paused status, wall observations, and
-local-only report export without opening a `.toe`.
+smoke. Readiness tests cover stale and paused status, wall observations,
+named staging guards, and local-only report export without opening a `.toe`.
 Quick never substitutes for a pre-release Full check.
 
 Each run writes pass/fail, stage timings, and an explicit `not_checked` list to

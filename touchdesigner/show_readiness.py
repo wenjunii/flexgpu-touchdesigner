@@ -17,6 +17,7 @@ OWNER = "flexgpu-show-readiness/v1"
 PAGE = "Readiness"
 NODE = "SHOW_READINESS"
 PROFILES = {"3080ti_16gb": "3080", "4090": "4090", "5090": "5090"}
+GEOMETRY_BRIDGES = ("MOGE2_BRIDGE", "DEPTH_ANYTHING_GEOMETRY_BRIDGE")
 FIELDS = (
     ("Rdyoverall", "Show Readiness", "summary"),
     ("Rdynext", "Next action", "next"),
@@ -41,7 +42,7 @@ def _observe(force):
 """
 
 
-def _target(root, expected_profile, backup_path, project=None):
+def _target(root, expected_profile, backup_path, project=None, *, working_name=None):
     if root is None or root.path != "/project1/flexgpu":
         raise ValueError("Verified FlexGPU root required")
     if expected_profile not in PROFILES:
@@ -53,6 +54,8 @@ def _target(root, expected_profile, backup_path, project=None):
     name = str(current.name)
     if Path(name).name != name or machine_tag(name) != PROFILES[expected_profile]:
         raise ValueError("Working TOE tag does not match the selected profile")
+    if working_name is not None and name != working_name:
+        raise ValueError("Open the exact named staging TOE before running Readiness setup")
     source = (folder / name).resolve(strict=True)
     backup = Path(backup_path).resolve(strict=True)
     if (not all(p.parent == folder and p.is_file() and p.stat().st_size >= 1024
@@ -82,9 +85,18 @@ def _expression(path, runtime, key):
         runtime, path, key)
 
 
-def install(root, *, expected_profile, backup_path):
-    """Add only an owned observer and read-only UI; never save or start work."""
-    pipe, show = _target(root, expected_profile, backup_path)
+def _prepare_install(root, expected_profile, backup_path, working_name):
+    pipe, show = _target(root, expected_profile, backup_path, working_name=working_name)
+    if working_name is not None:
+        # The named handoff targets an existing generated-geometry project.
+        # Refuse a mixed-profile bridge rather than repairing or retuning it.
+        adapter = pipe.op("SOURCES/STREAMDIFFUSION_ADAPTER")
+        if adapter is None or adapter.op("STREAMDIFFUSION_HOST") is None:
+            raise ValueError("Named staging requires the existing managed generator host")
+        for name in GEOMETRY_BRIDGES:
+            bridge = adapter.op(name)
+            if rp._value(bridge, "Profile", "") != expected_profile:
+                raise ValueError(f"{name} is missing or does not match the {expected_profile} profile")
     old = pipe.op(NODE)
     owns = old is not None and old.fetch("managed_owner", None) == OWNER
     page = next((p for p in show.customPages if p.name == PAGE), None)
@@ -95,6 +107,22 @@ def install(root, *, expected_profile, backup_path):
     source = Path(__file__).with_name("show_readiness_runtime.py").read_text(encoding="utf-8")
     compile(source, "readiness_runtime", "exec")
     compile(CALLBACKS, "readiness_callbacks", "exec")
+    return pipe, show, owns, source
+
+
+def preview_install(root, *, expected_profile, backup_path, working_name):
+    """Check the exact staged project and prepare the installer without writes."""
+    if not isinstance(working_name, str) or not working_name.strip():
+        raise ValueError("Provide the exact staging TOE basename")
+    pipe, _, owns, _ = _prepare_install(root, expected_profile, backup_path, working_name)
+    return dict(status="preview", action="refresh_existing" if owns else "add_readiness_tab",
+                profile=expected_profile, observer=pipe.path + "/" + NODE, page=PAGE, fields=len(FIELDS),
+                applied=False, saved=False, models_started=False, live_visual_acceptance=False)
+
+
+def install(root, *, expected_profile, backup_path, working_name=None):
+    """Add only an owned observer and read-only UI; never save or start work."""
+    pipe, show, _, source = _prepare_install(root, expected_profile, backup_path, working_name)
     report = rp.BuildReport()
     observer = rp._ensure(pipe, "baseCOMP", NODE, report)
     observer.store("managed_owner", OWNER)
