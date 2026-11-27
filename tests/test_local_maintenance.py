@@ -45,6 +45,7 @@ class MaintenanceContractTests(unittest.TestCase):
         self.assertIn("$Mode -eq 'Full' -and -not $SkipPublicSync", source)
         self.assertIn("'full_unit_suite', 'synthetic_benchmark', 'initializer_smoke'", source)
         self.assertIn("'local_runtime_readiness'", source)
+        self.assertIn("'tests.test_show_readiness'", source)
         self.assertIn('Write-FlexGpuLocalReport', source)
         self.assertIn('-Config $Config -Json', source)
 

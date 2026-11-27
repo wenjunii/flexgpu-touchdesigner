@@ -22,8 +22,9 @@ The script never launches TouchDesigner or show processes. Live TouchDesigner,
 private adapter, physical sensor, dual-GPU, headset, and venue acceptance tests
 remain separate machine-local gates. It uses temporary and ignored outputs but
 never changes Git state or tracked project files.
-Quick omits the full unit suite, benchmark, and initializer smoke; it is not
-release acceptance. Both modes retain publication checks unless the caller
+Quick runs maintenance and Show Readiness contracts without the full unit
+suite, benchmark, or initializer smoke; it is not release acceptance.
+Both modes retain publication checks unless the caller
 explicitly delegates them to CI with SkipPublicSync. Optional Config runs
 read-only local diagnostics. JSON reports always enumerate unchecked areas.
 #>
@@ -587,10 +588,11 @@ try {
             throw 'Synthetic benchmark summary failed its result contract.'
         }
     } else {
-        Invoke-CheckedPython -Name 'Run quick maintenance contracts (not the full suite)' -Arguments @(
+        Invoke-CheckedPython -Name 'Run quick maintenance and Show Readiness contracts (not the full suite)' -Arguments @(
             '-m', 'unittest', '-q',
             'tests.test_ci_scope', 'tests.test_local_maintenance',
-            'tests.test_dependency_maintenance', 'tests.test_release_script_source'
+            'tests.test_dependency_maintenance', 'tests.test_release_script_source',
+            'tests.test_show_readiness'
         )
     }
 
