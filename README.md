@@ -388,6 +388,16 @@ point budget, point size 4.2, and 5 Hz geometry capture. These values apply only
 to the 3080 public control surface; selecting another profile uses that
 profile's own limits.
 
+For rehearsals, the optional [Show Readiness tab and runbook](docs/SHOW_READINESS.md)
+show whether the generator is connected, synchronized geometry is advancing,
+and the selected wall TOPs are cooking at the configured size. The panel is
+read-only; it never starts a worker or changes a feed. Its opt-in performance
+report stays under the local, ignored `runtime/` directory. The separate 3080
+`.48` rehearsal copy cold-opened with the panel installed and the single-wall
+TOP at 1920×1080; `.47` remains the accepted launcher target. This was an idle
+check with no private generator or real geometry worker running, not a visual
+or recovery acceptance test. Only the source and runbook are shared.
+
 Alternatively, presets are ready to run in place. To make an untracked local
 copy, keep it in the same directory so its relative project paths remain
 valid:
@@ -1566,8 +1576,10 @@ $env:FLEXSHOW_PYTHON = (Get-Command python).Source
 `Full` remains the default. Both modes check dependencies, compile Python,
 validate public configurations, parse PowerShell, preview the sensor wrapper,
 check TD Knowledge public wiring, and scan publication candidates/history.
-Quick runs only the maintenance-contract tests; Full additionally runs the
-complete unit suite, synthetic benchmark, and initializer/launcher smoke.
+Quick runs the maintenance and Show Readiness contracts; Full additionally
+runs the complete unit suite, synthetic benchmark, and initializer/launcher
+smoke. Readiness tests cover stale and paused status, wall observations, and
+local-only report export without opening a `.toe`.
 Quick never substitutes for a pre-release Full check.
 
 Each run writes pass/fail, stage timings, and an explicit `not_checked` list to
